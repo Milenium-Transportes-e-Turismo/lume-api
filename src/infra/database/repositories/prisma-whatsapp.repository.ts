@@ -1287,6 +1287,7 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           conversation.conversationState === ConversationState.SENT_TO_HUMAN ||
           conversation.flowStep === FlowStep.HUMAN_SERVICE;
         const automationAllowed =
+          input.automationEnabled &&
           conversation.conversationState === ConversationState.BOT_ACTIVE &&
           !humanRouted;
         const canGenerateReply = automationAllowed;

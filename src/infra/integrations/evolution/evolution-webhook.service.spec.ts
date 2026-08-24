@@ -159,6 +159,38 @@ describe('EvolutionWebhookService internal phone filtering', () => {
   });
 });
 
+describe('EvolutionWebhookService automation authorization', () => {
+  it('persiste inbound sem autorização automática quando o bot está desligado', async () => {
+    const { subject, repository } = createSubject({
+      WHATSAPP_ENABLED: false,
+    });
+
+    await handle(subject, videoWebhook(2_500_000));
+
+    expect(repository.persistWebhookMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        direction: 'inbound',
+        automationEnabled: false,
+      }),
+    );
+  });
+
+  it('autoriza o repositório a avaliar automação quando o bot está ligado', async () => {
+    const { subject, repository } = createSubject({
+      WHATSAPP_ENABLED: true,
+    });
+
+    await handle(subject, videoWebhook(2_500_000));
+
+    expect(repository.persistWebhookMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        direction: 'inbound',
+        automationEnabled: true,
+      }),
+    );
+  });
+});
+
 describe('EvolutionWebhookService media retention metadata', () => {
   it.each([2_500_000, 52_428_800])(
     'persiste vídeo suportado com %d bytes para retenção durável',

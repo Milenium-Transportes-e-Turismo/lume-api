@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { HttpEvolutionOutboundGateway } from '../evolution/evolution-outbound.client';
@@ -93,10 +93,12 @@ const EVOLUTION_RESULT_PERSISTENCE_ATTEMPTS = 2;
 export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
   readonly name = 'api' as const;
   readonly acknowledgement = 'before-execution' as const;
+  private readonly logger = new Logger(ApiWhatsAppAutomationProvider.name);
 
   private readonly normalWindowSeconds: number;
   private readonly departmentWindowSeconds: number;
   private readonly departmentPhones: Readonly<Record<string, string>>;
+  private readonly automationActiveSince: Date | null;
 
   constructor(
     private readonly repository: WhatsAppRepository,
@@ -121,6 +123,13 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
           120_000) / 1_000,
       ),
     );
+    const automationEnabled = config.get<boolean>('WHATSAPP_ENABLED') ?? false;
+    const configuredActiveSince = config.get<string>(
+      'WHATSAPP_AUTOMATION_ACTIVE_SINCE',
+    );
+    this.automationActiveSince = automationEnabled
+      ? new Date(configuredActiveSince || Date.now())
+      : null;
     this.departmentPhones = {
       MILENIUM_DIRECTOR_PHONE:
         config.get<string>('MILENIUM_DIRECTOR_PHONE') ?? '',
@@ -163,6 +172,16 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
 
     const payload = parseAutomationPayload(event.payload);
     assertEnvelopeIdentity(event, payload);
+    if (
+      this.automationActiveSince &&
+      new Date(payload.message.occurredAt) < this.automationActiveSince
+    ) {
+      this.logger.log(
+        `Evento anterior à ativação concluído sem resposta outboxId=${event.id} correlationId=${event.correlationId}`,
+      );
+      await this.complete(event, 'succeeded', [payload.eventId]);
+      return;
+    }
     const checkpoint = await this.checkpointStore.getOrCreate(
       event,
       async () => {

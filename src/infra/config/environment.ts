@@ -65,6 +65,20 @@ function optionalString(
   return value.trim();
 }
 
+function optionalIsoDateTime(config: RawEnvironment, key: string): string {
+  const value = optionalString(config, key);
+  if (!value) return '';
+  if (
+    !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ||
+    Number.isNaN(Date.parse(value))
+  ) {
+    throw new Error(
+      `${key} deve ser uma data ISO 8601 com fuso horário explícito.`,
+    );
+  }
+  return new Date(value).toISOString();
+}
+
 function commaSeparatedValues(
   config: RawEnvironment,
   key: string,
@@ -666,6 +680,10 @@ export function validateEnvironment(config: RawEnvironment): RawEnvironment {
       true,
     ),
     WHATSAPP_ENABLED: whatsappEnabled,
+    WHATSAPP_AUTOMATION_ACTIVE_SINCE: optionalIsoDateTime(
+      config,
+      'WHATSAPP_AUTOMATION_ACTIVE_SINCE',
+    ),
     WHATSAPP_MEDIA_STORAGE_DRIVER: whatsappMediaStorageDriver,
     WHATSAPP_MEDIA_STORAGE_PATH: whatsappMediaStoragePath,
     WHATSAPP_API_DISPATCH_INTERVAL_MS: positiveInteger(

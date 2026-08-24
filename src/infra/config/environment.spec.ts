@@ -247,6 +247,24 @@ describe('validateEnvironment', () => {
     });
   });
 
+  it('normaliza o marco temporal da ativação do WhatsApp', () => {
+    expect(
+      validateEnvironment({
+        ...validEnvironment,
+        WHATSAPP_AUTOMATION_ACTIVE_SINCE: '2026-08-24T14:30:00-03:00',
+      }),
+    ).toMatchObject({
+      WHATSAPP_AUTOMATION_ACTIVE_SINCE: '2026-08-24T17:30:00.000Z',
+    });
+
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        WHATSAPP_AUTOMATION_ACTIVE_SINCE: '2026-08-24 17:30:00',
+      }),
+    ).toThrow('data ISO 8601 com fuso horário explícito');
+  });
+
   it('ativa somente a automação própria da API quando o WhatsApp está habilitado', () => {
     expect(
       validateEnvironment({

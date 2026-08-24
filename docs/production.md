@@ -66,6 +66,17 @@ download ou armazenamento deve provocar reentrega do webhook.
 Quando `WHATSAPP_ENABLED=true`, a automação própria da API é iniciada. Não há
 seletor de consumidor. Não execute outro processo lendo a mesma outbox.
 
+Mensagens recebidas enquanto `WHATSAPP_ENABLED=false` continuam no histórico,
+mas o evento registra que a resposta automática não foi autorizada. Ao ligar o
+bot posteriormente, esses eventos podem ser concluídos pela outbox sem enviar
+respostas retroativas aos contatos.
+
+Em cada transição de desligado para ligado, defina
+`WHATSAPP_AUTOMATION_ACTIVE_SINCE` com o instante UTC da ativação. A API conclui
+eventos cujo `occurredAt` seja anterior a esse marco sem criar mensagem de
+saída, inclusive quando o webhook antigo chega atrasado. Se a variável estiver
+vazia, o início do processo é usado como barreira conservadora.
+
 ## Verificações pós-deploy
 
 - readiness e login sem mensagem de erro após redirecionamento;

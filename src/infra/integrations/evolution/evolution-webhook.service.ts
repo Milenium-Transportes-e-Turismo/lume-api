@@ -201,6 +201,7 @@ function configuredInternalPhones(config: ConfigService): ReadonlySet<string> {
 @Injectable()
 export class EvolutionWebhookService {
   private readonly webhookSecret: string;
+  private readonly automationEnabled: boolean;
   private readonly maximumSkewMs: number;
   private readonly maximumEventAgeMs: number;
   private readonly maximumPayloadBytes: number;
@@ -215,6 +216,7 @@ export class EvolutionWebhookService {
     config: ConfigService,
   ) {
     this.webhookSecret = config.get<string>('EVOLUTION_WEBHOOK_SECRET') ?? '';
+    this.automationEnabled = config.get<boolean>('WHATSAPP_ENABLED') ?? false;
     this.maximumSkewMs = config.get<number>('WEBHOOK_MAX_SKEW_MS') ?? 300_000;
     this.maximumEventAgeMs =
       config.get<number>('WEBHOOK_MAX_EVENT_AGE_MS') ?? 604_800_000;
@@ -319,6 +321,7 @@ export class EvolutionWebhookService {
 
     const persisted = await this.repository.persistWebhookMessage({
       channel,
+      automationEnabled: this.automationEnabled,
       externalEventId: providerMessageId,
       providerMessageId,
       correlationId,

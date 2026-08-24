@@ -20,6 +20,7 @@ export interface WebhookChannelConfiguration {
 
 export interface PersistWebhookMessageInput {
   channel: WebhookChannelConfiguration;
+  automationEnabled: boolean;
   externalEventId: string;
   providerMessageId: string;
   correlationId: string;

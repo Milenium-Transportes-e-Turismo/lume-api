@@ -100,6 +100,7 @@ function createSubject(input?: {
     Record<keyof WhatsAppRepository, ReturnType<typeof vi.fn>>
   >;
   evolutionResult?: Record<string, unknown>;
+  config?: Record<string, unknown>;
 }) {
   const calls: string[] = [];
   const repository = {
@@ -202,6 +203,7 @@ function createSubject(input?: {
     new ConfigService({
       WHATSAPP_API_DEBOUNCE_MS: 2_000,
       WHATSAPP_API_DEPARTMENT_COLLECTION_MS: 120_000,
+      ...input?.config,
     }),
   );
   return {
@@ -216,6 +218,63 @@ function createSubject(input?: {
 }
 
 describe('ApiWhatsAppAutomationProvider', () => {
+  it('conclui sem responder eventos recebidos antes da ativação atual', async () => {
+    const { subject, repository, evolution, checkpointStore, agent, calls } =
+      createSubject({
+        config: {
+          WHATSAPP_ENABLED: true,
+          WHATSAPP_AUTOMATION_ACTIVE_SINCE: '2026-08-06T12:01:00.000Z',
+        },
+      });
+
+    await subject.execute(event());
+
+    expect(repository.completeOutboxExecution).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'succeeded',
+        consumedSourceEventIds: ['evolution:source-1'],
+      }),
+    );
+    expect(repository.getAutomationBatch).not.toHaveBeenCalled();
+    expect(checkpointStore.getOrCreate).not.toHaveBeenCalled();
+    expect(repository.createOutbound).not.toHaveBeenCalled();
+    expect(evolution.send).not.toHaveBeenCalled();
+    expect(agent.complete).not.toHaveBeenCalled();
+    expect(calls).toEqual(['complete']);
+  });
+
+  it('usa o início do processo como barreira quando o marco não foi configurado', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-06T12:01:00.000Z'));
+    try {
+      const { subject, repository, evolution } = createSubject({
+        config: { WHATSAPP_ENABLED: true },
+      });
+
+      await subject.execute(event());
+
+      expect(repository.completeOutboxExecution).toHaveBeenCalled();
+      expect(repository.createOutbound).not.toHaveBeenCalled();
+      expect(evolution.send).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('processa normalmente evento recebido após a ativação atual', async () => {
+    const { subject, repository, evolution } = createSubject({
+      config: {
+        WHATSAPP_ENABLED: true,
+        WHATSAPP_AUTOMATION_ACTIVE_SINCE: '2026-08-06T11:59:00.000Z',
+      },
+    });
+
+    await subject.execute(event());
+
+    expect(repository.createOutbound).toHaveBeenCalled();
+    expect(evolution.send).toHaveBeenCalled();
+  });
+
   it('processa menu, envio e conclusão na ordem durável', async () => {
     const { subject, repository, evolution, calls } = createSubject();
 
