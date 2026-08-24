@@ -1,5 +1,7 @@
 import { isAbsolute, resolve } from 'node:path';
 
+import { MILENIUM_INTERNAL_PHONE_ENV_KEYS } from '../../domain/whatsapp/whatsapp-internal-phones';
+
 type RawEnvironment = Record<string, unknown>;
 
 function requiredString(
@@ -421,26 +423,15 @@ export function validateEnvironment(config: RawEnvironment): RawEnvironment {
       `WHATSAPP_API_EXECUTION_TIMEOUT_MS deve ser ao menos ${minimumApiExecutionTimeoutMs} para cobrir os provedores de IA configurados e o envio.`,
     );
   }
-  const departmentPhoneKeys = [
-    'MILENIUM_DIRECTOR_PHONE',
-    'MILENIUM_DEPARTMENT_PURCHASES_PHONE',
-    'MILENIUM_DEPARTMENT_CONTROLLING_PHONE',
-    'MILENIUM_DEPARTMENT_DP_PHONE',
-    'MILENIUM_DEPARTMENT_FINANCE_PHONE',
-    'MILENIUM_DEPARTMENT_MANAGEMENT_PHONE',
-    'MILENIUM_DEPARTMENT_MAINTENANCE_PHONE',
-    'MILENIUM_DEPARTMENT_MONITORING_PHONE',
-    'MILENIUM_DEPARTMENT_OPERATIONAL_PHONE',
-  ] as const;
   const departmentPhones = Object.fromEntries(
-    departmentPhoneKeys.map((key) => [
+    MILENIUM_INTERNAL_PHONE_ENV_KEYS.map((key) => [
       key,
       optionalString(config, key).replace(/\D/g, ''),
     ]),
-  ) as Record<(typeof departmentPhoneKeys)[number], string>;
+  ) as Record<(typeof MILENIUM_INTERNAL_PHONE_ENV_KEYS)[number], string>;
   if (
     apiAutomationEnabled &&
-    departmentPhoneKeys.some(
+    MILENIUM_INTERNAL_PHONE_ENV_KEYS.some(
       (key) => !/^\d{10,15}$/.test(departmentPhones[key]),
     )
   ) {

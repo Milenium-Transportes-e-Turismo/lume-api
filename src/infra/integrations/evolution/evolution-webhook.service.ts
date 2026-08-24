@@ -10,6 +10,7 @@ import {
   validationError,
 } from '../../../core/errors/app-error';
 import type { MessageKind } from '../../../domain/whatsapp/whatsapp.constants';
+import { MILENIUM_INTERNAL_PHONE_ENV_KEYS } from '../../../domain/whatsapp/whatsapp-internal-phones';
 import { normalizeWhatsAppPhone } from '../../../shared/utils/normalization';
 import { EvolutionMediaContentService } from './evolution-media-content.service';
 import { EvolutionProfilePictureService } from './evolution-profile-picture.service';
@@ -181,6 +182,22 @@ function messageTimestamp(value: unknown): Date {
   return date;
 }
 
+function configuredInternalPhones(config: ConfigService): ReadonlySet<string> {
+  const phones = MILENIUM_INTERNAL_PHONE_ENV_KEYS.flatMap((key) => {
+    const value = config.get<string>(key)?.trim();
+    if (!value) return [];
+    try {
+      return [normalizeWhatsAppPhone(value)];
+    } catch {
+      // A validação central do ambiente impede valores inválidos quando o
+      // WhatsApp está habilitado. Ignorar aqui mantém o serviço inicializável
+      // quando o recurso está desabilitado em desenvolvimento.
+      return [];
+    }
+  });
+  return new Set(phones);
+}
+
 @Injectable()
 export class EvolutionWebhookService {
   private readonly webhookSecret: string;
@@ -189,6 +206,7 @@ export class EvolutionWebhookService {
   private readonly maximumPayloadBytes: number;
   private readonly maximumAttachmentBytes: number;
   private readonly allowedMimeTypes: ReadonlySet<string>;
+  private readonly ignoredInboundPhones: ReadonlySet<string>;
 
   constructor(
     private readonly repository: WhatsAppRepository,
@@ -204,6 +222,7 @@ export class EvolutionWebhookService {
       config.get<number>('WHATSAPP_MAX_WEBHOOK_BYTES') ?? 262_144;
     this.maximumAttachmentBytes =
       config.get<number>('WHATSAPP_MAX_ATTACHMENT_BYTES') ?? 52_428_800;
+    this.ignoredInboundPhones = configuredInternalPhones(config);
     this.allowedMimeTypes = new Set(
       (
         config.get<string>('WHATSAPP_ALLOWED_MIME_TYPES') ??
@@ -271,6 +290,9 @@ export class EvolutionWebhookService {
       phoneNormalized = normalizeWhatsAppPhone(contactJid);
     } catch {
       throw validationError('Telefone do webhook fora do padrão E.164.');
+    }
+    if (!fromMe && this.ignoredInboundPhones.has(phoneNormalized)) {
+      return { accepted: true, ignored: true, reason: 'internal-phone' };
     }
     const occurredAt = messageTimestamp(data.messageTimestamp);
     if (occurredAt.valueOf() > now.valueOf() + this.maximumSkewMs) {

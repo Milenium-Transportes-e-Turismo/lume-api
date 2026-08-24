@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { WhatsAppRepository } from '../../../application/contracts/whatsapp.repository';
+import { MILENIUM_INTERNAL_PHONE_ENV_KEYS } from '../../../domain/whatsapp/whatsapp-internal-phones';
 import type { EvolutionMediaContentService } from './evolution-media-content.service';
 import type { EvolutionProfilePictureService } from './evolution-profile-picture.service';
 import { EvolutionWebhookService } from './evolution-webhook.service';
@@ -15,7 +16,7 @@ const conversationId = '00000000-0000-4000-8000-000000000003';
 const messageId = '00000000-0000-4000-8000-000000000004';
 const now = new Date('2026-08-10T12:00:00.000Z');
 
-function createSubject() {
+function createSubject(configOverrides: Record<string, unknown> = {}) {
   const repository = {
     findWebhookChannel: vi.fn(async () => ({
       id: channelId,
@@ -55,6 +56,7 @@ function createSubject() {
       WHATSAPP_MAX_ATTACHMENT_BYTES: 52_428_800,
       WHATSAPP_ALLOWED_MIME_TYPES:
         'image/jpeg,audio/ogg,video/mp4,application/pdf',
+      ...configOverrides,
     }),
   );
   return { subject, repository, mediaContent, profilePictures };
@@ -92,6 +94,70 @@ async function handle(subject: EvolutionWebhookService, body: unknown) {
     now,
   });
 }
+
+const internalPhoneCases = MILENIUM_INTERNAL_PHONE_ENV_KEYS.map(
+  (key, index) => [key, `55349999999${index}`] as const,
+);
+
+describe('EvolutionWebhookService internal phone filtering', () => {
+  it.each(internalPhoneCases)(
+    'ignora inbound configurado em %s antes de persistir ou executar mídia',
+    async (key, phone) => {
+      const { subject, repository, mediaContent, profilePictures } =
+        createSubject({ [key]: phone });
+      const body = videoWebhook(2_500_000);
+      body.data.key.remoteJid = `${phone}@s.whatsapp.net`;
+
+      await expect(handle(subject, body)).resolves.toEqual({
+        accepted: true,
+        ignored: true,
+        reason: 'internal-phone',
+      });
+      expect(repository.persistWebhookMessage).not.toHaveBeenCalled();
+      expect(mediaContent.retainWebhookMedia).not.toHaveBeenCalled();
+      expect(profilePictures.get).not.toHaveBeenCalled();
+    },
+  );
+
+  it('normaliza o telefone interno e usa remoteJidAlt quando o contato chega por LID', async () => {
+    const { subject, repository } = createSubject({
+      MILENIUM_DEPARTMENT_MANAGEMENT_PHONE: '+55 (34) 99999-9905',
+    });
+    const body = videoWebhook(2_500_000);
+    body.data.key.remoteJid = '123456789012345@lid';
+    Object.assign(body.data.key, {
+      remoteJidAlt: '5534999999905@s.whatsapp.net',
+      participant: '999999999999999@lid',
+    });
+
+    await expect(handle(subject, body)).resolves.toMatchObject({
+      ignored: true,
+      reason: 'internal-phone',
+    });
+    expect(repository.persistWebhookMessage).not.toHaveBeenCalled();
+  });
+
+  it('mantém a mensagem de saída destinada a um telefone interno no histórico', async () => {
+    const phone = '5534999999901';
+    const { subject, repository } = createSubject({
+      MILENIUM_DEPARTMENT_PURCHASES_PHONE: phone,
+    });
+    const body = videoWebhook(2_500_000);
+    body.data.key.remoteJid = `${phone}@s.whatsapp.net`;
+    body.data.key.fromMe = true;
+
+    await expect(handle(subject, body)).resolves.toMatchObject({
+      accepted: true,
+      duplicate: false,
+    });
+    expect(repository.persistWebhookMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        direction: 'outbound',
+        phoneNormalized: phone,
+      }),
+    );
+  });
+});
 
 describe('EvolutionWebhookService media retention metadata', () => {
   it.each([2_500_000, 52_428_800])(

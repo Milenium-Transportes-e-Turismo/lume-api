@@ -175,7 +175,9 @@ Quando `WHATSAPP_ENABLED=true`, configure:
 - diretório persistente `WHATSAPP_MEDIA_STORAGE_PATH` em produção;
 - `EVOLUTION_BASE_URL`, instância, chave e segredo do webhook;
 - ao menos uma chave listada em `WHATSAPP_AI_PROVIDER_ORDER`;
-- telefones `MILENIUM_DEPARTMENT_*_PHONE` usados pelos menus.
+- telefones `MILENIUM_DEPARTMENT_*_PHONE` usados pelos menus; mensagens
+  recebidas desses números e de `MILENIUM_DIRECTOR_PHONE` são aceitas pelo
+  webhook como ignoradas, sem persistência nem execução do bot.
 
 Não existe seletor de provedor de automação. Os arquivos `.env.example` e
 `.env.production.example` são a referência vigente.
