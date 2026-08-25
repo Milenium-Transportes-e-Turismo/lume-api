@@ -582,6 +582,38 @@ export function validateEnvironment(config: RawEnvironment): RawEnvironment {
       'DATABASE_TRANSACTION_TIMEOUT_MS',
       60_000,
     ),
+    VALHALLA_URL: httpUrl(
+      {
+        ...config,
+        VALHALLA_URL: config.VALHALLA_URL ?? 'http://127.0.0.1:8002',
+      },
+      'VALHALLA_URL',
+      true,
+    ),
+    NOMINATIM_URL: httpUrl(
+      {
+        ...config,
+        NOMINATIM_URL: config.NOMINATIM_URL ?? 'http://127.0.0.1:8080',
+      },
+      'NOMINATIM_URL',
+      true,
+    ),
+    ROUTING_TIMEOUT_MS: positiveInteger(config, 'ROUTING_TIMEOUT_MS', 15_000),
+    TOLL_MATCH_CORRIDOR_METERS: positiveInteger(
+      config,
+      'TOLL_MATCH_CORRIDOR_METERS',
+      60,
+    ),
+    TOLL_ALLOW_DEVELOPMENT_FIXTURES: booleanValue(
+      config,
+      'TOLL_ALLOW_DEVELOPMENT_FIXTURES',
+      false,
+    ),
+    VALHALLA_VERSION: optionalString(config, 'VALHALLA_VERSION'),
+    VALHALLA_MAP_DATA_VERSION: optionalString(
+      config,
+      'VALHALLA_MAP_DATA_VERSION',
+    ),
     PORT: positiveInteger(config, 'PORT', 3333),
     JWT_ACCESS_SECRET: jwtSecret,
     JWT_ACCESS_TTL_SECONDS: positiveInteger(

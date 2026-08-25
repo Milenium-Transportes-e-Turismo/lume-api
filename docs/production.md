@@ -3,12 +3,19 @@
 ## Preparação
 
 1. Copie `.env.production.example` para um gerenciador de segredos.
-2. Configure banco, JWT, licença, e-mail, canal WhatsApp, Evolution, os diretórios
-   persistentes `WHATSAPP_MEDIA_STORAGE_PATH` e `WHATSAPP_IMPORT_ROOT` e ao menos
-   um provedor de IA.
+2. Configure banco PostGIS, JWT, licença, e-mail, canal WhatsApp, Evolution, os
+   diretórios persistentes `WHATSAPP_MEDIA_STORAGE_PATH` e
+   `WHATSAPP_IMPORT_ROOT` e ao menos um provedor de IA.
 3. Use HTTPS para CORS, redefinição de senha e `EVOLUTION_BASE_URL`.
 4. Mantenha `SWAGGER_ENABLED=false` salvo durante diagnóstico controlado.
 5. Execute `npm ci`, `npm run prisma:deploy`, `npm run build` e `npm test`.
+
+Para habilitar o Lume Routing Core, implante Valhalla e Nominatim em rede
+privada, configure `VALHALLA_URL`, `NOMINATIM_URL`, versões do engine/grafo e
+mantenha `TOLL_ALLOW_DEVELOPMENT_FIXTURES=false`. Confirme os dois serviços com
+`node scripts/routing/check-services.mjs` antes de liberar a permissão
+`route-planner:calculate`. O runbook completo está em
+[routing/operations.md](routing/operations.md).
 
 Nunca grave segredos no repositório. A chave da Evolution, o segredo do webhook,
 JWTs e chaves de IA permanecem apenas no servidor da Tenant API.
@@ -79,6 +86,11 @@ vazia, o início do processo é usado como barreira conservadora.
 
 ## Verificações pós-deploy
 
+- PostGIS ativo, migrations de pedágio aplicadas e providers geográficos
+  respondendo somente pela rede privada;
+- cálculo controlado em `/api/v1/routing/calculations` devolve geometria,
+  distância e combustível; base tarifária ausente é sinalizada sem valores
+  fictícios;
 - readiness e login sem mensagem de erro após redirecionamento;
 - recebimento repetido do mesmo webhook gera uma única mensagem;
 - mensagem enviada no WhatsApp App/Web aparece como saída no painel e não gera

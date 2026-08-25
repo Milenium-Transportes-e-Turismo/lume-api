@@ -255,7 +255,7 @@ describe('tenant-scoped user use cases', () => {
       documentAccessMode: 'client',
       clientCategory: 'legal-entity',
       departments: ['client-company'],
-      permissionCodes: ['passengers:import', 'routes:view'],
+      permissionCodes: [],
     });
 
     expect(created).toMatchObject({
@@ -288,7 +288,7 @@ describe('tenant-scoped user use cases', () => {
       documentAccessMode: 'client',
       clientCategory: 'individual',
       departments: ['client-company'],
-      permissionCodes: ['routes:view'],
+      permissionCodes: [],
     });
 
     expect(created).toMatchObject({

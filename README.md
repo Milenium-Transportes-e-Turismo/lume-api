@@ -174,25 +174,20 @@ upload, visualizar permite consulta/download e gerenciar permite conversão.
 Novos formatos devem reutilizar `DataExchangeUseCase`,
 `DataExchangeRepository` e `DataExchangeConverter`.
 
-### Roteirização orientada por contrato
+### Lume Routing Core
 
-O tenant continua sendo a Milenium. Os clientes atendidos são `RoutingCompany`,
-podem usar CPF ou CNPJ e podem possuir usuários cliente PF ou PJ isolados por
-`routingCompanyId`. Funcionários internos autorizados também podem operar mais
-de um cliente; o cliente é selecionado na aplicação e não repetido na planilha.
+`POST /api/v1/routing/calculations` calcula uma rota técnica com Valhalla e
+Nominatim self-hosted, cruza a geometria com a base versionada de pedágios no
+PostGIS e agrega combustível e custos. O endpoint suporta coordenadas, até dez
+paradas manuais e ida/volta calculadas separadamente. Não depende de QualP,
+Google Maps nem IA.
 
-`RoutingContract` é a raiz da operação e concentra centros de custo, unidade,
-vigência, tipo, turnos, horários, veículos, capacidade, KM e periodicidade. A
-API não expõe criação manual de rota: ela gera sugestões a partir do contrato e
-dos colaboradores elegíveis, registra revisão e aprovação versionadas e publica
-somente a versão aprovada.
-
-Pontos fixos recebem código próprio, podem ser globais ou exclusivos de um
-cliente e são usados como origem/destino do contrato e embarque do colaborador.
-O modelo oficial usa colunas legíveis e a importação aceita XLSX, CSV ou TSV.
-Linhas sem CEP ficam pendentes para correção assistida pelo ViaCEP. Rotas aprovadas oferecem
-PDF/XLSX operacional e XLSX/CSV para Google My Maps. Centro de custo permanece
-no contrato e no XLSX operacional, mas não integra os formatos do My Maps.
+O cadastro genérico de clientes PF/PJ e seus usuários foi preservado em
+`/clients`; contratos, colaboradores, pontos fixos e sugestões do antigo módulo
+foram removidos. O núcleo novo não pressupõe contrato e poderá atender tanto o
+fretamento eventual quanto o contínuo. Consulte
+[docs/routing/architecture.md](docs/routing/architecture.md) e
+[docs/routing/operations.md](docs/routing/operations.md).
 
 ### Prisma Studio
 

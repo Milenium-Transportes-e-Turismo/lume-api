@@ -18,7 +18,8 @@ import { DataExchangeModule } from './modules/data-exchange/data-exchange.module
 import { DocumentManagementModule } from './modules/documents/document-management.module';
 import { PlatformAdministrationModule } from './modules/administration/platform-administration.module';
 import { AppErrorFilter } from './shared/http/filters/app-error.filter';
-import { RoutingModule } from './modules/routing/routing.module';
+import { ClientsModule } from './modules/clients/clients.module';
+import { RoutePlannerModule } from './modules/route-planner/route-planner.module';
 
 @Module({
   imports: [
@@ -51,7 +52,8 @@ import { RoutingModule } from './modules/routing/routing.module';
     DataExchangeModule,
     DocumentManagementModule,
     PlatformAdministrationModule,
-    RoutingModule,
+    ClientsModule,
+    RoutePlannerModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AppErrorFilter },

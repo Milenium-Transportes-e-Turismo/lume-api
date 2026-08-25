@@ -19,14 +19,6 @@ import { PrismaWhatsAppRepository } from './repositories/prisma-whatsapp.reposit
 import { PrismaDataExchangeRepository } from './repositories/prisma-data-exchange.repository';
 import { RoutingRepository } from '../../application/contracts/routing.repository';
 import { PrismaRoutingRepository } from './repositories/prisma-routing.repository';
-import { PassengerRepository } from '../../application/contracts/passenger.repository';
-import { PrismaPassengerRepository } from './repositories/prisma-passenger.repository';
-import { ContractRepository } from '../../application/contracts/contract.repository';
-import { PrismaContractRepository } from './repositories/prisma-contract.repository';
-import { RouteRepository } from '../../application/contracts/route.repository';
-import { PrismaRouteRepository } from './repositories/prisma-route.repository';
-import { FixedPointRepository } from '../../application/contracts/fixed-point.repository';
-import { PrismaFixedPointRepository } from './repositories/prisma-fixed-point.repository';
 
 @Global()
 @Module({
@@ -52,10 +44,6 @@ import { PrismaFixedPointRepository } from './repositories/prisma-fixed-point.re
     { provide: WhatsAppRepository, useClass: PrismaWhatsAppRepository },
     { provide: DataExchangeRepository, useClass: PrismaDataExchangeRepository },
     { provide: RoutingRepository, useClass: PrismaRoutingRepository },
-    { provide: PassengerRepository, useClass: PrismaPassengerRepository },
-    { provide: ContractRepository, useClass: PrismaContractRepository },
-    { provide: RouteRepository, useClass: PrismaRouteRepository },
-    { provide: FixedPointRepository, useClass: PrismaFixedPointRepository },
   ],
   exports: [
     PrismaService,
@@ -67,10 +55,6 @@ import { PrismaFixedPointRepository } from './repositories/prisma-fixed-point.re
     WhatsAppRepository,
     DataExchangeRepository,
     RoutingRepository,
-    PassengerRepository,
-    ContractRepository,
-    RouteRepository,
-    FixedPointRepository,
   ],
 })
 export class DatabaseModule {}
