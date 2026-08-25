@@ -1,9 +1,37 @@
+import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ValhallaRoutingProvider } from './valhalla-routing.provider';
+import { ROUTE_PLANNER_FETCHER } from './route-planner.tokens';
+
+function config() {
+  return new ConfigService({
+    VALHALLA_URL: 'http://valhalla.test',
+    ROUTING_TIMEOUT_MS: 1_000,
+    VALHALLA_VERSION: 'test',
+    VALHALLA_MAP_DATA_VERSION: 'fixture',
+  });
+}
 
 describe('ValhallaRoutingProvider', () => {
+  it('resolve o cliente HTTP pelo container de injeção do Nest', async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        { provide: ConfigService, useValue: config() },
+        { provide: ROUTE_PLANNER_FETCHER, useValue: fetcher },
+        ValhallaRoutingProvider,
+      ],
+    }).compile();
+
+    expect(moduleRef.get(ValhallaRoutingProvider)).toBeInstanceOf(
+      ValhallaRoutingProvider,
+    );
+
+    await moduleRef.close();
+  });
+
   it('converte a resposta mockada em uma rota GeoJSON sem acessar a internet', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
@@ -29,15 +57,7 @@ describe('ValhallaRoutingProvider', () => {
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       ),
     );
-    const provider = new ValhallaRoutingProvider(
-      new ConfigService({
-        VALHALLA_URL: 'http://valhalla.test',
-        ROUTING_TIMEOUT_MS: 1_000,
-        VALHALLA_VERSION: 'test',
-        VALHALLA_MAP_DATA_VERSION: 'fixture',
-      }),
-      fetcher,
-    );
+    const provider = new ValhallaRoutingProvider(config(), fetcher);
 
     const result = await provider.calculateRoute({
       direction: 'outbound',

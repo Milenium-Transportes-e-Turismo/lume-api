@@ -1,7 +1,9 @@
+import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { describe, expect, it, vi } from 'vitest';
 
 import { NominatimGeocodingProvider } from './nominatim-geocoding.provider';
+import { ROUTE_PLANNER_FETCHER } from './route-planner.tokens';
 
 function config() {
   return new ConfigService({
@@ -11,6 +13,23 @@ function config() {
 }
 
 describe('NominatimGeocodingProvider', () => {
+  it('resolve o cliente HTTP pelo container de injeção do Nest', async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        { provide: ConfigService, useValue: config() },
+        { provide: ROUTE_PLANNER_FETCHER, useValue: fetcher },
+        NominatimGeocodingProvider,
+      ],
+    }).compile();
+
+    expect(moduleRef.get(NominatimGeocodingProvider)).toBeInstanceOf(
+      NominatimGeocodingProvider,
+    );
+
+    await moduleRef.close();
+  });
+
   it('encapsula a busca de endereço sem expor o provider ao consumidor', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(

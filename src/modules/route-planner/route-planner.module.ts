@@ -8,12 +8,17 @@ import { CostEngineService } from '../../domain/route-planner/cost-engine.servic
 import { FuelCostService } from '../../domain/route-planner/fuel-cost.service';
 import { NominatimGeocodingProvider } from '../../infra/route-planner/nominatim-geocoding.provider';
 import { PrismaTollMatcherRepository } from '../../infra/route-planner/prisma-toll-matcher.repository';
+import { ROUTE_PLANNER_FETCHER } from '../../infra/route-planner/route-planner.tokens';
 import { ValhallaRoutingProvider } from '../../infra/route-planner/valhalla-routing.provider';
 import { RoutePlannerController } from './route-planner.controller';
 
 @Module({
   controllers: [RoutePlannerController],
   providers: [
+    {
+      provide: ROUTE_PLANNER_FETCHER,
+      useValue: globalThis.fetch.bind(globalThis),
+    },
     { provide: GeocodingProvider, useClass: NominatimGeocodingProvider },
     { provide: RoutingProvider, useClass: ValhallaRoutingProvider },
     { provide: TollMatcherRepository, useClass: PrismaTollMatcherRepository },
