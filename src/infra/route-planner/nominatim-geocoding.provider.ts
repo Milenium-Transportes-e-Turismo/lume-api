@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { GeocodingProvider } from '../../application/contracts/geocoding.provider';
@@ -7,8 +7,10 @@ import type {
   Coordinates,
   ResolvedRouteLocation,
 } from '../../domain/route-planner/route-planner.types';
-
-type Fetcher = typeof fetch;
+import {
+  ROUTE_PLANNER_FETCHER,
+  type RoutePlannerFetcher,
+} from './route-planner.tokens';
 
 interface NominatimPlace {
   readonly lat?: string;
@@ -24,7 +26,8 @@ export class NominatimGeocodingProvider extends GeocodingProvider {
 
   constructor(
     config: ConfigService,
-    private readonly fetcher: Fetcher = fetch,
+    @Inject(ROUTE_PLANNER_FETCHER)
+    private readonly fetcher: RoutePlannerFetcher,
   ) {
     super();
     this.baseUrl = config

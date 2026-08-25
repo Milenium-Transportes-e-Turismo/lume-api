@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import {
@@ -11,8 +11,10 @@ import type {
   RouteSegment,
 } from '../../domain/route-planner/route-planner.types';
 import { decodePolyline6 } from './polyline6';
-
-type Fetcher = typeof fetch;
+import {
+  ROUTE_PLANNER_FETCHER,
+  type RoutePlannerFetcher,
+} from './route-planner.tokens';
 
 interface ValhallaManeuver {
   readonly instruction?: string;
@@ -51,7 +53,8 @@ export class ValhallaRoutingProvider extends RoutingProvider {
 
   constructor(
     config: ConfigService,
-    private readonly fetcher: Fetcher = fetch,
+    @Inject(ROUTE_PLANNER_FETCHER)
+    private readonly fetcher: RoutePlannerFetcher,
   ) {
     super();
     this.baseUrl = config
