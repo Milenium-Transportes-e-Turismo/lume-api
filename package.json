@@ -23,6 +23,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "node scripts/prisma-studio.mjs",
+    "routing:check-services": "node scripts/routing/check-services.mjs",
     "tenant:bootstrap": "npm run prisma:generate && ts-node src/infra/cli/bootstrap-tenant.ts",
     "tenant:bootstrap:prod": "node dist/infra/cli/bootstrap-tenant.js",
     "whatsapp:import:validate": "npm run prisma:generate && ts-node src/infra/cli/import-whatsapp-current-conversations.ts validate",

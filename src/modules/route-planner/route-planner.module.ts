@@ -3,13 +3,15 @@ import { Module } from '@nestjs/common';
 import { GeocodingProvider } from '../../application/contracts/geocoding.provider';
 import { RoutingProvider } from '../../application/contracts/routing.provider';
 import { TollMatcherRepository } from '../../application/contracts/toll-matcher.repository';
+import { TollIntelligenceAgent } from '../../application/contracts/toll-intelligence.agent';
 import { CalculateRouteUseCase } from '../../application/use-cases/route-planner/calculate-route.use-case';
 import { CostEngineService } from '../../domain/route-planner/cost-engine.service';
 import { FuelCostService } from '../../domain/route-planner/fuel-cost.service';
-import { NominatimGeocodingProvider } from '../../infra/route-planner/nominatim-geocoding.provider';
+import { HeigitPeliasGeocodingProvider } from '../../infra/route-planner/heigit-pelias-geocoding.provider';
+import { OpenAiTollIntelligenceAgent } from '../../infra/route-planner/openai-toll-intelligence.agent';
+import { OpenRouteServiceRoutingProvider } from '../../infra/route-planner/open-route-service-routing.provider';
 import { PrismaTollMatcherRepository } from '../../infra/route-planner/prisma-toll-matcher.repository';
 import { ROUTE_PLANNER_FETCHER } from '../../infra/route-planner/route-planner.tokens';
-import { ValhallaRoutingProvider } from '../../infra/route-planner/valhalla-routing.provider';
 import { RoutePlannerController } from './route-planner.controller';
 
 @Module({
@@ -19,9 +21,13 @@ import { RoutePlannerController } from './route-planner.controller';
       provide: ROUTE_PLANNER_FETCHER,
       useValue: globalThis.fetch.bind(globalThis),
     },
-    { provide: GeocodingProvider, useClass: NominatimGeocodingProvider },
-    { provide: RoutingProvider, useClass: ValhallaRoutingProvider },
+    { provide: GeocodingProvider, useClass: HeigitPeliasGeocodingProvider },
+    { provide: RoutingProvider, useClass: OpenRouteServiceRoutingProvider },
     { provide: TollMatcherRepository, useClass: PrismaTollMatcherRepository },
+    {
+      provide: TollIntelligenceAgent,
+      useClass: OpenAiTollIntelligenceAgent,
+    },
     FuelCostService,
     CostEngineService,
     {
@@ -30,13 +36,23 @@ import { RoutePlannerController } from './route-planner.controller';
         geocoding: GeocodingProvider,
         routing: RoutingProvider,
         tolls: TollMatcherRepository,
+        tollIntelligence: TollIntelligenceAgent,
         fuel: FuelCostService,
         costs: CostEngineService,
-      ) => new CalculateRouteUseCase(geocoding, routing, tolls, fuel, costs),
+      ) =>
+        new CalculateRouteUseCase(
+          geocoding,
+          routing,
+          tolls,
+          tollIntelligence,
+          fuel,
+          costs,
+        ),
       inject: [
         GeocodingProvider,
         RoutingProvider,
         TollMatcherRepository,
+        TollIntelligenceAgent,
         FuelCostService,
         CostEngineService,
       ],

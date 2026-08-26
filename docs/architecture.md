@@ -245,8 +245,10 @@ destinatário principal como cópia.
 
 O núcleo novo separa geocoding, roteamento, pedágios, combustível e agregação de
 custos. O caso de uso não depende de contrato nem de uma interface específica e
-serve como base comum para fretamento eventual e contínuo. Nominatim e Valhalla
-são providers internos; o frontend fala somente com a Tenant API.
+serve como base comum para fretamento eventual e contínuo. OpenRouteService e
+Pelias são providers hospedados acessados somente pela Tenant API; Valhalla e
+Nominatim permanecem como adaptadores legados fora do runtime. A pesquisa
+assistida de pedágios é opcional e não altera valores verificados.
 
 O cadastro `RoutingCompany` foi mantido como registro genérico de clientes PF/PJ
 e vínculo de usuários cliente. As estruturas operacionais anteriores de

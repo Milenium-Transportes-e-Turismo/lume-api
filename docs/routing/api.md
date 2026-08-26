@@ -5,7 +5,7 @@
 `POST /api/v1/routing/calculations`
 
 Exige JWT do tenant e permissão `route-planner:calculate`. O frontend fala apenas
-com esta API; Valhalla, Nominatim e PostGIS não são expostos.
+com esta API; HeiGIT, OpenAI e PostGIS não são expostos ao navegador.
 
 ```json
 {
@@ -25,18 +25,26 @@ com esta API; Valhalla, Nominatim e PostGIS não são expostos.
 ```
 
 Origem, destino e cada parada aceitam alternativamente `lat` e `lng`; quando
-ambos são válidos o Nominatim não é chamado. A ordem de até dez paradas é
+ambos são válidos o Pelias não é chamado. A ordem de até dez paradas é
 preservada. Tipos de veículo: `car`, `van`, `minibus`, `bus`, `truck`; eixos: 2–9.
 
 A resposta inclui:
 
-- locais resolvidos e sua origem (`coordinates` ou `nominatim`);
+- locais resolvidos e sua origem (`coordinates` ou `pelias`);
 - `route.outbound`, `route.return` e totais estimados;
 - geometria GeoJSON `LineString`, polylines e instruções;
 - pedágios ordenados com fonte, vigência e `tariffStatus`;
 - litros e combustível estimados;
 - custo agregado e indicador de completude;
+- pesquisa opcional em `tolls.intelligence`, com faixa estimada, confiança,
+  fontes, premissas, modelo e horário;
 - tenant, identificador, horário e versões do cálculo.
+
+`tolls.count`, `tolls.total` e `cost.tolls` contêm apenas valores encontrados na
+base interna. `tolls.intelligence.usedInVerifiedTotal` é sempre `false`. Estados
+possíveis da pesquisa: `not-required`, `disabled`, `estimated` e `unavailable`.
+O frontend deve usar linguagem explícita como “estimativa pesquisada” para
+`estimated` e nunca exibi-la como tarifa confirmada.
 
 Erros previsíveis usam códigos como `GEOCODING_NOT_FOUND`, `INVALID_COORDINATES`,
 `INVALID_VEHICLE_CONFIGURATION`, `INVALID_FUEL_CONSUMPTION`, `ROUTE_NOT_FOUND`,

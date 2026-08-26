@@ -18,7 +18,7 @@ export interface ResolvedRouteLocation {
   readonly coordinates: Coordinates;
   readonly label: string;
   readonly address: string | null;
-  readonly source: 'coordinates' | 'nominatim';
+  readonly source: 'coordinates' | 'pelias' | 'nominatim';
 }
 
 export const ROUTING_VEHICLE_TYPES = [
@@ -86,4 +86,28 @@ export interface TollCalculation {
   readonly dataVersion: string | null;
   readonly items: readonly TollCalculationItem[];
   readonly matcherStrategy: string;
+}
+
+export interface TollIntelligenceSource {
+  readonly title: string;
+  readonly url: string;
+  readonly effectiveDate: string | null;
+}
+
+export type TollIntelligenceStatus =
+  'not-required' | 'disabled' | 'estimated' | 'unavailable';
+
+export interface TollIntelligenceAssessment {
+  readonly status: TollIntelligenceStatus;
+  readonly estimatedCount: number | null;
+  readonly estimatedTotalMin: number | null;
+  readonly estimatedTotalLikely: number | null;
+  readonly estimatedTotalMax: number | null;
+  readonly confidence: number | null;
+  readonly sources: readonly TollIntelligenceSource[];
+  readonly assumptions: readonly string[];
+  readonly explanation: string;
+  readonly provider: string | null;
+  readonly model: string | null;
+  readonly researchedAt: string | null;
 }

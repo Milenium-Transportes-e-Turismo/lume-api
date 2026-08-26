@@ -206,6 +206,7 @@ function configureEnvironment(mediaStoragePath: string): string {
     INSTALLATION_ID: installationId,
     LICENSE_PUBLIC_KEY_BASE64: Buffer.from(publicPem).toString('base64'),
     LICENSE_DOCUMENT: `${encoded}.${signature}`,
+    HEIGIT_API_KEY: 'heigit-api-key-for-e2e',
     TENANT_LEGAL_NAME: 'Lume E2E Ltda.',
     TENANT_TRADE_NAME: 'Lume E2E',
     TENANT_TAX_ID: '04.252.011/0001-10',
