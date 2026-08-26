@@ -107,7 +107,7 @@ export class OpenRouteServiceRoutingProvider extends RoutingProvider {
             ]),
             instructions: true,
             instructions_format: 'text',
-            language: 'pt-br',
+            language: 'pt',
             preference: 'recommended',
             units: 'm',
             ...(profile === 'driving-hgv'
