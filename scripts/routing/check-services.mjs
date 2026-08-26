@@ -1,8 +1,7 @@
 const timeoutMs = Number(process.env.ROUTING_TIMEOUT_MS ?? 15_000);
-const baseUrl = (process.env.HEIGIT_BASE_URL ?? 'https://api.heigit.org').replace(
-  /\/+$/,
-  '',
-);
+const baseUrl = (
+  process.env.HEIGIT_BASE_URL ?? 'https://api.heigit.org'
+).replace(/\/+$/, '');
 const apiKey = process.env.HEIGIT_API_KEY;
 
 if (!apiKey) {
@@ -13,11 +12,13 @@ if (!apiKey) {
     {
       name: 'HeiGIT Pelias',
       url: `${baseUrl}/pelias/v1/search?text=Uberlandia&boundary.country=BR&size=1`,
+      accept: 'application/json',
       options: {},
     },
     {
       name: 'OpenRouteService',
       url: `${baseUrl}/openrouteservice/v2/directions/driving-car/geojson`,
+      accept: 'application/geo+json',
       options: {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -39,7 +40,7 @@ if (!apiKey) {
         ...check.options,
         headers: {
           ...check.options.headers,
-          Accept: 'application/json',
+          Accept: check.accept,
           Authorization: apiKey,
           'User-Agent': 'Lume-Routing-Core/0.2',
         },

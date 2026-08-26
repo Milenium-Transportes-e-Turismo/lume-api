@@ -96,7 +96,7 @@ export class OpenRouteServiceRoutingProvider extends RoutingProvider {
         {
           method: 'POST',
           headers: {
-            Accept: 'application/geo+json, application/json',
+            Accept: 'application/geo+json',
             Authorization: this.apiKey,
             'Content-Type': 'application/json',
           },
