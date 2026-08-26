@@ -189,6 +189,7 @@ export interface ConversationListQuery {
   control?: 'bot' | 'human' | 'paused' | 'closed';
   requestStatus?: RequestStatus;
   search?: string;
+  archive?: 'active' | 'archived' | 'all';
 }
 
 export interface EnsureWhatsAppConversationResult {

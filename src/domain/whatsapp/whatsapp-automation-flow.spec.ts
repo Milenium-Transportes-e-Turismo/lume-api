@@ -9,10 +9,29 @@ import {
   decideAutomationPlan,
   deriveAiActions,
   deterministicCommandId,
+  isExplicitPositiveConfirmation,
   validateAiProviderOutput,
   type AutomationConversation,
   type WhatsAppAutomationEnvelope,
 } from './whatsapp-automation-flow';
+
+describe('isExplicitPositiveConfirmation', () => {
+  it('aceita uma confirmação seguida de informação complementar', () => {
+    expect(
+      isExplicitPositiveConfirmation('Sim. Depois passo o endereço de saída'),
+    ).toBe(true);
+    expect(
+      isExplicitPositiveConfirmation('Sim, pode confirmar. Obrigado!'),
+    ).toBe(true);
+  });
+
+  it('não trata uma frase ambígua como confirmação', () => {
+    expect(isExplicitPositiveConfirmation('Acho que sim')).toBe(false);
+    expect(isExplicitPositiveConfirmation('Ainda preciso corrigir')).toBe(
+      false,
+    );
+  });
+});
 
 function conversation(
   overrides: Partial<AutomationConversation> = {},

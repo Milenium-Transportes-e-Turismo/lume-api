@@ -1355,6 +1355,10 @@ model WhatsAppConversation {
   lastOutboundAt          DateTime?          @map("last_outbound_at")
   lastMessagePreview      String?            @map("last_message_preview") @db.VarChar(240)
   closedAt                DateTime?          @map("closed_at")
+  archivedAt              DateTime?          @map("archived_at")
+  archiveReason           String?            @map("archive_reason") @db.VarChar(40)
+  archivedByUserId        String?            @map("archived_by_user_id") @db.Uuid
+  archiveExemptedAt       DateTime?          @map("archive_exempted_at")
   createdAt               DateTime           @default(now()) @map("created_at")
   updatedAt               DateTime           @updatedAt @map("updated_at")
 
@@ -1370,6 +1374,7 @@ model WhatsAppConversation {
   @@unique([id, companyId])
   @@unique([companyId, channelId, contactId], map: "whatsapp_conversations_company_channel_contact_key")
   @@index([companyId, updatedAt])
+  @@index([companyId, archivedAt, updatedAt], map: "whatsapp_conversations_company_archived_updated_idx")
   @@index([companyId, conversationState, updatedAt])
   @@index([companyId, department, conversationState, updatedAt], map: "whatsapp_conversations_company_department_state_updated_idx")
   @@index([companyId, department, requestStatus, updatedAt], map: "whatsapp_conversations_company_department_request_updated_idx")

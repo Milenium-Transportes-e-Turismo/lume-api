@@ -4030,6 +4030,52 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       status: 'UNDER_REVIEW',
     });
 
+    const reusedProposal = await request(app.getHttpServer())
+      .post('/api/v1/whatsapp/quote-proposals')
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: 6,
+        conversationId: proposalConversation.id,
+        contactName: 'Cliente proposta PDF',
+        document: null,
+        email: 'cliente.proposta@example.test',
+        serviceType: 'Fretamento eventual',
+        origin: 'Uberlândia - MG',
+        destination: 'Brasília - DF',
+        departureAt: '2026-09-10T13:00:00.000Z',
+        returnAt: null,
+        passengerCount: 25,
+        vehicleType: 'Ônibus',
+        vehicleAtDisposal: false,
+        localTransfers: true,
+        notes: 'Solicitação pendente atualizada pelo atendente.',
+      })
+      .expect(201);
+    expect(reusedProposal.body).toMatchObject({
+      id: newProposal.body.id,
+      quoteRequest: {
+        sequence: 2,
+        status: 'under-review',
+        origin: 'Uberlândia - MG',
+        destination: 'Brasília - DF',
+        passengerCount: 25,
+      },
+      conversation: {
+        id: proposalConversation.id,
+        requestStatus: 'under-review',
+        version: 7,
+      },
+    });
+    expect(
+      await prisma.quoteRequest.count({
+        where: {
+          companyId: tenantId,
+          conversationId: proposalConversation.id,
+        },
+      }),
+    ).toBe(2);
+
     const otherAttendantSuffix = randomUUID().slice(0, 8);
     const otherAttendant = await prisma.user.create({
       data: {
@@ -4057,7 +4103,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .set('authorization', `Bearer ${accessToken}`)
       .send({
         commandId: randomUUID(),
-        expectedVersion: 6,
+        expectedVersion: 7,
         conversationId: proposalConversation.id,
         contactName: 'Cliente proposta PDF',
         serviceType: 'Fretamento eventual',
@@ -4080,7 +4126,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       }),
     ).toMatchObject({
       assignedToUserId: otherAttendant.id,
-      version: 6,
+      version: 7,
     });
     expect(
       await prisma.quoteRequest.count({

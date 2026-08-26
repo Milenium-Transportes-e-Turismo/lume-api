@@ -43,6 +43,7 @@ import {
 } from './dto/whatsapp.dto';
 import {
   dateOnlyFromDateTime,
+  parseBusinessDateTime,
   parseDateOnly,
 } from '../../domain/whatsapp/quote-schedule';
 
@@ -94,7 +95,7 @@ export class InternalWhatsAppController {
           ? null
           : /^\d{4}-\d{2}-\d{2}$/.test(body.departureAt)
             ? null
-            : new Date(body.departureAt);
+            : parseBusinessDateTime(body.departureAt, 'departureAt');
     const returnAt =
       body.returnAt === undefined
         ? undefined
@@ -102,7 +103,7 @@ export class InternalWhatsAppController {
           ? null
           : /^\d{4}-\d{2}-\d{2}$/.test(body.returnAt)
             ? null
-            : new Date(body.returnAt);
+            : parseBusinessDateTime(body.returnAt, 'returnAt');
     return this.patchQuote.execute(service.companyId, quoteRequestId, {
       ...body,
       departureDate:

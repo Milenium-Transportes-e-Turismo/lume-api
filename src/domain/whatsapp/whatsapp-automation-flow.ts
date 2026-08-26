@@ -600,7 +600,7 @@ export function isExplicitPositiveConfirmation(value: string): boolean {
     .replace(/[.!?]+$/g, '')
     .trim();
 
-  return new Set([
+  const confirmations = [
     'sim',
     'sim, confirmo',
     'sim, esta correto',
@@ -620,7 +620,17 @@ export function isExplicitPositiveConfirmation(value: string): boolean {
     'tudo certo',
     'ok',
     'okay',
-  ]).has(normalized);
+  ] as const;
+
+  return confirmations.some(
+    (confirmation) =>
+      normalized === confirmation ||
+      normalized.startsWith(`${confirmation},`) ||
+      normalized.startsWith(`${confirmation}.`) ||
+      normalized.startsWith(`${confirmation};`) ||
+      normalized.startsWith(`${confirmation}:`) ||
+      normalized.startsWith(`${confirmation} `),
+  );
 }
 
 export function appendBufferedMessage(

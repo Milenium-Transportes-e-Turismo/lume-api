@@ -39,7 +39,10 @@ const actorsByTransition: Readonly<
   'take-over': ['user'],
   'return-to-bot': ['user'],
   forward: ['user', 'system'],
+  'change-department': ['user'],
   'mark-read': ['user'],
+  archive: ['user'],
+  unarchive: ['user'],
   close: ['user'],
   'close-after-rejection': ['user'],
   'resume-awaited-reply': ['webhook', 'system'],
@@ -332,6 +335,10 @@ export function resolveConversationTransition(
         resumeFlowStep: resolveBotFlowStep(current),
       };
 
+    case 'archive':
+    case 'unarchive':
+      return current;
+
     case 'return-to-bot':
       assertState(current, ['human-active'], name);
       return {
@@ -356,6 +363,16 @@ export function resolveConversationTransition(
         flowStep: 'human-service',
         resumeState: null,
         resumeFlowStep: resolveBotFlowStep(current),
+      };
+
+    case 'change-department':
+      assertOpen(current);
+      if (!input.targetDepartment) {
+        throw validationError('Informe o novo departamento da conversa.');
+      }
+      return {
+        ...current,
+        department: input.targetDepartment,
       };
 
     case 'mark-read':

@@ -30,6 +30,7 @@ import { forbidden, notFound } from '../../core/errors/app-error';
 import { QUOTE_PROPOSAL_MAX_PDF_BYTES } from '../../domain/whatsapp/whatsapp.constants';
 import {
   dateOnlyFromDateTime,
+  parseBusinessDateTime,
   parseDateOnly,
 } from '../../domain/whatsapp/quote-schedule';
 import { CurrentUser } from '../../shared/http/decorators/current-user.decorator';
@@ -109,11 +110,11 @@ export class QuoteProposalController {
     assertCommercialDepartment(current);
     const departureAt =
       body.departureAt && !/^\d{4}-\d{2}-\d{2}$/.test(body.departureAt)
-        ? new Date(body.departureAt)
+        ? parseBusinessDateTime(body.departureAt, 'departureAt')
         : null;
     const returnAt =
       body.returnAt && !/^\d{4}-\d{2}-\d{2}$/.test(body.returnAt)
-        ? new Date(body.returnAt)
+        ? parseBusinessDateTime(body.returnAt, 'returnAt')
         : null;
     return this.proposals.create({
       ...body,
@@ -124,7 +125,9 @@ export class QuoteProposalController {
         : body.departureAt
           ? /^\d{4}-\d{2}-\d{2}$/.test(body.departureAt)
             ? parseDateOnly(body.departureAt, 'departureAt')
-            : dateOnlyFromDateTime(new Date(body.departureAt))
+            : dateOnlyFromDateTime(
+                parseBusinessDateTime(body.departureAt, 'departureAt'),
+              )
           : null,
       departureAt,
       returnDate: body.returnDate
@@ -132,7 +135,9 @@ export class QuoteProposalController {
         : body.returnAt
           ? /^\d{4}-\d{2}-\d{2}$/.test(body.returnAt)
             ? parseDateOnly(body.returnAt, 'returnAt')
-            : dateOnlyFromDateTime(new Date(body.returnAt))
+            : dateOnlyFromDateTime(
+                parseBusinessDateTime(body.returnAt, 'returnAt'),
+              )
           : null,
       returnAt,
     });
