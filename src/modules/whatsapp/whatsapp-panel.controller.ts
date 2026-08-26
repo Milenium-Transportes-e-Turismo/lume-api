@@ -34,11 +34,7 @@ import {
   QueryWhatsAppUseCase,
   TransitionWhatsAppConversationUseCase,
 } from '../../application/use-cases/whatsapp/whatsapp.use-cases';
-import {
-  conflict,
-  forbidden,
-  validationError,
-} from '../../core/errors/app-error';
+import { forbidden, validationError } from '../../core/errors/app-error';
 import { normalizeUserDepartment } from '../../domain/access/access.constants';
 import {
   MAXIMUM_PANEL_ATTACHMENT_BYTES,
@@ -113,9 +109,6 @@ export class WhatsAppPanelController {
     );
     if (conversation.conversationState === 'human-active') {
       if (conversation.assignedTo?.id === current.id) return conversation;
-      throw conflict(
-        'Esta conversa j\u00e1 est\u00e1 em atendimento por outra pessoa.',
-      );
     }
 
     return this.transition.execute({
@@ -451,6 +444,45 @@ export class WhatsAppPanelController {
     });
   }
 
+  @Post(':conversationId/actions/change-department')
+  @RequireAnyPermission('whatsapp-conversations:manage')
+  changeDepartment(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
+    @Body() body: ForwardConversationDto,
+  ) {
+    return this.panelTransition(
+      current,
+      conversationId,
+      body,
+      'change-department',
+      {
+        targetDepartment: body.targetDepartment,
+        metadata: { source: 'panel-department-change' },
+      },
+    );
+  }
+
+  @Post(':conversationId/actions/archive')
+  @RequireAnyPermission('whatsapp-conversations:manage')
+  archive(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
+    @Body() body: VersionedCommandDto,
+  ) {
+    return this.panelTransition(current, conversationId, body, 'archive');
+  }
+
+  @Post(':conversationId/actions/unarchive')
+  @RequireAnyPermission('whatsapp-conversations:manage')
+  unarchive(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
+    @Body() body: VersionedCommandDto,
+  ) {
+    return this.panelTransition(current, conversationId, body, 'unarchive');
+  }
+
   @Post(':conversationId/actions/mark-read')
   @RequireAnyPermission('whatsapp-conversations:manage')
   @ApiOkResponse({ description: 'Contador zerado com concorrência otimista.' })
@@ -502,7 +534,15 @@ export class WhatsAppPanelController {
     current: AuthenticatedPrincipal,
     conversationId: string,
     body: VersionedCommandDto,
-    name: 'take-over' | 'return-to-bot' | 'forward' | 'mark-read' | 'close',
+    name:
+      | 'take-over'
+      | 'return-to-bot'
+      | 'forward'
+      | 'change-department'
+      | 'mark-read'
+      | 'archive'
+      | 'unarchive'
+      | 'close',
     extra: {
       targetDepartment?: ForwardConversationDto['targetDepartment'];
       metadata?: Readonly<Record<string, unknown>>;

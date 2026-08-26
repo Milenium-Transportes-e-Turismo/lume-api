@@ -676,6 +676,8 @@ function presentConversation(row: ConversationWithRelations) {
     lastOutboundAt: row.lastOutboundAt?.toISOString() ?? null,
     lastMessagePreview: row.lastMessagePreview,
     closedAt: row.closedAt?.toISOString() ?? null,
+    archivedAt: row.archivedAt?.toISOString() ?? null,
+    archiveReason: row.archiveReason,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     currentQuoteRequest: row.quoteRequests[0]
@@ -1279,6 +1281,10 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             unreadCount: { increment: 1 },
             lastInboundAt: input.occurredAt,
             lastMessagePreview: preview,
+            archivedAt: null,
+            archiveReason: null,
+            archivedByUserId: null,
+            archiveExemptedAt: null,
           },
         });
 
@@ -1769,6 +1775,21 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               ? null
               : conversation.mainMenuPresentedAt,
             assignedToUserId: nextAssignedToUserId,
+            ...(input.name === 'archive'
+              ? {
+                  archivedAt: transitionedAt,
+                  archiveReason: 'manual',
+                  archivedByUserId: input.actorUserId,
+                  archiveExemptedAt: null,
+                }
+              : input.name === 'unarchive' || input.name === 'take-over'
+                ? {
+                    archivedAt: null,
+                    archiveReason: null,
+                    archivedByUserId: null,
+                    archiveExemptedAt: transitionedAt,
+                  }
+                : {}),
             unreadCount:
               input.name === 'mark-read' ||
               closing ||
@@ -1928,6 +1949,24 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
                 occurredAt: transitionedAt.toISOString(),
               }),
               createdAt: transitionedAt,
+            },
+          });
+        }
+        if (input.name === 'archive' || input.name === 'unarchive') {
+          await transaction.tenantAuditLog.create({
+            data: {
+              companyId: input.companyId,
+              actorUserId: input.actorUserId,
+              action: `whatsapp.conversation.${input.name}`,
+              targetType: 'whatsapp-conversation',
+              targetId: input.conversationId,
+              metadata: payload({
+                transitionId,
+                commandId: input.commandId,
+                expectedVersion: input.expectedVersion,
+                resultingVersion: nextVersion,
+                occurredAt: transitionedAt.toISOString(),
+              }),
             },
           });
         }
@@ -4542,13 +4581,10 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         ) {
           throw forbidden('A conversa está atribuída a outro atendente.');
         }
-        if (
+        const pendingQuote =
           conversation.quoteRequests[0]?.status === RequestStatus.UNDER_REVIEW
-        ) {
-          throw validationError(
-            'Já existe uma solicitação aguardando proposta para este cliente.',
-          );
-        }
+            ? conversation.quoteRequests[0]
+            : null;
         const actor = await transaction.user.findUnique({
           where: {
             id_companyId: {
@@ -4575,7 +4611,9 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           },
         });
 
-        const nextSequence = (conversation.quoteRequests[0]?.sequence ?? 0) + 1;
+        const nextSequence =
+          pendingQuote?.sequence ??
+          (conversation.quoteRequests[0]?.sequence ?? 0) + 1;
         const requestedAt = new Date();
         const confirmedSummary = {
           contactName: normalized.contactName,
@@ -4595,38 +4633,56 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           notes: normalized.notes,
           source: 'attendant-panel',
         };
-        const quote = await transaction.quoteRequest.create({
-          data: {
-            companyId: input.companyId,
-            conversationId: conversation.id,
-            sequence: nextSequence,
-            status: RequestStatus.UNDER_REVIEW,
-            contactName: normalized.contactName,
-            document: normalized.document,
-            email: normalized.email,
-            serviceType: normalized.serviceType,
-            origin: normalized.origin,
-            destination: normalized.destination,
-            departureDate: normalized.departureDate,
-            departureAt: normalized.departureAt,
-            returnDate: normalized.returnDate,
-            returnAt: normalized.returnAt,
-            passengerCount: normalized.passengerCount,
-            vehicleType: normalized.vehicleType,
-            vehicleAtDisposal: normalized.vehicleAtDisposal,
-            localTransfers: normalized.localTransfers,
-            notes: normalized.notes,
-            structuredData: payload({ source: 'attendant-panel' }),
-            confirmedAt: requestedAt,
-            confirmedSummary: payload(confirmedSummary),
-            confirmedVersion: 1,
-            requestedByUserId: actor.id,
-          },
-          include: {
-            requestedByUser: { select: { id: true, name: true } },
-            decidedByUser: { select: { id: true, name: true } },
-          },
-        });
+        const quoteData = {
+          companyId: input.companyId,
+          conversationId: conversation.id,
+          sequence: nextSequence,
+          status: RequestStatus.UNDER_REVIEW,
+          contactName: normalized.contactName,
+          document: normalized.document,
+          email: normalized.email,
+          serviceType: normalized.serviceType,
+          origin: normalized.origin,
+          destination: normalized.destination,
+          departureDate: normalized.departureDate,
+          departureAt: normalized.departureAt,
+          returnDate: normalized.returnDate,
+          returnAt: normalized.returnAt,
+          passengerCount: normalized.passengerCount,
+          vehicleType: normalized.vehicleType,
+          vehicleAtDisposal: normalized.vehicleAtDisposal,
+          localTransfers: normalized.localTransfers,
+          notes: normalized.notes,
+          structuredData: payload({ source: 'attendant-panel' }),
+          confirmedAt: requestedAt,
+          confirmedSummary: payload(confirmedSummary),
+          requestedByUserId: actor.id,
+        };
+        const quoteInclude = {
+          requestedByUser: { select: { id: true, name: true } },
+          decidedByUser: { select: { id: true, name: true } },
+        } as const;
+        const quote = pendingQuote
+          ? await transaction.quoteRequest.update({
+              where: {
+                id_companyId: {
+                  id: pendingQuote.id,
+                  companyId: input.companyId,
+                },
+              },
+              data: {
+                ...quoteData,
+                confirmedVersion: { increment: 1 },
+              },
+              include: quoteInclude,
+            })
+          : await transaction.quoteRequest.create({
+              data: {
+                ...quoteData,
+                confirmedVersion: 1,
+              },
+              include: quoteInclude,
+            });
 
         const updatedCount = await transaction.whatsAppConversation.updateMany({
           where: {
@@ -4642,7 +4698,9 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             resumeFlowStep: FlowStep.COMMERCIAL_FOLLOW_UP_MENU,
             assignedToUserId: actor.id,
             contextualFollowUpAt: null,
-            lastMessagePreview: `Nova solicitação de orçamento #${nextSequence}.`,
+            lastMessagePreview: pendingQuote
+              ? `Solicitação de orçamento #${nextSequence} atualizada.`
+              : `Nova solicitação de orçamento #${nextSequence}.`,
             version: { increment: 1 },
           },
         });
@@ -4702,13 +4760,16 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           data: {
             companyId: input.companyId,
             actorUserId: actor.id,
-            action: 'whatsapp.quote-proposal.create',
+            action: pendingQuote
+              ? 'whatsapp.quote-proposal.update'
+              : 'whatsapp.quote-proposal.create',
             targetType: 'quote-request',
             targetId: quote.id,
             metadata: payload({
               conversationId: conversation.id,
               sequence: nextSequence,
               commandId: input.commandId,
+              reusedPendingQuote: Boolean(pendingQuote),
             }),
           },
         });
@@ -4718,6 +4779,7 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           quoteRequest: presentQuote(quote),
           conversation: presentConversation(updatedConversation),
           proposalDocument: null,
+          reusedPendingQuote: Boolean(pendingQuote),
         };
         await transaction.integrationInbox.update({
           where: inboxKey,
@@ -6025,6 +6087,23 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
     companyId: string,
     query: ConversationListQuery,
   ): Promise<unknown> {
+    const inactiveBefore = new Date();
+    inactiveBefore.setUTCFullYear(inactiveBefore.getUTCFullYear() - 5);
+    await this.prisma.$executeRaw`
+      UPDATE "whatsapp_conversations"
+      SET
+        "archived_at" = CURRENT_TIMESTAMP,
+        "archive_reason" = 'automatic-inactivity'
+      WHERE "company_id" = ${companyId}::uuid
+        AND "archived_at" IS NULL
+        AND "archive_exempted_at" IS NULL
+        AND COALESCE(
+          GREATEST("last_inbound_at", "last_outbound_at"),
+          "last_inbound_at",
+          "last_outbound_at",
+          "created_at"
+        ) < ${inactiveBefore}
+    `;
     if (
       query.requestStatus &&
       query.department &&
@@ -6058,6 +6137,11 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
     const search = query.search?.trim();
     const where: Prisma.WhatsAppConversationWhereInput = {
       companyId,
+      ...(query.archive === 'all'
+        ? {}
+        : query.archive === 'archived'
+          ? { archivedAt: { not: null } }
+          : { archivedAt: null }),
       ...(department ? { department } : {}),
       ...(state ? { conversationState: state } : {}),
       ...(controlStates ? { conversationState: { in: controlStates } } : {}),
@@ -6302,12 +6386,6 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
       companyId,
       conversationId,
       AND: [
-        {
-          OR: [
-            { automationPurpose: null },
-            { automationPurpose: { not: 'department-notification' } },
-          ],
-        },
         ...(search
           ? [
               {

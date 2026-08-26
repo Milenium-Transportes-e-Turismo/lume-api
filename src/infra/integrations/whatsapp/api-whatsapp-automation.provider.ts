@@ -28,6 +28,7 @@ import {
 } from '../../../domain/whatsapp/whatsapp.constants';
 import {
   dateOnlyFromDateTime,
+  parseBusinessDateTime,
   parseDateOnly,
 } from '../../../domain/whatsapp/quote-schedule';
 import {
@@ -1094,8 +1095,10 @@ function applySchedulePatch(
     patch[instantKey] = null;
     return;
   }
-  const date = new Date(value);
-  if (Number.isNaN(date.valueOf())) {
+  let date: Date;
+  try {
+    date = parseBusinessDateTime(value, instantKey);
+  } catch {
     throw new WhatsAppAutomationExecutionError(
       'retryable-failure',
       'AI_DATE_INVALID',

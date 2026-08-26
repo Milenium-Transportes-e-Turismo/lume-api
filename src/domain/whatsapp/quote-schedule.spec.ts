@@ -4,6 +4,7 @@ import { AppError } from '../../core/errors/app-error';
 import {
   assertQuoteScheduleConsistency,
   dateOnlyFromDateTime,
+  parseBusinessDateTime,
   parseDateOnly,
   presentDateOnly,
 } from './quote-schedule';
@@ -31,6 +32,15 @@ describe('quote schedule', () => {
         dateOnlyFromDateTime(new Date('2026-08-01T23:30:00-03:00')),
       ),
     ).toBe('2026-08-01');
+  });
+
+  it('interpreta horário sem fuso como horário de São Paulo', () => {
+    expect(
+      parseBusinessDateTime('2027-01-29T07:00:00', 'departureAt').toISOString(),
+    ).toBe('2027-01-29T10:00:00.000Z');
+    expect(
+      parseBusinessDateTime('2027-01-31T13:30:00', 'returnAt').toISOString(),
+    ).toBe('2027-01-31T16:30:00.000Z');
   });
 
   it('aceita data de saída sem horário', () => {

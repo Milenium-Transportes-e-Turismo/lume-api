@@ -84,7 +84,9 @@ Quando a etapa 12 for respondida, grave
 A data de ida e, quando aplicável, a data de retorno são obrigatórias. O
 horário é opcional e nunca pode impedir o resumo ou a confirmação:
 
-- quando houver data e horário, use ISO 8601 com hora e grave
+- quando houver data e horário, interprete a hora informada no fuso
+  \`America/Sao_Paulo\`, use ISO 8601 com o deslocamento \`-03:00\` (nunca use o
+  fuso local do servidor) e grave
   \`structuredData.departureTimeProvided=true\` ou
   \`structuredData.returnTimeProvided=true\`;
 - quando houver somente a data, use \`YYYY-MM-DD\`, grave o marcador
@@ -156,7 +158,8 @@ pré-triagem. Quando os demais campos mínimos estiverem presentes, use
 corrigidos nesta interação. Chaves aceitas:
 
 - \`contactName\`, \`document\`, \`email\`, \`serviceType\`, \`origin\`, \`destination\`;
-- \`departureAt\`, \`returnAt\` em ISO 8601 quando houver horário ou em
+- \`departureAt\`, \`returnAt\` em ISO 8601 com o fuso
+  \`America/Sao_Paulo\` quando houver horário ou em
   \`YYYY-MM-DD\` quando o horário não for informado;
 - \`passengerCount\` como inteiro entre 1 e 500;
 - \`vehicleType\`, \`vehicleAtDisposal\`, \`localTransfers\`, \`notes\`;

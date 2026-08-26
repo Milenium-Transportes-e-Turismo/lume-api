@@ -1,6 +1,8 @@
 import { validationError } from '../../core/errors/app-error';
 
 const DATE_ONLY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+const DATE_TIME_WITHOUT_ZONE_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,3})?)?$/;
 const BUSINESS_TIME_ZONE = 'America/Sao_Paulo';
 const BUSINESS_DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
   day: '2-digit',
@@ -24,6 +26,19 @@ export function parseDateOnly(value: string, fieldName: string): Date {
     date.getUTCDate() !== day
   ) {
     throw validationError(`${fieldName} não contém uma data válida.`);
+  }
+  return date;
+}
+
+export function parseBusinessDateTime(value: string, fieldName: string): Date {
+  const normalized = DATE_TIME_WITHOUT_ZONE_PATTERN.test(value.trim())
+    ? `${value.trim()}-03:00`
+    : value.trim();
+  const date = new Date(normalized);
+  if (Number.isNaN(date.valueOf())) {
+    throw validationError(
+      `${fieldName} não contém uma data e horário válidos.`,
+    );
   }
   return date;
 }

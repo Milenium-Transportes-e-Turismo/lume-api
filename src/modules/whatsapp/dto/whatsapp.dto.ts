@@ -502,6 +502,15 @@ export class ConversationListQueryDto {
   @IsIn(REQUEST_STATUSES)
   requestStatus?: (typeof REQUEST_STATUSES)[number];
 
+  @ApiPropertyOptional({
+    enum: ['active', 'archived', 'all'],
+    default: 'active',
+    description: 'Visibilidade das conversas arquivadas no painel.',
+  })
+  @IsOptional()
+  @IsIn(['active', 'archived', 'all'])
+  archive: 'active' | 'archived' | 'all' = 'active';
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
