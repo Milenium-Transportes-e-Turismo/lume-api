@@ -82,6 +82,9 @@ describe('OpenRouteServiceRoutingProvider', () => {
     expect(fetcher.mock.calls[0]?.[0]).toContain(
       '/openrouteservice/v2/directions/driving-hgv/geojson',
     );
+    expect(fetcher.mock.calls[0]?.[1]?.headers).toMatchObject({
+      Accept: 'application/geo+json',
+    });
     const body = fetcher.mock.calls[0]?.[1]?.body;
     if (typeof body !== 'string') throw new Error('Corpo ausente.');
     expect(JSON.parse(body)).toMatchObject({
