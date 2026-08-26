@@ -44,8 +44,9 @@ set +a
 npm run routing:check-services
 ```
 
-O check faz uma busca Pelias e uma rota curta, consumindo uma pequena parcela da
-quota. Ele nunca imprime a chave. Uma resposta HTTP 401/403 normalmente indica
+O check faz uma busca Pelias e uma rota curta no perfil `driving-hgv` de ônibus,
+incluindo instruções em português (`language=pt`), e consome uma pequena parcela
+da quota. Ele nunca imprime a chave. Uma resposta HTTP 401/403 normalmente indica
 credencial ou permissão; 406 indica que um cliente desatualizado não negociou o
 formato GeoJSON; 429 indica quota/limite; timeout indica conectividade ou tempo
 insuficiente.

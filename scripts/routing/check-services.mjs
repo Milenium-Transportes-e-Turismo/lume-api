@@ -16,8 +16,8 @@ if (!apiKey) {
       options: {},
     },
     {
-      name: 'OpenRouteService',
-      url: `${baseUrl}/openrouteservice/v2/directions/driving-car/geojson`,
+      name: 'OpenRouteService driving-hgv/bus',
+      url: `${baseUrl}/openrouteservice/v2/directions/driving-hgv/geojson`,
       accept: 'application/geo+json',
       options: {
         method: 'POST',
@@ -27,7 +27,9 @@ if (!apiKey) {
             [-48.2772, -18.9186],
             [-48.2672, -18.9186],
           ],
-          instructions: false,
+          instructions: true,
+          language: 'pt',
+          options: { vehicle_type: 'bus' },
         }),
       },
     },

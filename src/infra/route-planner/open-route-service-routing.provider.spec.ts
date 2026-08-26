@@ -92,6 +92,7 @@ describe('OpenRouteServiceRoutingProvider', () => {
         [-48.2772, -18.9186],
         [-43.9345, -19.9167],
       ],
+      language: 'pt',
       options: { vehicle_type: 'bus' },
     });
   });
