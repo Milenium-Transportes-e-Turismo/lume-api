@@ -38,6 +38,20 @@ sobrescreva histórico. Antes de publicar um lote valide:
 Correções manuais precisam de usuário, justificativa e auditoria em uma evolução
 do importador. Produção deve manter `TOLL_ALLOW_DEVELOPMENT_FIXTURES=false`.
 
+## Pesquisa assistida de lacunas
+
+O agente de inteligência não substitui o pipeline oficial. Ele recebe a rota
+calculada, uma amostra limitada da geometria, rodovias reconhecidas, veículo,
+data e o resultado do PostGIS. Se a base interna estiver completa, nenhuma
+chamada de IA é realizada. Quando houver lacuna e o recurso estiver habilitado,
+o agente pesquisa fontes atuais e pode devolver uma faixa estimada.
+
+Uma resposta estimada precisa conter quantidade, mínimo, valor provável,
+máximo, confiança, premissas e pelo menos uma URL citada. Ela nunca é importada
+automaticamente. Para transformar uma descoberta em tarifa oficial ainda é
+necessário normalizar, revisar, importar transacionalmente e publicar pelo
+pipeline acima.
+
 ## Limitações atuais
 
 O corredor padrão é 60 m e pode ser ajustado por ambiente. Proximidade + rumo é

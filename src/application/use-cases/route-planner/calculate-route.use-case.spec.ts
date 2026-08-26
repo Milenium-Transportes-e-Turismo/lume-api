@@ -14,6 +14,20 @@ const geometry = {
     [-43.94, -19.92],
   ] as const,
 };
+const disabledIntelligence = {
+  status: 'disabled' as const,
+  estimatedCount: null,
+  estimatedTotalMin: null,
+  estimatedTotalLikely: null,
+  estimatedTotalMax: null,
+  confidence: null,
+  sources: [],
+  assumptions: [],
+  explanation: 'Desabilitado.',
+  provider: null,
+  model: null,
+  researchedAt: null,
+};
 
 describe('CalculateRouteUseCase', () => {
   it('calcula ida e volta em duas chamadas independentes e mantém o tenant', async () => {
@@ -68,6 +82,7 @@ describe('CalculateRouteUseCase', () => {
       { geocode } as GeocodingProvider,
       { calculateRoute },
       { match: tolls },
+      { assess: vi.fn().mockResolvedValue(disabledIntelligence) },
       new FuelCostService(),
       new CostEngineService(),
     );
@@ -128,6 +143,7 @@ describe('CalculateRouteUseCase', () => {
           matcherStrategy: 'test',
         }),
       },
+      { assess: vi.fn().mockResolvedValue(disabledIntelligence) },
       new FuelCostService(),
       new CostEngineService(),
     );
@@ -148,5 +164,81 @@ describe('CalculateRouteUseCase', () => {
     });
 
     expect(geocode).not.toHaveBeenCalled();
+  });
+
+  it('mantém a estimativa da IA separada do total verificado', async () => {
+    const assess = vi.fn().mockResolvedValue({
+      status: 'estimated',
+      estimatedCount: 2,
+      estimatedTotalMin: 20,
+      estimatedTotalLikely: 25,
+      estimatedTotalMax: 30,
+      confidence: 0.7,
+      sources: [
+        {
+          title: 'Concessionária de teste',
+          url: 'https://concessionaria.example.test/tarifas',
+          effectiveDate: '2026-08-01',
+        },
+      ],
+      assumptions: ['Tarifa para ônibus de três eixos.'],
+      explanation: 'Estimativa assistida.',
+      provider: 'test-agent',
+      model: 'test-model',
+      researchedAt: '2026-08-18T12:00:00.000Z',
+    });
+    const useCase = new CalculateRouteUseCase(
+      { geocode: vi.fn() } as unknown as GeocodingProvider,
+      {
+        calculateRoute: vi.fn().mockResolvedValue({
+          direction: 'outbound',
+          distanceKm: 100,
+          durationMinutes: 60,
+          geometry,
+          encodedPolylines: [],
+          segments: [],
+          engine: 'openrouteservice',
+          engineVersion: 'test',
+          mapDataVersion: null,
+        }),
+      },
+      {
+        match: vi.fn().mockResolvedValue({
+          count: 0,
+          total: 0,
+          complete: false,
+          dataStatus: 'unavailable',
+          dataVersion: null,
+          items: [],
+          matcherStrategy: 'test',
+        }),
+      },
+      { assess },
+      new FuelCostService(),
+      new CostEngineService(),
+    );
+
+    const result = await useCase.execute(principal, {
+      origin: { lat: -18.91, lng: -48.27 },
+      destination: { lat: -19.92, lng: -43.94 },
+      waypoints: [],
+      roundTrip: false,
+      vehicle: {
+        type: 'bus',
+        axles: 3,
+        fuelType: 'diesel',
+        consumptionKmPerLiter: 5,
+      },
+      fuelPricePerLiter: 6,
+      travelDate: '2026-08-18',
+    });
+
+    expect(result.tolls.total).toBe(0);
+    expect(result.cost.tolls).toBe(0);
+    expect(result.tolls.intelligence.usedInVerifiedTotal).toBe(false);
+    expect(result.tolls.intelligence.outbound).toMatchObject({
+      status: 'estimated',
+      estimatedTotalLikely: 25,
+    });
   });
 });

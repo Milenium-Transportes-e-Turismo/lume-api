@@ -176,18 +176,26 @@ Novos formatos devem reutilizar `DataExchangeUseCase`,
 
 ### Lume Routing Core
 
-`POST /api/v1/routing/calculations` calcula uma rota técnica com Valhalla e
-Nominatim self-hosted, cruza a geometria com a base versionada de pedágios no
-PostGIS e agrega combustível e custos. O endpoint suporta coordenadas, até dez
-paradas manuais e ida/volta calculadas separadamente. Não depende de QualP,
-Google Maps nem IA.
+`POST /api/v1/routing/calculations` calcula uma rota técnica com
+OpenRouteService, usa o Pelias hospedado pela HeiGIT para geocodificação, cruza
+a geometria com a base versionada de pedágios no PostGIS e agrega combustível e
+custos. O endpoint suporta coordenadas, até dez paradas manuais e ida/volta
+calculadas separadamente. Não depende de QualP nem Google Maps.
+
+Quando a base interna de pedágios está incompleta, um agente opcional pode
+pesquisar fontes públicas usando chave exclusiva. O resultado aparece somente
+em `tolls.intelligence`, sempre como estimativa citada, e nunca altera
+`tolls.total`, o custo verificado ou as tarifas persistidas. Valhalla e Nominatim
+permanecem como adaptadores legados compiláveis, mas não são registrados no
+módulo em execução.
 
 O cadastro genérico de clientes PF/PJ e seus usuários foi preservado em
 `/clients`; contratos, colaboradores, pontos fixos e sugestões do antigo módulo
 foram removidos. O núcleo novo não pressupõe contrato e poderá atender tanto o
 fretamento eventual quanto o contínuo. Consulte
 [docs/routing/architecture.md](docs/routing/architecture.md) e
-[docs/routing/operations.md](docs/routing/operations.md).
+[docs/routing/operations.md](docs/routing/operations.md). A ativação em
+homologação está em [docs/routing/staging.md](docs/routing/staging.md).
 
 ### Prisma Studio
 

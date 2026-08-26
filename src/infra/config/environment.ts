@@ -283,6 +283,52 @@ export function validateEnvironment(config: RawEnvironment): RawEnvironment {
   if (openAiDocumentMaxAttempts > 3) {
     throw new Error('OPENAI_DOCUMENT_MAX_ATTEMPTS deve ser no máximo 3.');
   }
+  const tollIntelligenceEnabled = booleanValue(
+    config,
+    'TOLL_INTELLIGENCE_ENABLED',
+    false,
+  );
+  const tollIntelligenceApiKey = tollIntelligenceEnabled
+    ? requiredString(config, 'TOLL_INTELLIGENCE_OPENAI_API_KEY', 20)
+    : optionalString(config, 'TOLL_INTELLIGENCE_OPENAI_API_KEY');
+  const heigitApiKey = requiredString(config, 'HEIGIT_API_KEY', 10);
+  const heigitBaseUrl = httpUrl(
+    {
+      ...config,
+      HEIGIT_BASE_URL: config.HEIGIT_BASE_URL ?? 'https://api.heigit.org',
+    },
+    'HEIGIT_BASE_URL',
+    true,
+  );
+  const tollIntelligenceBaseUrl = httpUrl(
+    {
+      ...config,
+      TOLL_INTELLIGENCE_OPENAI_BASE_URL:
+        config.TOLL_INTELLIGENCE_OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
+    },
+    'TOLL_INTELLIGENCE_OPENAI_BASE_URL',
+    true,
+  );
+  if (
+    nodeEnv === 'production' &&
+    (heigitApiKey.toLowerCase().includes('replace-with') ||
+      (tollIntelligenceEnabled &&
+        tollIntelligenceApiKey.toLowerCase().includes('replace-with')))
+  ) {
+    throw new Error(
+      'Substitua as chaves de roteirização e inteligência de pedágios em produção.',
+    );
+  }
+  if (
+    nodeEnv === 'production' &&
+    (new URL(heigitBaseUrl).protocol !== 'https:' ||
+      (tollIntelligenceEnabled &&
+        new URL(tollIntelligenceBaseUrl).protocol !== 'https:'))
+  ) {
+    throw new Error(
+      'As URLs de roteirização e inteligência de pedágios devem usar HTTPS em produção.',
+    );
+  }
   const dataExchangeMaxFileBytes = positiveInteger(
     config,
     'DATA_EXCHANGE_MAX_FILE_BYTES',
@@ -582,23 +628,24 @@ export function validateEnvironment(config: RawEnvironment): RawEnvironment {
       'DATABASE_TRANSACTION_TIMEOUT_MS',
       60_000,
     ),
-    VALHALLA_URL: httpUrl(
-      {
-        ...config,
-        VALHALLA_URL: config.VALHALLA_URL ?? 'http://127.0.0.1:8002',
-      },
-      'VALHALLA_URL',
-      true,
-    ),
-    NOMINATIM_URL: httpUrl(
-      {
-        ...config,
-        NOMINATIM_URL: config.NOMINATIM_URL ?? 'http://127.0.0.1:8080',
-      },
-      'NOMINATIM_URL',
-      true,
-    ),
+    HEIGIT_BASE_URL: heigitBaseUrl,
+    HEIGIT_API_KEY: heigitApiKey,
+    ORS_VERSION: optionalString(config, 'ORS_VERSION'),
+    ORS_MAP_DATA_VERSION: optionalString(config, 'ORS_MAP_DATA_VERSION'),
     ROUTING_TIMEOUT_MS: positiveInteger(config, 'ROUTING_TIMEOUT_MS', 15_000),
+    TOLL_INTELLIGENCE_ENABLED: tollIntelligenceEnabled,
+    TOLL_INTELLIGENCE_OPENAI_API_KEY: tollIntelligenceApiKey,
+    TOLL_INTELLIGENCE_OPENAI_BASE_URL: tollIntelligenceBaseUrl,
+    TOLL_INTELLIGENCE_OPENAI_MODEL: optionalString(
+      config,
+      'TOLL_INTELLIGENCE_OPENAI_MODEL',
+      'gpt-5.4-mini',
+    ),
+    TOLL_INTELLIGENCE_TIMEOUT_MS: positiveInteger(
+      config,
+      'TOLL_INTELLIGENCE_TIMEOUT_MS',
+      90_000,
+    ),
     TOLL_MATCH_CORRIDOR_METERS: positiveInteger(
       config,
       'TOLL_MATCH_CORRIDOR_METERS',
@@ -608,11 +655,6 @@ export function validateEnvironment(config: RawEnvironment): RawEnvironment {
       config,
       'TOLL_ALLOW_DEVELOPMENT_FIXTURES',
       false,
-    ),
-    VALHALLA_VERSION: optionalString(config, 'VALHALLA_VERSION'),
-    VALHALLA_MAP_DATA_VERSION: optionalString(
-      config,
-      'VALHALLA_MAP_DATA_VERSION',
     ),
     PORT: positiveInteger(config, 'PORT', 3333),
     JWT_ACCESS_SECRET: jwtSecret,

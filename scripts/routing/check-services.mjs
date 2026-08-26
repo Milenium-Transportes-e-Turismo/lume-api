@@ -1,32 +1,59 @@
 const timeoutMs = Number(process.env.ROUTING_TIMEOUT_MS ?? 15_000);
-const services = [
-  ['Valhalla', process.env.VALHALLA_URL, '/status'],
-  ['Nominatim', process.env.NOMINATIM_URL, '/status?format=json'],
-];
+const baseUrl = (process.env.HEIGIT_BASE_URL ?? 'https://api.heigit.org').replace(
+  /\/+$/,
+  '',
+);
+const apiKey = process.env.HEIGIT_API_KEY;
 
-let failed = false;
-for (const [name, rawUrl, path] of services) {
-  if (!rawUrl) {
-    console.error(`${name}: variável de ambiente ausente.`);
-    failed = true;
-    continue;
-  }
-  try {
-    const response = await fetch(`${rawUrl.replace(/\/+$/, '')}${path}`, {
-      headers: {
-        Accept: 'application/json',
-        'User-Agent': 'Lume-Routing-Core/0.1',
+if (!apiKey) {
+  console.error('HeiGIT: HEIGIT_API_KEY ausente.');
+  process.exitCode = 1;
+} else {
+  const checks = [
+    {
+      name: 'HeiGIT Pelias',
+      url: `${baseUrl}/pelias/v1/search?text=Uberlandia&boundary.country=BR&size=1`,
+      options: {},
+    },
+    {
+      name: 'OpenRouteService',
+      url: `${baseUrl}/openrouteservice/v2/directions/driving-car/geojson`,
+      options: {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          coordinates: [
+            [-48.2772, -18.9186],
+            [-48.2672, -18.9186],
+          ],
+          instructions: false,
+        }),
       },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    console.log(`${name}: OK`);
-  } catch (error) {
-    console.error(
-      `${name}: ${error instanceof Error ? error.message : 'falha desconhecida'}`,
-    );
-    failed = true;
-  }
-}
+    },
+  ];
 
-process.exitCode = failed ? 1 : 0;
+  let failed = false;
+  for (const check of checks) {
+    try {
+      const response = await fetch(check.url, {
+        ...check.options,
+        headers: {
+          ...check.options.headers,
+          Accept: 'application/json',
+          Authorization: apiKey,
+          'User-Agent': 'Lume-Routing-Core/0.2',
+        },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      console.log(`${check.name}: OK`);
+    } catch (error) {
+      console.error(
+        `${check.name}: ${error instanceof Error ? error.message : 'falha desconhecida'}`,
+      );
+      failed = true;
+    }
+  }
+
+  process.exitCode = failed ? 1 : 0;
+}

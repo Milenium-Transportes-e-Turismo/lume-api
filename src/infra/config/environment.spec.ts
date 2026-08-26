@@ -11,6 +11,7 @@ const validEnvironment = {
   INSTALLATION_ID: '00000000-0000-4000-8000-000000000002',
   LICENSE_PUBLIC_KEY_BASE64: 'a'.repeat(64),
   LICENSE_DOCUMENT: 'payload.signature-with-enough-characters',
+  HEIGIT_API_KEY: 'heigit-test-api-key',
 };
 const productionEmailEnvironment = {
   EMAIL_DELIVERY_ENABLED: 'true',
@@ -60,6 +61,30 @@ describe('validateEnvironment', () => {
       SUPPORT_RECIPIENT_EMAIL: 'devops@mileniumturismo.com.br',
       SUPPORT_CC_EMAIL:
         'taiane.karine@mileniumturismo.com.br,taianekas.dev@outlook.com',
+      HEIGIT_BASE_URL: 'https://api.heigit.org',
+      TOLL_INTELLIGENCE_ENABLED: false,
+      TOLL_INTELLIGENCE_OPENAI_MODEL: 'gpt-5.4-mini',
+    });
+  });
+
+  it('requires a dedicated AI key only when toll intelligence is enabled', () => {
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        TOLL_INTELLIGENCE_ENABLED: 'true',
+      }),
+    ).toThrow('TOLL_INTELLIGENCE_OPENAI_API_KEY');
+
+    expect(
+      validateEnvironment({
+        ...validEnvironment,
+        TOLL_INTELLIGENCE_ENABLED: 'true',
+        TOLL_INTELLIGENCE_OPENAI_API_KEY:
+          'dedicated-toll-intelligence-test-key',
+      }),
+    ).toMatchObject({
+      TOLL_INTELLIGENCE_ENABLED: true,
+      TOLL_INTELLIGENCE_OPENAI_API_KEY: 'dedicated-toll-intelligence-test-key',
     });
   });
 

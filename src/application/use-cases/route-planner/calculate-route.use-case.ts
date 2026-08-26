@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { GeocodingProvider } from '../../contracts/geocoding.provider';
 import { RoutingProvider } from '../../contracts/routing.provider';
 import { TollMatcherRepository } from '../../contracts/toll-matcher.repository';
+import { TollIntelligenceAgent } from '../../contracts/toll-intelligence.agent';
 import { AppError } from '../../../core/errors/app-error';
 import { CostEngineService } from '../../../domain/route-planner/cost-engine.service';
 import { FuelCostService } from '../../../domain/route-planner/fuel-cost.service';
@@ -52,6 +53,7 @@ export class CalculateRouteUseCase {
     private readonly geocoding: GeocodingProvider,
     private readonly routing: RoutingProvider,
     private readonly tollMatcher: TollMatcherRepository,
+    private readonly tollIntelligence: TollIntelligenceAgent,
     private readonly fuel: FuelCostService,
     private readonly costs: CostEngineService,
   ) {}
@@ -99,6 +101,23 @@ export class CalculateRouteUseCase {
         legs.map((route) =>
           this.tollMatcher.match({ route, vehicle: input.vehicle, travelDate }),
         ),
+      );
+      const tollIntelligenceByLeg = await Promise.all(
+        legs.map((route, index) => {
+          const outbound = route.direction === 'outbound';
+          return this.tollIntelligence.assess({
+            route,
+            origin: outbound
+              ? resolved[0]
+              : (resolved.at(-1) as ResolvedRouteLocation),
+            destination: outbound
+              ? (resolved.at(-1) as ResolvedRouteLocation)
+              : resolved[0],
+            vehicle: input.vehicle,
+            travelDate,
+            verified: tollsByLeg[index],
+          });
+        }),
       );
       const distanceKm = legs.reduce((sum, leg) => sum + leg.distanceKm, 0);
       const durationMinutes = legs.reduce(
@@ -150,6 +169,11 @@ export class CalculateRouteUseCase {
           )
             ? ('available' as const)
             : ('unavailable' as const),
+          intelligence: {
+            usedInVerifiedTotal: false,
+            outbound: tollIntelligenceByLeg[0],
+            return: tollIntelligenceByLeg[1] ?? null,
+          },
         },
         fuel,
         cost,

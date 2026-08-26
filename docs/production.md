@@ -10,10 +10,12 @@
 4. Mantenha `SWAGGER_ENABLED=false` salvo durante diagnóstico controlado.
 5. Execute `npm ci`, `npm run prisma:deploy`, `npm run build` e `npm test`.
 
-Para habilitar o Lume Routing Core, implante Valhalla e Nominatim em rede
-privada, configure `VALHALLA_URL`, `NOMINATIM_URL`, versões do engine/grafo e
-mantenha `TOLL_ALLOW_DEVELOPMENT_FIXTURES=false`. Confirme os dois serviços com
-`node scripts/routing/check-services.mjs` antes de liberar a permissão
+Para habilitar o Lume Routing Core, configure uma chave HeiGIT exclusiva no
+backend em `HEIGIT_API_KEY` e mantenha
+`TOLL_ALLOW_DEVELOPMENT_FIXTURES=false`. A pesquisa assistida de pedágios exige
+outra chave, em `TOLL_INTELLIGENCE_OPENAI_API_KEY`, e permanece desabilitada até
+ser validada no staging. Confirme roteamento e geocodificação com
+`npm run routing:check-services` antes de liberar a permissão
 `route-planner:calculate`. O runbook completo está em
 [routing/operations.md](routing/operations.md).
 
