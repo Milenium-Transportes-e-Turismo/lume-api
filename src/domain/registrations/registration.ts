@@ -159,6 +159,32 @@ function compactText(value?: string | null): string | null {
   return value?.replace(/\s+/g, ' ').trim() || null;
 }
 
+const LOWERCASE_NAME_PARTICLES = new Set(['da', 'das', 'de', 'do', 'dos', 'e']);
+
+function capitalizeNameSegment(value: string): string {
+  return value.replace(
+    /(^|[-'\u2019])(\p{L})/gu,
+    (_, prefix: string, letter: string) => {
+      return `${prefix}${letter.toLocaleUpperCase('pt-BR')}`;
+    },
+  );
+}
+
+function normalizePersonName(value?: string | null): string | null {
+  const compacted = compactText(value);
+  if (!compacted) return null;
+
+  return compacted
+    .toLocaleLowerCase('pt-BR')
+    .split(' ')
+    .map((part, index) =>
+      index > 0 && LOWERCASE_NAME_PARTICLES.has(part)
+        ? part
+        : capitalizeNameSegment(part),
+    )
+    .join(' ');
+}
+
 function hasMeaningfulName(value: string | null): value is string {
   return Boolean(value && (value.match(/\p{L}/gu)?.length ?? 0) >= 2);
 }
@@ -267,8 +293,8 @@ export function normalizeRegistrationInput(
   const tagCodes = uniqueCodes(input.tagCodes, 'Marcadores');
   const phones = normalizedPhones(input.phones);
   const emails = normalizedEmails(input.emails);
-  const firstName = compactText(input.firstName);
-  const lastName = compactText(input.lastName);
+  const firstName = normalizePersonName(input.firstName);
+  const lastName = normalizePersonName(input.lastName);
   const individualName =
     [firstName, lastName].filter(Boolean).join(' ') || null;
   const legalName = compactText(input.legalName);
