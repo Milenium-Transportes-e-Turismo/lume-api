@@ -19,6 +19,7 @@ import { DocumentManagementModule } from './modules/documents/document-managemen
 import { PlatformAdministrationModule } from './modules/administration/platform-administration.module';
 import { AppErrorFilter } from './shared/http/filters/app-error.filter';
 import { RoutingModule } from './modules/routing/routing.module';
+import { RegistrationsModule } from './modules/registrations/registrations.module';
 
 @Module({
   imports: [
@@ -52,6 +53,7 @@ import { RoutingModule } from './modules/routing/routing.module';
     DocumentManagementModule,
     PlatformAdministrationModule,
     RoutingModule,
+    RegistrationsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AppErrorFilter },
