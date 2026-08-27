@@ -20,6 +20,7 @@ import { PlatformAdministrationModule } from './modules/administration/platform-
 import { AppErrorFilter } from './shared/http/filters/app-error.filter';
 import { ClientsModule } from './modules/clients/clients.module';
 import { RoutePlannerModule } from './modules/route-planner/route-planner.module';
+import { RegistrationsModule } from './modules/registrations/registrations.module';
 
 @Module({
   imports: [
@@ -54,6 +55,7 @@ import { RoutePlannerModule } from './modules/route-planner/route-planner.module
     PlatformAdministrationModule,
     ClientsModule,
     RoutePlannerModule,
+    RegistrationsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AppErrorFilter },

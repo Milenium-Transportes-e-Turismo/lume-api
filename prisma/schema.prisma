@@ -26,6 +26,41 @@ enum RoutingClientType {
   PJ @map("pj")
 }
 
+enum RegistrationImportBatchStatus {
+  PROCESSING            @map("processing")
+  COMPLETED             @map("completed")
+  COMPLETED_WITH_ERRORS @map("completed-with-errors")
+  FAILED                @map("failed")
+}
+
+enum RegistrationCandidateStatus {
+  IMPORTED           @map("imported")
+  PROCESSING         @map("processing")
+  INSUFFICIENT_DATA  @map("insufficient-data")
+  READY_FOR_DECISION @map("ready-for-decision")
+  AMBIGUOUS          @map("ambiguous")
+  IN_REVIEW          @map("in-review")
+  UNIDENTIFIED       @map("unidentified")
+  IGNORED            @map("ignored")
+  APPROVED           @map("approved")
+  PROMOTED           @map("promoted")
+  ERROR              @map("error")
+}
+
+enum RegistrationExternalRecordKind {
+  PDF_CUSTOMER     @map("pdf-customer")
+  WHATSAPP_CONTACT @map("whatsapp-contact")
+}
+
+enum RegistrationDecisionAction {
+  START_REVIEW      @map("start-review")
+  SAVE_REVIEW       @map("save-review")
+  MARK_UNIDENTIFIED @map("mark-unidentified")
+  IGNORE            @map("ignore")
+  APPROVE           @map("approve")
+  PROMOTE           @map("promote")
+}
+
 enum TollPointType {
   PHYSICAL_PLAZA
   FREE_FLOW
@@ -335,6 +370,19 @@ model Company {
   routingCompanies              RoutingCompany[]
   routingCompanyHistoryEntries RoutingCompanyHistory[]
   routingCompanyComments       RoutingCompanyComment[]
+  registrationRoles              RegistrationRole[]
+  registrationRoleAssignments    RegistrationRoleAssignment[]
+  registrationTags               RegistrationTag[]
+  registrationTagAssignments     RegistrationTagAssignment[]
+  registrationPhones             RegistrationPhone[]
+  registrationEmails             RegistrationEmail[]
+  registrationRelationships      RegistrationRelationship[]
+  registrationExternalReferences RegistrationExternalReference[]
+  registrationImportBatches      RegistrationImportBatch[]
+  registrationExternalRecords    RegistrationExternalRecord[]
+  registrationCandidates         RegistrationCandidate[]
+  registrationCandidateSources   RegistrationCandidateSource[]
+  registrationReviewDecisions    RegistrationReviewDecision[]
 
   @@map("companies")
 }
@@ -400,6 +448,9 @@ model User {
   documentReviews               DocumentReview[]                 @relation("DocumentReviewer")
   documentStatusChanges         DocumentStatusHistory[]          @relation("DocumentStatusActor")
   apiRequestMetrics             ApiRequestMetric[]
+  registrationImportBatches      RegistrationImportBatch[]        @relation("RegistrationImportActor")
+  reviewedRegistrationCandidates RegistrationCandidate[]          @relation("RegistrationCandidateReviewer")
+  registrationReviewDecisions    RegistrationReviewDecision[]     @relation("RegistrationDecisionActor")
 
   @@unique([id, companyId])
   @@index([companyId])
@@ -419,6 +470,8 @@ model RoutingCompany {
   tradeName        String?              @map("trade_name") @db.VarChar(120)
   costCenter       String?              @map("cost_center") @db.VarChar(120)
   clientType       RoutingClientType    @default(PJ) @map("client_type")
+  firstName        String?              @map("first_name") @db.VarChar(80)
+  lastName         String?              @map("last_name") @db.VarChar(120)
   individualName  String?              @map("individual_name") @db.VarChar(160)
   cpf              String?              @db.VarChar(11)
   individualEmail String?              @map("individual_email") @db.VarChar(254)
@@ -441,6 +494,14 @@ model RoutingCompany {
   users     User[]  @relation("RoutingCompanyUsers")
   history   RoutingCompanyHistory[]
   comments  RoutingCompanyComment[]
+  roleAssignments                   RegistrationRoleAssignment[]
+  tagAssignments                    RegistrationTagAssignment[]
+  registrationPhones                RegistrationPhone[]
+  registrationEmails                RegistrationEmail[]
+  outgoingRegistrationRelationships RegistrationRelationship[]      @relation("RegistrationRelationshipSource")
+  incomingRegistrationRelationships RegistrationRelationship[]      @relation("RegistrationRelationshipTarget")
+  externalReferences                RegistrationExternalReference[]
+  promotedCandidates                RegistrationCandidate[]         @relation("RegistrationCandidatePromotion")
 
   @@unique([id, companyId])
   @@unique([companyId, taxId])
@@ -489,6 +550,317 @@ model RoutingCompanyHistory {
   @@unique([companyId, commandId])
   @@index([companyId, routingCompanyId, createdAt])
   @@map("routing_company_history")
+}
+
+model RegistrationRole {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @map("company_id") @db.Uuid
+  code      String   @db.VarChar(48)
+  name      String   @db.VarChar(80)
+  isSystem  Boolean  @default(false) @map("is_system")
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  company     Company                      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  assignments RegistrationRoleAssignment[]
+
+  @@unique([id, companyId])
+  @@unique([companyId, code])
+  @@index([companyId, active, name])
+  @@map("registration_roles")
+}
+
+model RegistrationRoleAssignment {
+  id               String   @id @default(uuid()) @db.Uuid
+  companyId        String   @map("company_id") @db.Uuid
+  registrationId   String   @map("registration_id") @db.Uuid
+  roleId           String   @map("role_id") @db.Uuid
+  assignedByUserId String?  @map("assigned_by_user_id") @db.Uuid
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  company      Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  registration RoutingCompany   @relation(fields: [registrationId, companyId], references: [id, companyId], onDelete: Cascade)
+  role         RegistrationRole @relation(fields: [roleId, companyId], references: [id, companyId], onDelete: Restrict)
+
+  @@unique([companyId, registrationId, roleId])
+  @@index([companyId, roleId, registrationId])
+  @@map("registration_role_assignments")
+}
+
+model RegistrationTag {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @map("company_id") @db.Uuid
+  code      String   @db.VarChar(64)
+  name      String   @db.VarChar(100)
+  color     String?  @db.VarChar(24)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  company     Company                     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  assignments RegistrationTagAssignment[]
+
+  @@unique([id, companyId])
+  @@unique([companyId, code])
+  @@index([companyId, active, name])
+  @@map("registration_tags")
+}
+
+model RegistrationTagAssignment {
+  id               String   @id @default(uuid()) @db.Uuid
+  companyId        String   @map("company_id") @db.Uuid
+  registrationId   String   @map("registration_id") @db.Uuid
+  tagId            String   @map("tag_id") @db.Uuid
+  assignedByUserId String?  @map("assigned_by_user_id") @db.Uuid
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  company      Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  registration RoutingCompany  @relation(fields: [registrationId, companyId], references: [id, companyId], onDelete: Cascade)
+  tag          RegistrationTag @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
+
+  @@unique([companyId, registrationId, tagId])
+  @@index([companyId, tagId, registrationId])
+  @@map("registration_tag_assignments")
+}
+
+model RegistrationPhone {
+  id                String    @id @default(uuid()) @db.Uuid
+  companyId         String    @map("company_id") @db.Uuid
+  registrationId    String    @map("registration_id") @db.Uuid
+  originalValue     String?   @map("original_value") @db.VarChar(40)
+  normalizedValue   String    @map("normalized_value") @db.VarChar(16)
+  countryCode       String    @default("55") @map("country_code") @db.VarChar(4)
+  areaCode          String?   @map("area_code") @db.VarChar(4)
+  number            String    @db.VarChar(14)
+  type              String    @default("mobile") @db.VarChar(30)
+  isPrimary         Boolean   @default(false) @map("is_primary")
+  hasWhatsApp       Boolean   @default(false) @map("has_whatsapp")
+  whatsappContactId String?   @map("whatsapp_contact_id") @db.Uuid
+  activeFrom        DateTime? @default(now()) @map("active_from") @db.Date
+  activeUntil       DateTime? @map("active_until") @db.Date
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  company      Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  registration RoutingCompany @relation(fields: [registrationId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  @@unique([companyId, registrationId, normalizedValue])
+  @@index([companyId, normalizedValue])
+  @@index([companyId, whatsappContactId])
+  @@map("registration_phones")
+}
+
+model RegistrationEmail {
+  id             String   @id @default(uuid()) @db.Uuid
+  companyId      String   @map("company_id") @db.Uuid
+  registrationId String   @map("registration_id") @db.Uuid
+  address        String   @db.VarChar(254)
+  type           String   @default("personal") @db.VarChar(30)
+  isPrimary      Boolean  @default(false) @map("is_primary")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  company      Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  registration RoutingCompany @relation(fields: [registrationId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  @@unique([companyId, registrationId, address])
+  @@index([companyId, address])
+  @@map("registration_emails")
+}
+
+model RegistrationRelationship {
+  id                   String   @id @default(uuid()) @db.Uuid
+  companyId            String   @map("company_id") @db.Uuid
+  sourceRegistrationId String   @map("source_registration_id") @db.Uuid
+  targetRegistrationId String   @map("target_registration_id") @db.Uuid
+  type                 String   @db.VarChar(60)
+  jobTitle             String?  @map("job_title") @db.VarChar(120)
+  department           String?  @db.VarChar(120)
+  isPrimary            Boolean  @default(false) @map("is_primary")
+  notes                String?  @db.Text
+  active               Boolean  @default(true)
+  version              Int      @default(1)
+  createdByUserId      String?  @map("created_by_user_id") @db.Uuid
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  company Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  source  RoutingCompany @relation("RegistrationRelationshipSource", fields: [sourceRegistrationId, companyId], references: [id, companyId], onDelete: Cascade)
+  target  RoutingCompany @relation("RegistrationRelationshipTarget", fields: [targetRegistrationId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  @@unique([companyId, sourceRegistrationId, targetRegistrationId, type])
+  @@index([companyId, targetRegistrationId, active])
+  @@map("registration_relationships")
+}
+
+model RegistrationExternalReference {
+  id                 String    @id @default(uuid()) @db.Uuid
+  companyId          String    @map("company_id") @db.Uuid
+  registrationId     String    @map("registration_id") @db.Uuid
+  provider           String    @db.VarChar(40)
+  resourceType       String    @map("resource_type") @db.VarChar(60)
+  externalResourceId String    @map("external_resource_id") @db.VarChar(200)
+  externalEtag       String?   @map("external_etag") @db.VarChar(200)
+  syncStatus         String?   @map("sync_status") @db.VarChar(40)
+  lastSyncedAt       DateTime? @map("last_synced_at") @db.Timestamptz(3)
+  metadata           Json      @default("{}") @db.JsonB
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  company      Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  registration RoutingCompany @relation(fields: [registrationId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  @@unique([companyId, provider, resourceType, externalResourceId])
+  @@index([companyId, registrationId, provider])
+  @@map("registration_external_references")
+}
+
+model RegistrationImportBatch {
+  id            String                        @id @default(uuid()) @db.Uuid
+  companyId     String                        @map("company_id") @db.Uuid
+  actorUserId   String                        @map("actor_user_id") @db.Uuid
+  fileName      String                        @map("file_name") @db.VarChar(255)
+  fileSha256    String                        @map("file_sha256") @db.Char(64)
+  source        String                        @default("whatsapp-analysis-workbook") @db.VarChar(80)
+  status        RegistrationImportBatchStatus @default(PROCESSING)
+  metadata      Json                          @default("{}") @db.JsonB
+  counts        Json                          @default("{}") @db.JsonB
+  totalRows     Int                           @default(0) @map("total_rows")
+  importedRows  Int                           @default(0) @map("imported_rows")
+  duplicateRows Int                           @default(0) @map("duplicate_rows")
+  ignoredRows   Int                           @default(0) @map("ignored_rows")
+  errorRows     Int                           @default(0) @map("error_rows")
+  errorMessage  String?                       @map("error_message") @db.VarChar(1000)
+  completedAt   DateTime?                     @map("completed_at") @db.Timestamptz(3)
+  createdAt     DateTime                      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime                      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  company    Company                      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  actor      User                         @relation("RegistrationImportActor", fields: [actorUserId, companyId], references: [id, companyId], onDelete: NoAction)
+  records    RegistrationExternalRecord[]
+  candidates RegistrationCandidate[]
+
+  @@unique([id, companyId])
+  @@unique([companyId, fileSha256])
+  @@index([companyId, status, createdAt])
+  @@map("registration_import_batches")
+}
+
+model RegistrationExternalRecord {
+  id                String                         @id @default(uuid()) @db.Uuid
+  companyId         String                         @map("company_id") @db.Uuid
+  batchId           String                         @map("batch_id") @db.Uuid
+  kind              RegistrationExternalRecordKind
+  sourceSheet       String                         @map("source_sheet") @db.VarChar(80)
+  sourceRow         Int                            @map("source_row")
+  externalId        String                         @map("external_id") @db.VarChar(200)
+  fingerprint       String                         @db.Char(64)
+  rawPayload        Json                           @map("raw_payload") @db.JsonB
+  normalizedPayload Json                           @map("normalized_payload") @db.JsonB
+  technicalRecord   Boolean                        @default(false) @map("technical_record")
+  createdAt         DateTime                       @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  company    Company                       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  batch      RegistrationImportBatch       @relation(fields: [batchId, companyId], references: [id, companyId], onDelete: Cascade)
+  candidates RegistrationCandidateSource[]
+
+  @@unique([id, companyId])
+  @@unique([companyId, kind, fingerprint])
+  @@index([companyId, kind, externalId])
+  @@index([batchId, sourceSheet, sourceRow])
+  @@map("registration_external_records")
+}
+
+model RegistrationCandidate {
+  id                     String                      @id @default(uuid()) @db.Uuid
+  companyId              String                      @map("company_id") @db.Uuid
+  batchId                String                      @map("batch_id") @db.Uuid
+  status                 RegistrationCandidateStatus @default(IMPORTED)
+  suggestedType          RoutingClientType?          @map("suggested_type")
+  confirmedType          RoutingClientType?          @map("confirmed_type")
+  displayName            String?                     @map("display_name") @db.VarChar(200)
+  normalizedName         String?                     @map("normalized_name") @db.VarChar(200)
+  documentOriginal       String?                     @map("document_original") @db.VarChar(40)
+  documentNormalized     String?                     @map("document_normalized") @db.VarChar(14)
+  documentValid          Boolean?                    @map("document_valid")
+  phoneOriginal          String?                     @map("phone_original") @db.VarChar(40)
+  phoneNormalized        String?                     @map("phone_normalized") @db.VarChar(16)
+  city                   String?                     @db.VarChar(120)
+  state                  String?                     @db.VarChar(2)
+  confidence             Int                         @default(0)
+  priority               Int                         @default(0)
+  suggestedRoles         Json                        @default("[]") @map("suggested_roles") @db.JsonB
+  suggestedRoleCodes     String[]                    @default([]) @map("suggested_role_codes")
+  evidence               Json                        @default("[]") @db.JsonB
+  qualityIssues          Json                        @default("[]") @map("quality_issues") @db.JsonB
+  minimumDataComplete    Boolean                     @default(false) @map("minimum_data_complete")
+  confirmedPayload       Json?                       @map("confirmed_payload") @db.JsonB
+  whatsappConversationId String?                     @map("whatsapp_conversation_id") @db.Uuid
+  reviewerUserId         String?                     @map("reviewer_user_id") @db.Uuid
+  reviewedAt             DateTime?                   @map("reviewed_at") @db.Timestamptz(3)
+  promotedRegistrationId String?                     @map("promoted_registration_id") @db.Uuid
+  promotedAt             DateTime?                   @map("promoted_at") @db.Timestamptz(3)
+  version                Int                         @default(1)
+  createdAt              DateTime                    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt              DateTime                    @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  company              Company                       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  batch                RegistrationImportBatch       @relation(fields: [batchId, companyId], references: [id, companyId], onDelete: Cascade)
+  reviewer             User?                         @relation("RegistrationCandidateReviewer", fields: [reviewerUserId, companyId], references: [id, companyId], onDelete: NoAction)
+  promotedRegistration RoutingCompany?               @relation("RegistrationCandidatePromotion", fields: [promotedRegistrationId, companyId], references: [id, companyId], onDelete: NoAction)
+  sources              RegistrationCandidateSource[]
+  decisions            RegistrationReviewDecision[]
+
+  @@unique([id, companyId])
+  @@index([companyId, status, priority, createdAt])
+  @@index([companyId, normalizedName])
+  @@index([companyId, phoneNormalized])
+  @@index([companyId, documentNormalized])
+  @@index([companyId, reviewerUserId, reviewedAt])
+  @@index([companyId, minimumDataComplete, priority])
+  @@map("registration_candidates")
+}
+
+model RegistrationCandidateSource {
+  id               String   @id @default(uuid()) @db.Uuid
+  companyId        String   @map("company_id") @db.Uuid
+  candidateId      String   @map("candidate_id") @db.Uuid
+  externalRecordId String   @map("external_record_id") @db.Uuid
+  matchRule        String?  @map("match_rule") @db.VarChar(80)
+  score            Int?
+  evidence         String?  @db.Text
+  isPrimary        Boolean  @default(false) @map("is_primary")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  company        Company                    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  candidate      RegistrationCandidate      @relation(fields: [candidateId, companyId], references: [id, companyId], onDelete: Cascade)
+  externalRecord RegistrationExternalRecord @relation(fields: [externalRecordId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  @@unique([companyId, candidateId, externalRecordId])
+  @@index([companyId, externalRecordId])
+  @@map("registration_candidate_sources")
+}
+
+model RegistrationReviewDecision {
+  id             String                     @id @default(uuid()) @db.Uuid
+  companyId      String                     @map("company_id") @db.Uuid
+  candidateId    String                     @map("candidate_id") @db.Uuid
+  actorUserId    String                     @map("actor_user_id") @db.Uuid
+  commandId      String                     @map("command_id") @db.Uuid
+  action         RegistrationDecisionAction
+  beforeSnapshot Json?                      @map("before_snapshot") @db.JsonB
+  afterSnapshot  Json                       @map("after_snapshot") @db.JsonB
+  note           String?                    @db.VarChar(1000)
+  createdAt      DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  company   Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  candidate RegistrationCandidate @relation(fields: [candidateId, companyId], references: [id, companyId], onDelete: Cascade)
+  actor     User                  @relation("RegistrationDecisionActor", fields: [actorUserId, companyId], references: [id, companyId], onDelete: NoAction)
+
+  @@unique([companyId, commandId])
+  @@index([companyId, candidateId, createdAt])
+  @@map("registration_review_decisions")
 }
 
 model PasswordChangeChallenge {

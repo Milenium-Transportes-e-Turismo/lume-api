@@ -6,6 +6,10 @@ import {
 } from '../../../application/contracts/repositories';
 import type { UserDepartment } from '../../../domain/access/access.constants';
 import {
+  DEFAULT_REGISTRATION_ROLES,
+  DEFAULT_REGISTRATION_TAGS,
+} from '../../../domain/registrations/registration';
+import {
   DepartmentCode,
   DocumentAccessMode,
   Prisma,
@@ -46,6 +50,19 @@ export class PrismaTenantBootstrapRepository implements TenantBootstrapRepositor
     try {
       await this.prisma.$transaction(async (transaction) => {
         await transaction.company.create({ data: input.company.props });
+        await transaction.registrationRole.createMany({
+          data: DEFAULT_REGISTRATION_ROLES.map((role) => ({
+            companyId: input.company.id,
+            ...role,
+            isSystem: true,
+          })),
+        });
+        await transaction.registrationTag.createMany({
+          data: DEFAULT_REGISTRATION_TAGS.map((tag) => ({
+            companyId: input.company.id,
+            ...tag,
+          })),
+        });
         await transaction.tenantDepartment.createMany({
           data: input.departments.map((department) => ({
             companyId: input.company.id,
