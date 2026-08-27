@@ -485,29 +485,21 @@ export class RegistrationsService {
             : undefined,
           roleAssignments: {
             create: normalized.roleCodes.map((code) => ({
-              companyId: current.companyId,
               roleId: roleByCode.get(code)!.id,
               assignedByUserId: current.id,
             })),
           },
           tagAssignments: {
             create: normalized.tagCodes.map((code) => ({
-              companyId: current.companyId,
               tagId: tagByCode.get(code)!.id,
               assignedByUserId: current.id,
             })),
           },
           registrationPhones: {
-            create: normalized.phones.map((phone) => ({
-              companyId: current.companyId,
-              ...phone,
-            })),
+            create: normalized.phones,
           },
           registrationEmails: {
-            create: normalized.emails.map((email) => ({
-              companyId: current.companyId,
-              ...email,
-            })),
+            create: normalized.emails,
           },
         },
       });
@@ -817,29 +809,21 @@ export class RegistrationsService {
               : undefined,
             roleAssignments: {
               create: roles.map((role) => ({
-                companyId: current.companyId,
                 roleId: role.id,
                 assignedByUserId: current.id,
               })),
             },
             tagAssignments: {
               create: tags.map((tag) => ({
-                companyId: current.companyId,
                 tagId: tag.id,
                 assignedByUserId: current.id,
               })),
             },
             registrationPhones: {
-              create: normalized.phones.map((phone) => ({
-                companyId: current.companyId,
-                ...phone,
-              })),
+              create: normalized.phones,
             },
             registrationEmails: {
-              create: normalized.emails.map((email) => ({
-                companyId: current.companyId,
-                ...email,
-              })),
+              create: normalized.emails,
             },
           },
           include: registrationInclude,

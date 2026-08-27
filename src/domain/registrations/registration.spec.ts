@@ -45,6 +45,22 @@ describe('normalizeRegistrationInput', () => {
     });
   });
 
+  it('normalizes uppercase person names while preserving Portuguese particles', () => {
+    const registration = normalizeRegistrationInput({
+      type: 'pf',
+      firstName: 'MARIA D\u2019\u00c1VILA',
+      lastName: 'DOS SANTOS DE SOUZA',
+      roleCodes: ['client'],
+      phones: [{ number: '(34) 99999-0000' }],
+    });
+
+    expect(registration).toMatchObject({
+      firstName: 'Maria D\u2019\u00c1vila',
+      lastName: 'Dos Santos de Souza',
+      individualName: 'Maria D\u2019\u00c1vila Dos Santos de Souza',
+    });
+  });
+
   it('requires a valid CNPJ for PJ and at least one role for every identity', () => {
     expect(() =>
       normalizeRegistrationInput({
