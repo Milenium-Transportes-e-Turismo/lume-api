@@ -2,7 +2,7 @@ import { Controller, Get, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOkResponse, ApiTags } from '@nestjs/swagger';
 
 import type { AuthenticatedPrincipal } from '../../application/presenters/user.presenter';
-import { QuoteProposalUseCase } from '../../application/use-cases/whatsapp/whatsapp.use-cases';
+import { QuoteProposalUseCase } from '../../application/use-cases/commercial/commercial-quotes.use-case';
 import { CurrentUser } from '../../shared/http/decorators/current-user.decorator';
 
 @ApiTags('Notificações')

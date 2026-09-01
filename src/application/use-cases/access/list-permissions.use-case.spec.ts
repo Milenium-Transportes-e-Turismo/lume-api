@@ -21,5 +21,15 @@ describe('ListPermissionsUseCase', () => {
       code: 'information-technology',
       name: 'Tecnologia da Informação (TI)',
     });
+    expect(catalog.permissionsByDepartment.management).toEqual(
+      expect.arrayContaining([
+        'clients:view',
+        'clients:create',
+        'clients:update',
+      ]),
+    );
+    expect(catalog.permissionsByDepartment.management).not.toContain(
+      'clients:manage',
+    );
   });
 });

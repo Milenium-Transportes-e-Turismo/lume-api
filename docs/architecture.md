@@ -1,5 +1,25 @@
 # Arquitetura do Lume Tenant API
 
+## Mapa de domínio e estado da evolução
+
+O vocabulário e as relações aprovadas estão no
+[`CONTEXT-MAP.md`](../CONTEXT-MAP.md), com decisões duráveis em
+[`docs/adr`](adr). Esses documentos descrevem a arquitetura alvo; quando o
+schema atual ainda não representa uma decisão, a lacuna fica registrada em
+[`domain-implementation-pending.md`](domain-implementation-pending.md), sem
+simular que a migração já ocorreu.
+
+Nesta etapa, o primeiro limite executável foi aprofundado sem alterar o banco:
+regras, contrato de persistência e casos de uso de propostas pertencem ao
+contexto Comercial. O módulo WhatsApp continua hospedando as rotas HTTP já
+publicadas por compatibilidade, mas usa a porta `CommercialQuoteRepository` e o
+`CommercialModule`; conversa e mensagem permanecem na porta
+`WhatsAppRepository`. O mesmo adaptador Prisma implementa as duas portas para
+preservar as transações e a fonte de verdade existentes.
+
+O lint impede que código em `src/domain` passe a depender de aplicação,
+infraestrutura ou composição HTTP.
+
 O módulo documental mantém estados e validação em `src/domain/documents`, casos
 de uso em `src/application` e composição HTTP em `src/modules/documents`.
 Solicitações guardam snapshots de checklists versionados para que alterações
@@ -63,9 +83,13 @@ O vínculo público de um usuário contém `departments[]` e
 `permissionCodes[]`. O teto permitido é a união da matriz dos departamentos; a
 permissão efetiva é formada pelas permissões implícitas mais permissões
 individuais, sempre intersectadas com esse teto. Não existe resolução indireta
-por cargo ou papel. Somente `management` contém `users:*`, `settings:*` e
-`license:view`; o seu teto administrativo não inclui recursos comerciais nem
-WhatsApp. Orçamentos exigem tanto a permissão quanto o departamento
+por cargo ou papel. O teto de `management` contém `settings:*` e `license:view`,
+mas não `users:*`; a gestão completa de usuários pertence a TI. Seu teto não
+inclui recursos comerciais nem WhatsApp. A exceção aprovada para Cadastro
+permite selecionar `clients:view`, `clients:create` e `clients:update` para
+Gerência, sem concedê-las automaticamente e sem incluir `clients:manage` ou
+`clients:history`.
+Orçamentos exigem tanto a permissão quanto o departamento
 `commercial`. Essa regra é aplicada no domínio e reforçada nos controllers de
 usuários, catálogo de permissões, licença e propostas.
 
@@ -75,6 +99,11 @@ persistência mantém `departments` e `permissionCodes` vazios. Somente um
 administrador autenticado pode criar, promover ou rebaixar outro
 administrador. `users:manage` isolado nunca eleva uma conta, e auto-rebaixamento
 ou remoção do último administrador ativo são recusados.
+
+Uma projeção de compatibilidade pode materializar o conjunto efetivo legado e
+seu fingerprint determinístico para comparação. Ela não participa da decisão
+HTTP: até o corte explícito do novo modelo, o resolvedor e o bypass
+administrativo descritos acima continuam sendo a autoridade.
 
 O catálogo atribuível contém somente Comercial, Compras, Controladoria,
 Departamento Pessoal, Financeiro, Gerência, Manutenção, Monitoramento e

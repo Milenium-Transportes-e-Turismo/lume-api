@@ -221,6 +221,9 @@ export const EMPLOYEE_SELF_SERVICE_PERMISSIONS = [
 export const MANAGEMENT_DEPARTMENT_PERMISSIONS = [
   'dashboard:view',
   'ai-agents:use',
+  'clients:view',
+  'clients:create',
+  'clients:update',
   'manuals:view',
   'manuals:create',
   'manuals:update',

@@ -1,5 +1,9 @@
 # Lume Tenant API
 
+O vocabulário canônico e as relações entre os contextos estão em
+[`CONTEXT-MAP.md`](CONTEXT-MAP.md). Decisões arquiteturais aprovadas ficam em
+[`docs/adr`](docs/adr).
+
 O fluxo reutilizável de checklists, uploads versionados, revisão humana e
 renovação está em [`docs/document-management.md`](docs/document-management.md).
 
@@ -77,7 +81,11 @@ O vínculo público de acesso é composto por um ou mais departamentos e por
 ultrapassam o teto da união desses departamentos. Não existem cargos, papéis ou
 relações indiretas de autorização no domínio, no contrato HTTP ou no schema
 atual. Assim, um usuário apenas Comercial não recebe acesso administrativo, e
-um usuário apenas Gerência não recebe acesso aos fluxos comerciais.
+um usuário apenas Gerência não recebe acesso aos fluxos comerciais. Por decisão
+explícita de produto, Gerência pode receber individualmente `clients:create` e
+`clients:update`, além de `clients:view`, para consultar, criar e editar
+Cadastros normais e temporários. Isso não concede `clients:manage`, histórico
+ou permissões comerciais.
 `isAdministrator=true` é uma autoridade explícita e separada: somente outro
 administrador pode concedê-la ou removê-la, e ela apresenta todos os
 departamentos e permissões do catálogo atual.
@@ -149,7 +157,75 @@ O atendente responsável também pode corrigir manualmente o status comercial da
 solicitação atual. A API aplica concorrência otimista, limita a alteração ao
 orçamento corrente de uma conversa aberta e registra autor, data e motivo na
 auditoria. Aprovação ou recusa continuam exigindo uma proposta efetivamente
-enviada; cancelamento e recusa exigem motivo.
+enviada; recusa exige motivo e novos cancelamentos exigem motivo e classificação
+explícita como `opportunity-abandoned` ou `acceptance-cancelled`. Ciclos antigos
+cancelados ficam como `legacy-unclassified`, enquanto a abertura de outro ciclo
+registra `superseded` sem presumir uma perda comercial.
+
+### Cadastros temporários
+
+Cadastros emergenciais são identificados por `isTemporary`, motivo, responsável
+ativo do tenant e vencimento de regularização limitado a sete dias. A resposta
+expõe as pendências que impedem ações críticas. Enquanto faltar CPF ou CNPJ de
+cliente/fornecedor, a criação ou alteração de contrato é bloqueada. A
+regularização usa `POST /api/v1/registrations/:registrationId/regularize`, com
+`commandId`, `expectedVersion` e histórico preservado.
+
+Os previews de migração não escrevem dados: a consolidação pode ser inspecionada
+em `GET /api/v1/registrations/:registrationId/consolidation-preview`, a possível
+associação de usuário em `GET /api/v1/identity/users/:userId/person-match-preview`
+e o titular legado de um envio em
+`GET /api/v1/document-management/submissions/:submissionId/legacy-subject-preview`.
+Uma recomendação por CPF não é apresentada como vínculo já confirmado. A
+associação é uma mutação separada em
+`POST /api/v1/identity/users/:userId/person-association`, exige `users:manage`,
+`commandId` e `expectedVersion`, e possui histórico em
+`GET /api/v1/identity/users/:userId/person-association-history`. Somente um CPF
+único e idêntico permite associação automática; escolhas por CPF ou e-mail
+exigem confirmação humana e motivo. Sem Pessoa aplicável, a API cria um Cadastro
+temporário para regularização sem alterar permissões nem o escopo legado do
+Usuário.
+
+### Pré-admissão por link seguro
+
+RH com `documents:manage` pode criar um acesso de 30 dias para uma Pessoa do
+Cadastro Principal em `POST /api/v1/pre-admission/accesses`, sem criar `User`.
+Renovação rotaciona o token; revogação o bloqueia imediatamente. O token bruto
+aparece somente nas respostas de criação/renovação e apenas seu hash permanece
+no PostgreSQL. O endpoint público recebe o token no corpo e expõe somente o
+escopo de tipos documentais solicitados, nunca arquivos por ID.
+
+O recebimento dos arquivos ainda não faz parte desta primeira fatia: a resposta
+declara `uploadAvailable=false` enquanto o legado documental depender de
+titular e autor do tipo `User`. A adaptação seguinte deve reutilizar a gestão e
+o armazenamento documentais existentes com Titular Principal genérico, sem
+conta fictícia ou repositório paralelo.
+
+Até a decisão organizacional, a gestão permanece fail-closed em
+`human-resources` + `documents:manage`. `human-resources` é legado e não está no
+catálogo atribuível atual, que contém Departamento Pessoal; nenhum mapeamento
+foi presumido pela implementação.
+
+### Viagens operacionais
+
+`POST /api/v1/trips` cria manualmente um rascunho a partir de contrato contínuo
+ativo e vigente. A requisição informa `expectedContractVersion`; mudanças
+seguintes usam `POST /api/v1/trips/:tripId/commands` com `commandId` e
+`expectedVersion`. A máquina preserva os caminhos `Em execução → Suspensa → Em
+execução` e `Em execução → Interrompida → encerramento antecipado`, mantendo
+planos versionados, ocorrências, evidências e histórico consultável. Nesta
+primeira fatia, serviços eventuais e efeitos financeiros/documentais ainda não
+são promovidos automaticamente para viagem.
+
+Os endpoints reconhecem as permissões canônicas `trips:view`, `trips:create`,
+`trips:update` e `trips:manage`. Durante a transição, os códigos equivalentes
+`routes:*` continuam aceitos para os usuários já provisionados; isso é
+compatibilidade de acesso, não uma fusão entre Plano de Rota e Viagem.
+
+O estado preciso dos contratos que o frontend pode consumir está em
+[docs/tenant-web-contract-readiness.md](./docs/tenant-web-contract-readiness.md).
+O quadro separa capacidades disponíveis, parciais e ainda sem endpoint para que
+o Tenant Web não transforme proteção visual ou mock em regra de negócio.
 
 Ao encerrar um atendimento, a mesma transação persiste uma mensagem de
 despedida e sua outbox antes de fechar a conversa. A saudação usa manhã, tarde

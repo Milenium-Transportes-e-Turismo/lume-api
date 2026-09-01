@@ -26,6 +26,17 @@ export const REGISTRATION_EMAIL_TYPES = [
   'other',
 ] as const;
 
+export const TEMPORARY_REGISTRATION_DEFAULT_DAYS = 7;
+
+export const REGISTRATION_REQUIREMENT_CODES = [
+  'cpf-before-regularization',
+  'cnpj-before-regularization',
+  'phone-before-regularization',
+  'driver-license-before-assignment',
+  'passenger-document-before-list-close',
+  'tax-id-before-commercial-commitment',
+] as const;
+
 export const DEFAULT_REGISTRATION_ROLES = [
   { code: 'client', name: 'Cliente' },
   { code: 'supplier', name: 'Fornecedor' },
@@ -51,6 +62,75 @@ export type RegistrationType = (typeof REGISTRATION_TYPES)[number];
 export type RegistrationStatus = (typeof REGISTRATION_STATUSES)[number];
 export type RegistrationPhoneType = (typeof REGISTRATION_PHONE_TYPES)[number];
 export type RegistrationEmailType = (typeof REGISTRATION_EMAIL_TYPES)[number];
+export type RegistrationRequirementCode =
+  (typeof REGISTRATION_REQUIREMENT_CODES)[number];
+
+export function canAuthorizeTemporaryRegistration(authority: {
+  readonly isAdministrator: boolean;
+  readonly departments: readonly string[];
+  readonly permissions: readonly string[];
+}): boolean {
+  return (
+    authority.isAdministrator ||
+    authority.departments.includes('management') ||
+    authority.permissions.includes('clients:manage')
+  );
+}
+
+export function assertRegistrationAllowsCommercialCommitment(registration: {
+  readonly isTemporary: boolean;
+  readonly regularizationRequirements: readonly string[];
+  readonly cpf: string | null;
+  readonly cnpj: string | null;
+}): void {
+  if (
+    (!registration.cpf && !registration.cnpj) ||
+    (registration.isTemporary &&
+      registration.regularizationRequirements.includes(
+        'tax-id-before-commercial-commitment',
+      ))
+  ) {
+    throw validationError(
+      'Regularize o CPF/CNPJ do Cadastro antes de criar ou alterar contratos.',
+    );
+  }
+}
+
+export function assertTemporaryRegistrationCanBeRegularized(registration: {
+  readonly type: RegistrationType;
+  readonly cpf: string | null;
+  readonly cnpj: string | null;
+  readonly phones: readonly unknown[];
+}): void {
+  if (registration.type === 'pf' && !registration.cpf) {
+    throw validationError(
+      'Informe o CPF antes de concluir a regularização da Pessoa.',
+    );
+  }
+  if (registration.type === 'pj' && !registration.cnpj) {
+    throw validationError(
+      'Informe o CNPJ antes de concluir a regularização da Empresa.',
+    );
+  }
+  if (registration.type === 'pf' && registration.phones.length === 0) {
+    throw validationError(
+      'Informe um telefone antes de concluir a regularização da Pessoa.',
+    );
+  }
+}
+
+export function registrationOperationalRequirements(
+  roleCodes: readonly string[],
+): RegistrationRequirementCode[] {
+  const requirements: RegistrationRequirementCode[] = [];
+  if (roleCodes.includes('driver')) {
+    requirements.push('driver-license-before-assignment');
+  }
+  if (roleCodes.includes('passenger')) {
+    requirements.push('passenger-document-before-list-close');
+  }
+  return requirements;
+}
 
 export interface RegistrationPhoneInput {
   originalValue?: string | null;
@@ -81,6 +161,10 @@ export interface RegistrationInput {
   tagCodes?: string[];
   phones?: RegistrationPhoneInput[];
   emails?: RegistrationEmailInput[];
+  isTemporary?: boolean;
+  temporaryReason?: string | null;
+  regularizationDueAt?: string | Date | null;
+  temporaryResponsibleUserId?: string | null;
 }
 
 export interface NormalizedRegistrationPhone {
@@ -123,6 +207,11 @@ export interface NormalizedRegistrationInput {
   legalEmail: string | null;
   legalWhatsapp: string | null;
   legalPhones: { number: string; description: string | null }[];
+  isTemporary: boolean;
+  temporaryReason: string | null;
+  regularizationDueAt: Date | null;
+  regularizationRequirements: RegistrationRequirementCode[];
+  temporaryResponsibleUserId: string | null;
 }
 
 export interface RegistrationGraphInput {
@@ -248,9 +337,115 @@ function normalizedEmails(
   return emails;
 }
 
+function addDays(value: Date, days: number): Date {
+  const result = new Date(value);
+  result.setUTCDate(result.getUTCDate() + days);
+  return result;
+}
+
+function normalizeTemporaryRegistration(
+  input: RegistrationInput,
+  now: Date,
+  allowExpiredDeadline: boolean,
+  context: {
+    cpf: string | null;
+    cnpj: string | null;
+    roleCodes: string[];
+    phones: NormalizedRegistrationPhone[];
+    emails: NormalizedRegistrationEmail[];
+  },
+): Pick<
+  NormalizedRegistrationInput,
+  | 'isTemporary'
+  | 'temporaryReason'
+  | 'regularizationDueAt'
+  | 'regularizationRequirements'
+  | 'temporaryResponsibleUserId'
+> {
+  if (input.isTemporary !== true) {
+    return {
+      isTemporary: false,
+      temporaryReason: null,
+      regularizationDueAt: null,
+      regularizationRequirements: [],
+      temporaryResponsibleUserId: null,
+    };
+  }
+
+  const temporaryReason = compactText(input.temporaryReason);
+  if (!temporaryReason || temporaryReason.length > 500) {
+    throw validationError(
+      'Informe o motivo do Cadastro temporário, com até 500 caracteres.',
+    );
+  }
+  if (context.phones.length === 0 && context.emails.length === 0) {
+    throw validationError(
+      'Cadastro temporário precisa de pelo menos um telefone ou e-mail.',
+    );
+  }
+  const temporaryResponsibleUserId = compactText(
+    input.temporaryResponsibleUserId,
+  );
+  if (!temporaryResponsibleUserId) {
+    throw validationError(
+      'Informe o responsável pela regularização do Cadastro temporário.',
+    );
+  }
+
+  const maximumDueAt = addDays(now, TEMPORARY_REGISTRATION_DEFAULT_DAYS);
+  const regularizationDueAt = input.regularizationDueAt
+    ? new Date(input.regularizationDueAt)
+    : maximumDueAt;
+  if (Number.isNaN(regularizationDueAt.getTime())) {
+    throw validationError('Informe um vencimento válido para a regularização.');
+  }
+  if (
+    (!allowExpiredDeadline && regularizationDueAt.getTime() <= now.getTime()) ||
+    regularizationDueAt.getTime() > maximumDueAt.getTime()
+  ) {
+    throw validationError(
+      'O vencimento da regularização deve ocorrer em até 7 dias.',
+    );
+  }
+
+  const requirements = new Set<RegistrationRequirementCode>();
+  if (input.type === 'pf' && !context.cpf) {
+    requirements.add('cpf-before-regularization');
+  }
+  if (input.type === 'pj' && !context.cnpj) {
+    requirements.add('cnpj-before-regularization');
+  }
+  if (input.type === 'pf' && context.phones.length === 0) {
+    requirements.add('phone-before-regularization');
+  }
+  for (const requirement of registrationOperationalRequirements(
+    context.roleCodes,
+  )) {
+    requirements.add(requirement);
+  }
+  if (
+    (context.roleCodes.includes('client') ||
+      context.roleCodes.includes('supplier')) &&
+    !context.cpf &&
+    !context.cnpj
+  ) {
+    requirements.add('tax-id-before-commercial-commitment');
+  }
+
+  return {
+    isTemporary: true,
+    temporaryReason,
+    regularizationDueAt,
+    regularizationRequirements: [...requirements],
+    temporaryResponsibleUserId,
+  };
+}
+
 export function normalizeRegistrationInput(
   input: RegistrationInput,
   registrationId: string = randomUUID(),
+  now: Date = new Date(),
+  allowExpiredTemporaryDeadline = false,
 ): NormalizedRegistrationInput {
   if (!REGISTRATION_TYPES.includes(input.type)) {
     throw validationError('Selecione Pessoa Física ou Pessoa Jurídica.');
@@ -275,20 +470,32 @@ export function normalizeRegistrationInput(
   const tradeName = compactText(input.tradeName);
   const cpf = normalizeTaxId(input.cpf ?? '') || null;
   const cnpj = normalizeTaxId(input.cnpj ?? '') || null;
+  const temporary = normalizeTemporaryRegistration(
+    input,
+    now,
+    allowExpiredTemporaryDeadline,
+    {
+      cpf,
+      cnpj,
+      roleCodes,
+      phones,
+      emails,
+    },
+  );
 
   if (input.type === 'pf') {
     if (!hasMeaningfulName(firstName)) {
       throw validationError('Informe um nome válido para a pessoa.');
     }
     if (cpf && !isValidCpf(cpf)) throw validationError('CPF inválido.');
-    if (phones.length === 0) {
+    if (!temporary.isTemporary && phones.length === 0) {
       throw validationError('Pessoa Física precisa de pelo menos um telefone.');
     }
   } else {
     if (!hasMeaningfulName(legalName)) {
       throw validationError('Informe uma razão social válida.');
     }
-    if (!cnpj || !isValidCnpj(cnpj))
+    if ((!temporary.isTemporary || cnpj) && (!cnpj || !isValidCnpj(cnpj)))
       throw validationError('Informe um CNPJ válido.');
   }
 
@@ -316,7 +523,7 @@ export function normalizeRegistrationInput(
     taxId:
       input.type === 'pf'
         ? (cpf ?? `pf${registrationId.replace(/-/g, '').slice(0, 12)}`)
-        : cnpj!,
+        : (cnpj ?? `pj${registrationId.replace(/-/g, '').slice(0, 12)}`),
     roleCodes,
     tagCodes,
     phones,
@@ -338,6 +545,7 @@ export function normalizeRegistrationInput(
           ? (primaryPhone?.normalizedValue ?? null)
           : null,
     legalPhones: input.type === 'pj' ? legacyAdditionalPhones : [],
+    ...temporary,
   };
 }
 

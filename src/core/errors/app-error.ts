@@ -9,6 +9,7 @@ export type AppErrorCode =
   | 'FORBIDDEN'
   | 'INVALID_CREDENTIALS'
   | 'INVALID_PASSWORD_CHANGE_TOKEN'
+  | 'INVALID_PREADMISSION_TOKEN'
   | 'INVALID_REFRESH_TOKEN'
   | 'LICENSE_UNAVAILABLE'
   | 'NOT_FOUND'
@@ -51,6 +52,13 @@ export function notFound(resource: string): AppError {
 
 export function validationError(message: string): AppError {
   return new AppError('VALIDATION_ERROR', message);
+}
+
+export function invalidPreAdmissionToken(): AppError {
+  return new AppError(
+    'INVALID_PREADMISSION_TOKEN',
+    'O acesso de pré-admissão é inválido ou não está mais disponível.',
+  );
 }
 
 export function unsupportedFileFormat(

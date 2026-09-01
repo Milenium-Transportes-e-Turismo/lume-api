@@ -2,6 +2,7 @@ import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayNotEmpty,
+  IsDateString,
   IsArray,
   IsBoolean,
   IsIn,
@@ -67,6 +68,10 @@ export class RegistrationFieldsDto {
   @IsOptional() @IsString() @MaxLength(120) tradeName?: string | null;
   @IsOptional() @IsString() @MaxLength(20) cpf?: string | null;
   @IsOptional() @IsString() @MaxLength(20) cnpj?: string | null;
+  @IsOptional() @IsBoolean() isTemporary?: boolean;
+  @IsOptional() @IsString() @MaxLength(500) temporaryReason?: string | null;
+  @IsOptional() @IsDateString() regularizationDueAt?: string | null;
+  @IsOptional() @IsUUID('4') temporaryResponsibleUserId?: string | null;
 
   @IsArray()
   @ArrayNotEmpty()
@@ -111,6 +116,13 @@ export class ListRegistrationsQueryDto {
   @IsOptional() @IsIn(REGISTRATION_STATUSES) status?: RegistrationStatus;
   @IsOptional() @IsIn(REGISTRATION_TYPES) type?: RegistrationType;
   @IsOptional()
+  @Transform(({ value }) => optionalBoolean(value))
+  @IsBoolean()
+  temporary?: boolean;
+  @IsOptional()
+  @IsIn(['pending', 'overdue'])
+  regularization?: 'pending' | 'overdue';
+  @IsOptional()
   @Transform(({ value }) => csv(value))
   @IsString({ each: true })
   roleCodes?: string[];
@@ -120,6 +132,10 @@ export class ListRegistrationsQueryDto {
   tagCodes?: string[];
   @IsOptional() @IsIn(['name', 'status', 'updated']) sort?:
     'name' | 'status' | 'updated';
+}
+
+export class RegistrationConsolidationPreviewQueryDto {
+  @IsUUID('4') duplicateRegistrationId!: string;
 }
 
 export class CreateCatalogItemDto {

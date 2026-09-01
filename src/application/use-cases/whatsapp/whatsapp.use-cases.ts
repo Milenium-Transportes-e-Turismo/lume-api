@@ -2,22 +2,16 @@ import { WhatsAppRepository } from '../../contracts/whatsapp.repository';
 import type {
   ClaimEvolutionDispatchInput,
   CompleteOutboxExecutionInput,
+  ConversationAccessScope,
   ConversationListQuery,
-  CreateQuoteProposalInput,
   CreateHumanOutboundInput,
   CreateOutboundInput,
   EvolutionResultInput,
-  DecideQuoteProposalInput,
   MessageListQuery,
   PersistWebhookMessageInput,
-  QuoteProposalListQuery,
-  QuoteRequestPatch,
   ReconcileAutomationOutboxInput,
-  SendQuoteProposalInput,
   TransitionCommand,
   TransitionListQuery,
-  UpdateQuoteProposalStatusInput,
-  UploadQuoteProposalDocumentInput,
 } from '../../contracts/whatsapp.repository';
 
 export class PersistWebhookWhatsAppMessageUseCase {
@@ -42,13 +36,6 @@ export class EnsureWhatsAppConversationUseCase {
       companyId,
       phoneNormalized,
     );
-  }
-}
-
-export class PatchQuoteRequestUseCase {
-  constructor(private readonly repository: WhatsAppRepository) {}
-  execute(companyId: string, quoteRequestId: string, input: QuoteRequestPatch) {
-    return this.repository.patchQuoteRequest(companyId, quoteRequestId, input);
   }
 }
 
@@ -94,65 +81,6 @@ export class ReconcileAutomationOutboxUseCase {
   }
 }
 
-export class QuoteProposalUseCase {
-  constructor(private readonly repository: WhatsAppRepository) {}
-
-  list(companyId: string, query: QuoteProposalListQuery) {
-    return this.repository.listQuoteProposals(companyId, query);
-  }
-
-  notificationSummary(companyId: string, userId: string) {
-    return this.repository.getQuoteProposalNotificationSummary(
-      companyId,
-      userId,
-    );
-  }
-
-  markNotificationRead(companyId: string, userId: string) {
-    return this.repository.markQuoteProposalNotificationRead(companyId, userId);
-  }
-
-  get(companyId: string, quoteRequestId: string) {
-    return this.repository.getQuoteProposal(companyId, quoteRequestId);
-  }
-
-  create(input: CreateQuoteProposalInput) {
-    return this.repository.createQuoteProposal(input);
-  }
-
-  decide(input: DecideQuoteProposalInput) {
-    return this.repository.decideQuoteProposal(input);
-  }
-
-  updateStatus(input: UpdateQuoteProposalStatusInput) {
-    if (input.status === 'approved' || input.status === 'rejected') {
-      return this.repository.decideQuoteProposal({
-        companyId: input.companyId,
-        quoteRequestId: input.quoteRequestId,
-        actorUserId: input.actorUserId,
-        commandId: input.commandId,
-        expectedVersion: input.expectedVersion,
-        decision: input.status,
-        reason: input.reason,
-      });
-    }
-
-    return this.repository.updateQuoteProposalStatus(input);
-  }
-
-  upload(input: UploadQuoteProposalDocumentInput) {
-    return this.repository.uploadQuoteProposalDocument(input);
-  }
-
-  send(input: SendQuoteProposalInput) {
-    return this.repository.sendQuoteProposal(input);
-  }
-
-  getDocument(companyId: string, documentId: string) {
-    return this.repository.getQuoteProposalDocument(companyId, documentId);
-  }
-}
-
 export class QueryWhatsAppUseCase {
   constructor(private readonly repository: WhatsAppRepository) {}
 
@@ -160,8 +88,12 @@ export class QueryWhatsAppUseCase {
     return this.repository.listConversations(companyId, query);
   }
 
-  getConversation(companyId: string, conversationId: string) {
-    return this.repository.getConversation(companyId, conversationId);
+  getConversation(
+    companyId: string,
+    conversationId: string,
+    scope: ConversationAccessScope,
+  ) {
+    return this.repository.getConversation(companyId, conversationId, scope);
   }
 
   getAutomationBatch(
@@ -182,19 +114,27 @@ export class QueryWhatsAppUseCase {
     companyId: string,
     conversationId: string,
     query: MessageListQuery,
+    scope: ConversationAccessScope,
   ) {
-    return this.repository.listMessages(companyId, conversationId, query);
+    return this.repository.listMessages(
+      companyId,
+      conversationId,
+      query,
+      scope,
+    );
   }
 
   listTransitions(
     companyId: string,
     conversationId: string,
     query: TransitionListQuery,
+    scope: ConversationAccessScope,
   ) {
-    return this.repository.listTransitions(companyId, conversationId, query);
-  }
-
-  getCurrentQuoteRequest(companyId: string, conversationId: string) {
-    return this.repository.getCurrentQuoteRequest(companyId, conversationId);
+    return this.repository.listTransitions(
+      companyId,
+      conversationId,
+      query,
+      scope,
+    );
   }
 }

@@ -4,6 +4,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { WhatsAppMediaStorage } from '../../../application/contracts/whatsapp-media.storage';
+import type { Department } from '../../../domain/access/access.constants';
 import {
   MAXIMUM_PANEL_ATTACHMENT_BYTES,
   PANEL_ARCHIVE_MIME_TYPES,
@@ -16,6 +17,7 @@ import {
   validationError,
 } from '../../../core/errors/app-error';
 import {
+  DepartmentCode,
   MessageDirection,
   MessageKind,
 } from '../../database/prisma/generated/client';
@@ -31,6 +33,22 @@ const MEDIA_KINDS = new Set<MessageKind>([
   MessageKind.STICKER,
   MessageKind.CONTACT,
 ]);
+
+const departmentToPrisma: Readonly<Record<Department, DepartmentCode>> = {
+  'client-company': DepartmentCode.CLIENT_COMPANY,
+  'human-resources': DepartmentCode.HUMAN_RESOURCES,
+  'personnel-department': DepartmentCode.PERSONNEL_DEPARTMENT,
+  commercial: DepartmentCode.COMMERCIAL,
+  purchasing: DepartmentCode.PURCHASING,
+  controlling: DepartmentCode.CONTROLLING,
+  maintenance: DepartmentCode.MAINTENANCE,
+  monitoring: DepartmentCode.MONITORING,
+  management: DepartmentCode.MANAGEMENT,
+  operations: DepartmentCode.OPERATIONS,
+  cleaning: DepartmentCode.CLEANING,
+  financial: DepartmentCode.FINANCIAL,
+  'information-technology': DepartmentCode.INFORMATION_TECHNOLOGY,
+};
 
 const MIME_EXTENSIONS: Readonly<Record<string, string>> = {
   'image/jpeg': '.jpg',
@@ -305,11 +323,13 @@ export class EvolutionMediaContentService {
     companyId: string,
     conversationId: string,
     messageId: string,
+    departments: readonly Department[] | null,
   ): Promise<WhatsAppMediaContent> {
     const message = await this.findMessage(
       companyId,
       conversationId,
       messageId,
+      departments,
     );
     if (
       message.direction === MessageDirection.OUTBOUND &&
@@ -338,11 +358,13 @@ export class EvolutionMediaContentService {
     companyId: string,
     conversationId: string,
     messageId: string,
+    departments: readonly Department[] | null,
   ): Promise<RetainWhatsAppMediaResult> {
     const message = await this.findMessage(
       companyId,
       conversationId,
       messageId,
+      departments,
     );
     if (message.direction !== MessageDirection.INBOUND) {
       throw validationError('Somente mídias recebidas podem ser armazenadas.');
@@ -360,6 +382,7 @@ export class EvolutionMediaContentService {
       companyId,
       conversationId,
       messageId,
+      null,
     );
     return this.retainEvolutionMedia(message);
   }
@@ -632,14 +655,37 @@ export class EvolutionMediaContentService {
     companyId: string,
     conversationId: string,
     messageId: string,
+    departments: readonly Department[] | null,
   ): Promise<MediaMessageRow> {
-    const message = await this.prisma.whatsAppMessage.findUnique({
+    const scopedDepartments =
+      departments === null
+        ? null
+        : Array.from(
+            new Set(
+              departments.map((department) => departmentToPrisma[department]),
+            ),
+          );
+    const message = await this.prisma.whatsAppMessage.findFirst({
       where: {
-        id_companyId_conversationId: {
-          id: messageId,
-          companyId,
-          conversationId,
-        },
+        id: messageId,
+        companyId,
+        conversationId,
+        ...(scopedDepartments === null
+          ? {}
+          : {
+              conversation: {
+                is: {
+                  OR: [
+                    { department: { in: scopedDepartments } },
+                    {
+                      pendingTransferDepartment: {
+                        in: scopedDepartments,
+                      },
+                    },
+                  ],
+                },
+              },
+            }),
       },
       include: {
         proposalDocument: {

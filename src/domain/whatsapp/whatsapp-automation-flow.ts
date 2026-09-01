@@ -1,10 +1,10 @@
 import type { Department } from '../access/access.constants';
+import type { QuoteRequestStatus } from '../commercial/quote-status';
 import {
   UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT,
   type ConversationState,
   type FlowStep,
   type MessageKind,
-  type RequestStatus,
   type TransitionName,
 } from './whatsapp.constants';
 
@@ -141,7 +141,7 @@ export type AutomationTopic =
 export interface QuoteRequestSnapshot {
   readonly id: string;
   readonly sequence: number;
-  readonly status: RequestStatus;
+  readonly status: QuoteRequestStatus;
   readonly version: number;
   readonly contactName?: string | null;
   readonly document?: string | null;
@@ -166,7 +166,7 @@ export interface AutomationConversation {
   readonly department: Department;
   readonly conversationState: ConversationState;
   readonly flowStep: FlowStep;
-  readonly requestStatus: RequestStatus;
+  readonly requestStatus: QuoteRequestStatus;
   readonly resumeState: ConversationState | null;
   readonly version: number;
   readonly mainMenuPresentedAt?: string | null;
@@ -219,7 +219,7 @@ export interface WhatsAppAutomationEnvelope {
   };
 }
 
-export const ACTIVE_QUOTE_REQUEST_STATUSES: ReadonlySet<RequestStatus> =
+export const QUOTE_STATUSES_WITH_FOLLOW_UP_MENU: ReadonlySet<QuoteRequestStatus> =
   new Set(['waiting-for-customer', 'under-review', 'approved', 'rejected']);
 
 export type AiMode =
@@ -714,7 +714,7 @@ function decideMainMenu(
   if (option === '1') {
     const hasActiveQuote =
       conversation.currentQuoteRequest != null &&
-      ACTIVE_QUOTE_REQUEST_STATUSES.has(conversation.requestStatus);
+      QUOTE_STATUSES_WITH_FOLLOW_UP_MENU.has(conversation.requestStatus);
     return {
       kind: 'static-reply',
       responseMessage: hasActiveQuote

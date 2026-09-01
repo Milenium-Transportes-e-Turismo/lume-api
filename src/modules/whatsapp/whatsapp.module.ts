@@ -5,7 +5,6 @@ import { WhatsAppRepository } from '../../application/contracts/whatsapp.reposit
 import {
   CreateHumanOutboundWhatsAppUseCase,
   EnsureWhatsAppConversationUseCase,
-  QuoteProposalUseCase,
   QueryWhatsAppUseCase,
   TransitionWhatsAppConversationUseCase,
 } from '../../application/use-cases/whatsapp/whatsapp.use-cases';
@@ -30,8 +29,10 @@ import { WhatsAppPanelController } from './whatsapp-panel.controller';
 import { WhatsAppHistoryImportController } from './whatsapp-history-import.controller';
 import { WhatsAppContactsController } from './whatsapp-contacts.controller';
 import { WhatsAppContactsService } from './whatsapp-contacts.service';
+import { CommercialModule } from '../commercial/commercial.module';
 
 @Module({
+  imports: [CommercialModule],
   controllers: [
     EvolutionWebhookController,
     WhatsAppPanelController,
@@ -82,12 +83,6 @@ import { WhatsAppContactsService } from './whatsapp-contacts.service';
       provide: QueryWhatsAppUseCase,
       useFactory: (repository: WhatsAppRepository) =>
         new QueryWhatsAppUseCase(repository),
-      inject: [WhatsAppRepository],
-    },
-    {
-      provide: QuoteProposalUseCase,
-      useFactory: (repository: WhatsAppRepository) =>
-        new QuoteProposalUseCase(repository),
       inject: [WhatsAppRepository],
     },
   ],

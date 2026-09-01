@@ -105,8 +105,44 @@ conversa, registra `reopen-after-customer-message` e apresenta o menu inicial
 antes de qualquer interpretação do conteúdo.
 
 Devolver ao bot remove o atendente, mas preserva o contexto comercial para que o
-fluxo retome do ponto adequado. Uma conversa em `human-active` sempre possui um
-atendente; qualquer estado legado incompatível é normalizado pela migração.
+fluxo retome do ponto adequado. A própria transação que executa
+`return-to-bot` confirma que o usuário autenticado ainda é o atendente
+responsável; outro usuário recebe `403` e nenhuma alteração é persistida. Não há
+exceção implícita para administrador, gerente ou supervisor. Uma conversa em
+`human-active` sempre possui um atendente; qualquer estado legado incompatível é
+normalizado pela migração.
+
+Uma transferência explícita usa dois comandos versionados. O usuário solicita
+com `POST .../actions/request-transfer`, informando departamento de destino e
+motivo. Enquanto aguarda aceite, a conversa continua `human-active`, no
+departamento de origem e atribuída ao atendente que a está conduzindo; a
+pendência também fica visível na fila do departamento de destino. Um usuário
+ativo que pertence ao destino confirma com
+`POST .../actions/accept-transfer`. Somente nesse momento departamento e
+atendente são alterados, de forma atômica, e a pendência é removida. Os dois
+passos ficam no histórico com origem, destino, motivo, solicitante e datas. Se
+uma devolução ao bot ou encerramento limpar uma pendência, o mesmo evento
+registra o ciclo como cancelado antes de remover o estado mutável. O endpoint
+legado de encaminhamento continua como alias de rota, mas não preserva o payload
+nem a semântica imediata anteriores: também exige motivo e produz a transferência
+pendente. Clientes antigos devem ser atualizados de forma coordenada. A troca
+direta de departamento exige motivo e é recusada quando já existe atendente
+atribuído; nesse caso, o painel deve usar solicitação e aceite.
+
+O escopo da fila também é aplicado às consultas por identificador direto:
+detalhe, mensagens, transições, proposta e mídia só ficam disponíveis ao
+departamento responsável ou ao destino de uma transferência pendente. As ações
+de painel repetem a autorização com o usuário recarregado dentro da transação.
+Assumir não substitui outro atendente, encerrar uma conversa atribuída exige o
+responsável atual e arquivar, desarquivar, marcar como lida ou reclassificar uma
+conversa exige pertencer ao departamento responsável. Um perfil sem departamento
+só recebe visão total quando possui explicitamente
+`whatsapp-conversations:manage`.
+
+O aceite continua exigindo `whatsapp-conversations:manage`. Esse código pode ser
+atribuído individualmente a usuários dos departamentos participantes, mas não é
+concedido automaticamente a todos os departamentos enquanto a matriz definitiva
+de transferência e supervisão não for aprovada.
 
 O envio humano de uma proposta em PDF assume o usuário remetente como atendente
 ativo antes de enfileirar o documento e registra a transição no histórico.

@@ -4,28 +4,32 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import {
+  CommercialQuoteRepository,
+  type CreateQuoteProposalInput,
+  type DecideQuoteProposalInput,
+  type QuoteProposalListQuery,
+  type QuoteRequestPatch,
+  type SendQuoteProposalInput,
+  type UpdateQuoteProposalStatusInput,
+  type UploadQuoteProposalDocumentInput,
+} from '../../../application/contracts/commercial-quote.repository';
+import {
   WhatsAppRepository,
   type ClaimEvolutionDispatchInput,
   type CompleteOutboxExecutionInput,
+  type ConversationAccessScope,
   type ConversationListQuery,
   type CreateHumanOutboundInput,
   type CreateOutboundInput,
-  type CreateQuoteProposalInput,
-  type DecideQuoteProposalInput,
   type EvolutionResultInput,
   type EnsureWhatsAppConversationResult,
   type MarkEvolutionDispatchUnknownInput,
   type MessageListQuery,
   type PersistWebhookMessageInput,
   type PersistWebhookMessageResult,
-  type QuoteProposalListQuery,
-  type QuoteRequestPatch,
   type ReconcileAutomationOutboxInput,
-  type SendQuoteProposalInput,
   type TransitionCommand,
   type TransitionListQuery,
-  type UpdateQuoteProposalStatusInput,
-  type UploadQuoteProposalDocumentInput,
   type WebhookChannelConfiguration,
 } from '../../../application/contracts/whatsapp.repository';
 import {
@@ -36,6 +40,12 @@ import {
 } from '../../../core/errors/app-error';
 import type { Department } from '../../../domain/access/access.constants';
 import {
+  assertManualQuoteCancellationTransition,
+  normalizeManualQuoteCancellation,
+  type CommercialClosureClassification as CanonicalCommercialClosureClassification,
+} from '../../../domain/commercial/quote-closure';
+import type { QuoteRequestStatus as CanonicalRequestStatus } from '../../../domain/commercial/quote-status';
+import {
   buildConversationClosureMessage,
   buildDepartmentContactClosureMessage,
 } from '../../../domain/whatsapp/conversation-closure-message';
@@ -43,12 +53,12 @@ import {
   assertTransitionActor,
   resolveConversationTransition,
 } from '../../../domain/whatsapp/conversation-transition.matrix';
-import { validateQuoteProposalPdf } from '../../../domain/whatsapp/quote-proposal-pdf';
+import { validateQuoteProposalPdf } from '../../../domain/commercial/quote-proposal-pdf';
 import {
   assertQuoteScheduleConsistency,
   dateOnlyFromDateTime,
   presentDateOnly,
-} from '../../../domain/whatsapp/quote-schedule';
+} from '../../../domain/commercial/quote-schedule';
 import { deterministicCommandId } from '../../../domain/whatsapp/whatsapp-automation-flow';
 import type {
   ConversationSnapshot,
@@ -56,12 +66,12 @@ import type {
   DeliveryStatus as CanonicalDeliveryStatus,
   FlowStep as CanonicalFlowStep,
   MessageKind as CanonicalMessageKind,
-  RequestStatus as CanonicalRequestStatus,
 } from '../../../domain/whatsapp/whatsapp.constants';
 import { UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT } from '../../../domain/whatsapp/whatsapp.constants';
 import { sanitizeLogText } from '../../../shared/utils/sensitive-data';
 import { formatWhatsAppPhone } from '../../../shared/utils/normalization';
 import {
+  CommercialClosureClassification,
   ConversationState,
   DeliveryStatus,
   DepartmentCode,
@@ -114,6 +124,35 @@ const departmentFromPrisma: Readonly<Record<DepartmentCode, Department>> = {
   FINANCIAL: 'financial',
   INFORMATION_TECHNOLOGY: 'information-technology',
 };
+
+function userBelongsToDepartment(
+  departments: readonly string[],
+  department: Department,
+): boolean {
+  return departments.some(
+    (assignedDepartment) =>
+      assignedDepartment === department ||
+      (assignedDepartment === 'controllership' && department === 'controlling'),
+  );
+}
+
+function conversationDepartmentWhere(
+  scope: ConversationAccessScope,
+): Prisma.WhatsAppConversationWhereInput {
+  if (scope.departments === null) return {};
+
+  const departments = Array.from(
+    new Set(
+      scope.departments.map((department) => departmentToPrisma[department]),
+    ),
+  );
+  return {
+    OR: [
+      { department: { in: departments } },
+      { pendingTransferDepartment: { in: departments } },
+    ],
+  };
+}
 
 const departmentContactLabels: Readonly<Partial<Record<Department, string>>> = {
   purchasing: 'Compras (Fornecedores)',
@@ -189,6 +228,33 @@ const requestFromPrisma: Readonly<
   APPROVED: 'approved',
   REJECTED: 'rejected',
   CANCELLED: 'cancelled',
+};
+
+const closureToPrisma: Readonly<
+  Record<
+    CanonicalCommercialClosureClassification,
+    CommercialClosureClassification
+  >
+> = {
+  'opportunity-abandoned':
+    CommercialClosureClassification.OPPORTUNITY_ABANDONED,
+  'quote-rejected': CommercialClosureClassification.QUOTE_REJECTED,
+  'acceptance-cancelled': CommercialClosureClassification.ACCEPTANCE_CANCELLED,
+  superseded: CommercialClosureClassification.SUPERSEDED,
+  'legacy-unclassified': CommercialClosureClassification.LEGACY_UNCLASSIFIED,
+};
+
+const closureFromPrisma: Readonly<
+  Record<
+    CommercialClosureClassification,
+    CanonicalCommercialClosureClassification
+  >
+> = {
+  OPPORTUNITY_ABANDONED: 'opportunity-abandoned',
+  QUOTE_REJECTED: 'quote-rejected',
+  ACCEPTANCE_CANCELLED: 'acceptance-cancelled',
+  SUPERSEDED: 'superseded',
+  LEGACY_UNCLASSIFIED: 'legacy-unclassified',
 };
 
 const COMMERCIAL_PENDING_QUOTES_NOTIFICATION =
@@ -398,6 +464,7 @@ const conversationInclude = {
   contact: true,
   channel: { select: { id: true, name: true, phoneNumber: true } },
   assignedTo: { select: { id: true, name: true } },
+  pendingTransferRequestedBy: { select: { id: true, name: true } },
   quoteRequests: { orderBy: { sequence: 'desc' as const }, take: 1 },
   _count: {
     select: {
@@ -536,6 +603,7 @@ function presentQuote(row: {
   confirmedSummary: unknown;
   confirmedVersion: number | null;
   requestedByUserId: string | null;
+  closureClassification: CommercialClosureClassification | null;
   decisionReason: string | null;
   decidedAt: Date | null;
   decidedByUserId: string | null;
@@ -591,13 +659,19 @@ function presentQuote(row: {
             : row.status === RequestStatus.CANCELLED
               ? 'cancelled'
               : 'pending',
+      classification: row.closureClassification
+        ? closureFromPrisma[row.closureClassification]
+        : row.status === RequestStatus.CANCELLED
+          ? 'legacy-unclassified'
+          : row.status === RequestStatus.REJECTED
+            ? 'quote-rejected'
+            : null,
       reason:
         row.decisionReason ??
-        (row.status === RequestStatus.CANCELLED
-          ? 'Substituído por uma nova solicitação de orçamento.'
-          : row.status === RequestStatus.REJECTED
-            ? 'Motivo não informado (registro legado).'
-            : null),
+        (row.status === RequestStatus.CANCELLED ||
+        row.status === RequestStatus.REJECTED
+          ? 'Motivo não informado (registro legado).'
+          : null),
       decidedAt: row.decidedAt?.toISOString() ?? null,
       decidedBy: row.decidedByUser
         ? { id: row.decidedByUser.id, name: row.decidedByUser.name }
@@ -666,6 +740,14 @@ function presentConversation(row: ConversationWithRelations) {
     },
     ...snapshot(row),
     assignedTo: row.assignedTo,
+    pendingTransfer: row.pendingTransferDepartment
+      ? {
+          targetDepartment: departmentFromPrisma[row.pendingTransferDepartment],
+          reason: row.pendingTransferReason,
+          requestedAt: row.pendingTransferRequestedAt?.toISOString() ?? null,
+          requestedBy: row.pendingTransferRequestedBy,
+        }
+      : null,
     unreadCount: row.unreadCount,
     version: row.version,
     mainMenuPresentedAt: row.mainMenuPresentedAt?.toISOString() ?? null,
@@ -746,7 +828,10 @@ function isPrismaUniqueError(error: unknown): boolean {
 }
 
 @Injectable()
-export class PrismaWhatsAppRepository extends WhatsAppRepository {
+export class PrismaWhatsAppRepository
+  extends WhatsAppRepository
+  implements CommercialQuoteRepository
+{
   private readonly dispatchLeaseMs: number;
   private readonly followUpInactivityMs: number;
   private readonly automationRetryBaseDelayMs: number;
@@ -849,6 +934,21 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
   }
 
   async persistWebhookMessage(
+    input: PersistWebhookMessageInput,
+  ): Promise<PersistWebhookMessageResult> {
+    try {
+      return await this.persistWebhookMessageOnce(input);
+    } catch (error) {
+      if (!isPrismaUniqueError(error)) throw error;
+
+      // Dois primeiros eventos do mesmo telefone podem disputar a criação do
+      // contato ou da conversa. A transação perdedora foi revertida; repetir
+      // uma vez permite que ela reutilize o registro confirmado pela vencedora.
+      return this.persistWebhookMessageOnce(input);
+    }
+  }
+
+  private async persistWebhookMessageOnce(
     input: PersistWebhookMessageInput,
   ): Promise<PersistWebhookMessageResult> {
     try {
@@ -1432,6 +1532,60 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         if (conversation.version !== input.expectedVersion) {
           throw currentVersionConflict(conversation.version);
         }
+        const transferReason =
+          typeof input.metadata?.reason === 'string'
+            ? input.metadata.reason.trim()
+            : '';
+        if (
+          input.actorType === 'user' &&
+          (input.name === 'request-transfer' ||
+            input.name === 'change-department')
+        ) {
+          if (transferReason.length < 3 || transferReason.length > 500) {
+            throw validationError(
+              'Informe o motivo da transferência, entre 3 e 500 caracteres.',
+            );
+          }
+        }
+        if (input.name === 'request-transfer') {
+          if (conversation.assignedToUserId !== input.actorUserId) {
+            throw forbidden(
+              'Somente o atendente responsável pode solicitar a transferência.',
+            );
+          }
+          if (conversation.pendingTransferDepartment !== null) {
+            throw new AppError(
+              'CONFLICT',
+              'A conversa já possui uma transferência aguardando aceite.',
+            );
+          }
+        }
+        if (
+          input.name === 'accept-transfer' &&
+          conversation.pendingTransferDepartment === null
+        ) {
+          throw new AppError(
+            'CONFLICT',
+            'A conversa não possui transferência aguardando aceite.',
+          );
+        }
+        if (
+          input.name === 'change-department' &&
+          conversation.assignedToUserId !== null
+        ) {
+          throw new AppError(
+            'CONFLICT',
+            'Uma conversa atribuída deve usar solicitação e aceite de transferência.',
+          );
+        }
+        if (
+          input.name === 'return-to-bot' &&
+          conversation.assignedToUserId !== input.actorUserId
+        ) {
+          throw forbidden(
+            'Somente o atendente responsável pode devolver a conversa ao bot.',
+          );
+        }
         const closing = isClosingTransition(input.name);
         let resolvedClosingReason: string | null = null;
         if (closing) {
@@ -1476,6 +1630,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         if (
           [
             'take-over',
+            'request-transfer',
+            'accept-transfer',
             'return-to-bot',
             'forward',
             'new-quote-request',
@@ -1513,19 +1669,94 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
                 companyId: input.companyId,
               },
             },
-            select: { id: true, name: true, isActive: true },
+            select: { id: true, name: true, isActive: true, departments: true },
           });
           if (!actor?.isActive) {
             throw forbidden('O ator informado não pertence ao tenant.');
           }
           actorUser = { id: actor.id, name: actor.name };
+          const currentDepartment =
+            departmentFromPrisma[conversation.department];
+          const belongsToCurrentDepartment = userBelongsToDepartment(
+            actor.departments,
+            currentDepartment,
+          );
+          if (input.name === 'take-over' && !belongsToCurrentDepartment) {
+            throw forbidden(
+              'Somente um usuário do departamento responsável pode assumir a conversa.',
+            );
+          }
+          if (
+            input.name === 'take-over' &&
+            conversation.assignedToUserId !== null &&
+            conversation.assignedToUserId !== actor.id
+          ) {
+            throw forbidden(
+              'A conversa já está atribuída a outro atendente. Não existe exceção implícita de supervisão.',
+            );
+          }
+          if (
+            input.name === 'accept-transfer' &&
+            !userBelongsToDepartment(
+              actor.departments,
+              departmentFromPrisma[conversation.pendingTransferDepartment!],
+            )
+          ) {
+            throw forbidden(
+              'Somente um usuário do departamento de destino pode aceitar a transferência.',
+            );
+          }
+          if (
+            [
+              'forward',
+              'change-department',
+              'mark-read',
+              'archive',
+              'unarchive',
+              'close',
+              'close-after-rejection',
+            ].includes(input.name) &&
+            !belongsToCurrentDepartment
+          ) {
+            throw forbidden(
+              'Somente um usuário do departamento responsável pode executar esta ação.',
+            );
+          }
+          if (
+            ['forward', 'close', 'close-after-rejection'].includes(
+              input.name,
+            ) &&
+            conversation.assignedToUserId !== null &&
+            conversation.assignedToUserId !== actor.id
+          ) {
+            throw forbidden(
+              'Somente o atendente responsável pode executar esta ação na conversa atribuída.',
+            );
+          }
         }
-
         const from = snapshot(conversation);
+        const pendingTransferBefore =
+          conversation.pendingTransferDepartment === null
+            ? null
+            : {
+                targetDepartment:
+                  departmentFromPrisma[conversation.pendingTransferDepartment],
+                reason: conversation.pendingTransferReason,
+                requestedByUserId:
+                  conversation.pendingTransferRequestedByUserId,
+                requestedAt:
+                  conversation.pendingTransferRequestedAt?.toISOString() ??
+                  null,
+              };
         const to = resolveConversationTransition({
           current: from,
           name: input.name,
-          targetDepartment: input.targetDepartment,
+          targetDepartment:
+            input.name === 'accept-transfer'
+              ? conversation.pendingTransferDepartment
+                ? departmentFromPrisma[conversation.pendingTransferDepartment]
+                : undefined
+              : input.targetDepartment,
           departmentOption:
             typeof input.metadata?.departmentOption === 'string'
               ? input.metadata.departmentOption
@@ -1609,6 +1840,7 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             },
             data: {
               status: RequestStatus.CANCELLED,
+              closureClassification: CommercialClosureClassification.SUPERSEDED,
               decisionReason:
                 'Substituído por uma nova solicitação de orçamento.',
               decidedAt: new Date(),
@@ -1714,12 +1946,14 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             'select-commercial',
             'return-to-main-menu',
             'take-over',
+            'request-transfer',
+            'accept-transfer',
             'return-to-bot',
             'forward',
           ].includes(input.name) || closing;
         const nextAssignedToUserId =
           to.conversationState === 'human-active'
-            ? input.name === 'take-over'
+            ? input.name === 'take-over' || input.name === 'accept-transfer'
               ? input.actorUserId
               : conversation.assignedToUserId
             : null;
@@ -1775,6 +2009,24 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               ? null
               : conversation.mainMenuPresentedAt,
             assignedToUserId: nextAssignedToUserId,
+            ...(input.name === 'request-transfer'
+              ? {
+                  pendingTransferDepartment:
+                    departmentToPrisma[input.targetDepartment!],
+                  pendingTransferReason: transferReason,
+                  pendingTransferRequestedByUserId: input.actorUserId,
+                  pendingTransferRequestedAt: transitionedAt,
+                }
+              : input.name === 'accept-transfer' ||
+                  input.name === 'return-to-bot' ||
+                  closing
+                ? {
+                    pendingTransferDepartment: null,
+                    pendingTransferReason: null,
+                    pendingTransferRequestedByUserId: null,
+                    pendingTransferRequestedAt: null,
+                  }
+                : {}),
             ...(input.name === 'archive'
               ? {
                   archivedAt: transitionedAt,
@@ -1782,7 +2034,9 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
                   archivedByUserId: input.actorUserId,
                   archiveExemptedAt: null,
                 }
-              : input.name === 'unarchive' || input.name === 'take-over'
+              : input.name === 'unarchive' ||
+                  input.name === 'take-over' ||
+                  input.name === 'accept-transfer'
                 ? {
                     archivedAt: null,
                     archiveReason: null,
@@ -1800,7 +2054,7 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               ? { lastMessagePreview: closureMessageText.slice(0, 240) }
               : {}),
             closedAt:
-              input.name === 'take-over'
+              input.name === 'take-over' || input.name === 'accept-transfer'
                 ? null
                 : closing
                   ? transitionedAt
@@ -1890,9 +2144,45 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           ...presentConversation(updated),
           ...(closing ? { closure } : {}),
         };
+        const transferLifecycle =
+          input.name === 'request-transfer'
+            ? {
+                status: 'requested',
+                sourceDepartment: from.department,
+                targetDepartment: input.targetDepartment!,
+                reason: transferReason,
+                requestedByUserId: input.actorUserId,
+                requestedAt: transitionedAt.toISOString(),
+              }
+            : input.name === 'accept-transfer'
+              ? {
+                  status: 'accepted',
+                  sourceDepartment: from.department,
+                  targetDepartment: pendingTransferBefore!.targetDepartment,
+                  reason: pendingTransferBefore!.reason,
+                  requestedByUserId: pendingTransferBefore!.requestedByUserId,
+                  requestedAt: pendingTransferBefore!.requestedAt,
+                  acceptedByUserId: input.actorUserId,
+                  acceptedAt: transitionedAt.toISOString(),
+                }
+              : pendingTransferBefore &&
+                  (input.name === 'return-to-bot' || closing)
+                ? {
+                    status: 'cancelled',
+                    sourceDepartment: from.department,
+                    targetDepartment: pendingTransferBefore.targetDepartment,
+                    reason: pendingTransferBefore.reason,
+                    requestedByUserId: pendingTransferBefore.requestedByUserId,
+                    requestedAt: pendingTransferBefore.requestedAt,
+                    cancelledByUserId: input.actorUserId,
+                    cancelledAt: transitionedAt.toISOString(),
+                    cancellationCause: input.name,
+                  }
+                : null;
         const transitionMetadata = {
           ...(input.metadata ?? {}),
           ...(closing ? { reason: resolvedClosingReason } : {}),
+          ...(transferLifecycle ? { transfer: transferLifecycle } : {}),
           quoteRequestId: quote?.id ?? null,
           ...(supersededQuote
             ? {
@@ -4277,6 +4567,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
       sentTotal,
       approvedTotal,
       cancelledTotal,
+      rejectedTotal,
+      commercialClosureTotal,
       cancellationReasonRows,
     ] = await this.prisma.$transaction([
       this.prisma.quoteRequest.findMany({
@@ -4309,24 +4601,43 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
       this.prisma.quoteRequest.count({ where: stageWhere('sent') }),
       this.prisma.quoteRequest.count({ where: stageWhere('approved') }),
       this.prisma.quoteRequest.count({ where: stageWhere('cancelled') }),
+      this.prisma.quoteRequest.count({
+        where: {
+          AND: [stageWhere('cancelled'), { status: RequestStatus.REJECTED }],
+        },
+      }),
+      this.prisma.quoteRequest.count({
+        where: {
+          AND: [stageWhere('cancelled'), { status: RequestStatus.CANCELLED }],
+        },
+      }),
       this.prisma.quoteRequest.groupBy({
-        by: ['status', 'decisionReason'],
+        by: ['status', 'closureClassification', 'decisionReason'],
         where: stageWhere('cancelled'),
-        orderBy: [{ status: 'asc' }, { decisionReason: 'asc' }],
+        orderBy: [
+          { status: 'asc' },
+          { closureClassification: 'asc' },
+          { decisionReason: 'asc' },
+        ],
         _count: { _all: true },
       }),
     ]);
     const cancellationReasonCounts = new Map<string, number>();
+    const closureClassificationCounts = new Map<string, number>();
     for (const row of cancellationReasonRows) {
       const reason =
-        row.decisionReason?.trim() ||
-        (row.status === RequestStatus.CANCELLED
-          ? 'Substituído por uma nova solicitação de orçamento.'
-          : 'Motivo não informado (registro legado).');
+        row.decisionReason?.trim() || 'Motivo não informado (registro legado).';
+      const count = typeof row._count === 'object' ? (row._count._all ?? 0) : 0;
+      const classification = row.closureClassification
+        ? closureFromPrisma[row.closureClassification]
+        : 'legacy-unclassified';
       cancellationReasonCounts.set(
         reason,
-        (cancellationReasonCounts.get(reason) ?? 0) +
-          (typeof row._count === 'object' ? (row._count._all ?? 0) : 0),
+        (cancellationReasonCounts.get(reason) ?? 0) + count,
+      );
+      closureClassificationCounts.set(
+        classification,
+        (closureClassificationCounts.get(classification) ?? 0) + count,
       );
     }
     return {
@@ -4349,6 +4660,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         sent: sentTotal,
         approved: approvedTotal,
         cancelled: cancelledTotal,
+        rejected: rejectedTotal,
+        commercialClosures: commercialClosureTotal,
         cancellationReasons: Array.from(
           cancellationReasonCounts,
           ([reason, count]) => ({ reason, count }),
@@ -4356,6 +4669,14 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           (left, right) =>
             right.count - left.count ||
             left.reason.localeCompare(right.reason, 'pt-BR'),
+        ),
+        closureClassifications: Array.from(
+          closureClassificationCounts,
+          ([classification, count]) => ({ classification, count }),
+        ).sort(
+          (left, right) =>
+            right.count - left.count ||
+            left.classification.localeCompare(right.classification, 'pt-BR'),
         ),
       },
       filters: {
@@ -4908,7 +5229,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         }
         if (
           quote.status === RequestStatus.APPROVED ||
-          quote.status === RequestStatus.REJECTED
+          quote.status === RequestStatus.REJECTED ||
+          quote.status === RequestStatus.CANCELLED
         ) {
           throw new AppError(
             'CONFLICT',
@@ -4957,6 +5279,10 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           },
           data: {
             status: decisionStatus,
+            closureClassification:
+              input.decision === 'rejected'
+                ? CommercialClosureClassification.QUOTE_REJECTED
+                : null,
             decisionReason: input.decision === 'rejected' ? reason : null,
             decidedAt,
             decidedByUserId: actor.id,
@@ -5016,6 +5342,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             metadata: payload({
               conversationId: quote.conversationId,
               commandId: input.commandId,
+              closureClassification:
+                input.decision === 'rejected' ? 'quote-rejected' : null,
               reason: input.decision === 'rejected' ? reason : null,
             }),
           },
@@ -5053,13 +5381,24 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
   async updateQuoteProposalStatus(
     input: UpdateQuoteProposalStatusInput,
   ): Promise<unknown> {
-    const reason = input.reason?.trim() || null;
-    if (input.status === 'cancelled' && (!reason || reason.length < 3)) {
+    if (input.status === 'approved' || input.status === 'rejected') {
       throw validationError(
-        'Informe um breve motivo, com pelo menos 3 caracteres, para cancelar o orçamento.',
+        'Aprovação ou recusa deve usar a decisão comercial auditada.',
       );
     }
-    const fingerprint = commandFingerprint({ ...input, reason });
+    const cancellation =
+      input.status === 'cancelled'
+        ? normalizeManualQuoteCancellation({
+            classification: input.closureClassification,
+            reason: input.reason,
+          })
+        : null;
+    const reason = cancellation?.reason ?? input.reason?.trim() ?? null;
+    const fingerprint = commandFingerprint({
+      ...input,
+      closureClassification: cancellation?.classification ?? null,
+      reason,
+    });
 
     try {
       return await this.prisma.$transaction(async (transaction) => {
@@ -5163,13 +5502,19 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           );
         }
         if (
-          quote.status === RequestStatus.APPROVED ||
           quote.status === RequestStatus.REJECTED ||
-          quote.status === RequestStatus.CANCELLED
+          quote.status === RequestStatus.CANCELLED ||
+          (quote.status === RequestStatus.APPROVED && !cancellation)
         ) {
           throw new AppError(
             'CONFLICT',
             'O status final deste orçamento não pode ser alterado.',
+          );
+        }
+        if (cancellation) {
+          assertManualQuoteCancellationTransition(
+            requestFromPrisma[quote.status],
+            cancellation.classification,
           );
         }
         if (requestFromPrisma[quote.status] === input.status) {
@@ -5222,10 +5567,12 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           },
           data: {
             status: targetStatus,
-            decisionReason: input.status === 'cancelled' ? reason : null,
-            decidedAt: input.status === 'cancelled' ? changedAt : null,
-            decidedByUserId:
-              input.status === 'cancelled' ? input.actorUserId : null,
+            closureClassification: cancellation
+              ? closureToPrisma[cancellation.classification]
+              : null,
+            decisionReason: cancellation ? reason : null,
+            decidedAt: cancellation ? changedAt : null,
+            decidedByUserId: cancellation ? input.actorUserId : null,
             version: { increment: 1 },
           },
         });
@@ -5309,6 +5656,7 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               commandId: input.commandId,
               fromStatus: requestFromPrisma[quote.status],
               toStatus: input.status,
+              closureClassification: cancellation?.classification ?? null,
               reason,
               occurredAt: changedAt.toISOString(),
             }),
@@ -6113,11 +6461,28 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         'O status da solicitação pertence somente à fila Comercial.',
       );
     }
-    const department = query.requestStatus
-      ? DepartmentCode.COMMERCIAL
-      : query.department
-        ? departmentToPrisma[query.department]
-        : undefined;
+    if (
+      query.requestStatus &&
+      query.departments &&
+      !query.departments.includes('commercial')
+    ) {
+      throw validationError(
+        'O status da solicitação pertence somente à fila Comercial.',
+      );
+    }
+    const departments = query.requestStatus
+      ? [DepartmentCode.COMMERCIAL]
+      : query.departments && query.departments.length > 0
+        ? Array.from(
+            new Set(
+              query.departments.map(
+                (assignedDepartment) => departmentToPrisma[assignedDepartment],
+              ),
+            ),
+          )
+        : query.department
+          ? [departmentToPrisma[query.department]]
+          : [];
     const state = query.state ? stateToPrisma[query.state] : undefined;
     const controlStates = query.control
       ? query.control === 'bot'
@@ -6135,6 +6500,33 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
       ? requestToPrisma[query.requestStatus]
       : undefined;
     const search = query.search?.trim();
+    const scopedFilters: Prisma.WhatsAppConversationWhereInput[] = [];
+    if (departments.length > 0) {
+      scopedFilters.push({
+        OR: [
+          { department: { in: departments } },
+          { pendingTransferDepartment: { in: departments } },
+        ],
+      });
+    }
+    if (search) {
+      scopedFilters.push({
+        OR: [
+          {
+            contact: {
+              displayName: { contains: search, mode: 'insensitive' },
+            },
+          },
+          { contact: { phoneNormalized: { contains: search } } },
+          {
+            lastMessagePreview: {
+              contains: search,
+              mode: 'insensitive',
+            },
+          },
+        ],
+      });
+    }
     const where: Prisma.WhatsAppConversationWhereInput = {
       companyId,
       ...(query.archive === 'all'
@@ -6142,28 +6534,10 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         : query.archive === 'archived'
           ? { archivedAt: { not: null } }
           : { archivedAt: null }),
-      ...(department ? { department } : {}),
+      ...(scopedFilters.length > 0 ? { AND: scopedFilters } : {}),
       ...(state ? { conversationState: state } : {}),
       ...(controlStates ? { conversationState: { in: controlStates } } : {}),
       ...(requestStatus ? { requestStatus } : {}),
-      ...(search
-        ? {
-            OR: [
-              {
-                contact: {
-                  displayName: { contains: search, mode: 'insensitive' },
-                },
-              },
-              { contact: { phoneNormalized: { contains: search } } },
-              {
-                lastMessagePreview: {
-                  contains: search,
-                  mode: 'insensitive',
-                },
-              },
-            ],
-          }
-        : {}),
     };
     const [
       rows,
@@ -6242,13 +6616,13 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
   async getConversation(
     companyId: string,
     conversationId: string,
+    scope: ConversationAccessScope,
   ): Promise<unknown> {
-    const conversation = await this.prisma.whatsAppConversation.findUnique({
+    const conversation = await this.prisma.whatsAppConversation.findFirst({
       where: {
-        id_companyId: {
-          id: conversationId,
-          companyId,
-        },
+        id: conversationId,
+        companyId,
+        ...conversationDepartmentWhere(scope),
       },
       include: conversationDetailInclude,
     });
@@ -6375,9 +6749,15 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
     companyId: string,
     conversationId: string,
     query: MessageListQuery,
+    scope: ConversationAccessScope,
   ): Promise<unknown> {
-    const conversation = await this.prisma.whatsAppConversation.findUnique({
-      where: { id_companyId: { id: conversationId, companyId } },
+    const conversationWhere: Prisma.WhatsAppConversationWhereInput = {
+      id: conversationId,
+      companyId,
+      ...conversationDepartmentWhere(scope),
+    };
+    const conversation = await this.prisma.whatsAppConversation.findFirst({
+      where: conversationWhere,
       select: { id: true },
     });
     if (!conversation) throw notFound('Conversa');
@@ -6385,7 +6765,14 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
     const where: Prisma.WhatsAppMessageWhereInput = {
       companyId,
       conversationId,
+      conversation: { is: conversationWhere },
       AND: [
+        {
+          OR: [
+            { automationPurpose: null },
+            { automationPurpose: { not: 'department-notification' } },
+          ],
+        },
         ...(search
           ? [
               {
@@ -6431,13 +6818,23 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
     companyId: string,
     conversationId: string,
     query: TransitionListQuery,
+    scope: ConversationAccessScope,
   ): Promise<unknown> {
-    const conversation = await this.prisma.whatsAppConversation.findUnique({
-      where: { id_companyId: { id: conversationId, companyId } },
+    const conversationWhere: Prisma.WhatsAppConversationWhereInput = {
+      id: conversationId,
+      companyId,
+      ...conversationDepartmentWhere(scope),
+    };
+    const conversation = await this.prisma.whatsAppConversation.findFirst({
+      where: conversationWhere,
       select: { id: true },
     });
     if (!conversation) throw notFound('Conversa');
-    const where = { companyId, conversationId };
+    const where: Prisma.WhatsAppConversationTransitionWhereInput = {
+      companyId,
+      conversationId,
+      conversation: { is: conversationWhere },
+    };
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.whatsAppConversationTransition.findMany({
         where,
@@ -6492,14 +6889,24 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
   async getCurrentQuoteRequest(
     companyId: string,
     conversationId: string,
+    scope: ConversationAccessScope,
   ): Promise<unknown> {
-    const conversation = await this.prisma.whatsAppConversation.findUnique({
-      where: { id_companyId: { id: conversationId, companyId } },
+    const conversationWhere: Prisma.WhatsAppConversationWhereInput = {
+      id: conversationId,
+      companyId,
+      ...conversationDepartmentWhere(scope),
+    };
+    const conversation = await this.prisma.whatsAppConversation.findFirst({
+      where: conversationWhere,
       select: { id: true },
     });
     if (!conversation) throw notFound('Conversa');
     const quote = await this.prisma.quoteRequest.findFirst({
-      where: { companyId, conversationId },
+      where: {
+        companyId,
+        conversationId,
+        conversation: { is: conversationWhere },
+      },
       orderBy: { sequence: 'desc' },
     });
     if (!quote) throw notFound('Solicitação de orçamento');

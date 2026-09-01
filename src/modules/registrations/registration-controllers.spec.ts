@@ -25,6 +25,12 @@ describe('Registration controller permissions', () => {
       ['clients:update'],
     );
     expect(
+      permissionsFor(RegistrationsController.prototype, 'regularize'),
+    ).toEqual(['clients:update']);
+    expect(
+      permissionsFor(RegistrationsController.prototype, 'consolidationPreview'),
+    ).toEqual(['clients:manage']);
+    expect(
       permissionsFor(RegistrationsController.prototype, 'history'),
     ).toEqual(['clients:history']);
     expect(

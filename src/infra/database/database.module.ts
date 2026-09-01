@@ -8,6 +8,7 @@ import {
   UsersRepository,
 } from '../../application/contracts/repositories';
 import { WhatsAppRepository } from '../../application/contracts/whatsapp.repository';
+import { CommercialQuoteRepository } from '../../application/contracts/commercial-quote.repository';
 import { DataExchangeRepository } from '../../application/contracts/data-exchange.repository';
 import { PrismaService } from './prisma/prisma.service';
 import { PrismaRefreshTokensRepository } from './repositories/prisma-refresh-tokens.repository';
@@ -27,6 +28,10 @@ import { RouteRepository } from '../../application/contracts/route.repository';
 import { PrismaRouteRepository } from './repositories/prisma-route.repository';
 import { FixedPointRepository } from '../../application/contracts/fixed-point.repository';
 import { PrismaFixedPointRepository } from './repositories/prisma-fixed-point.repository';
+import { RegistrationIdentityCandidateReader } from '../../application/contracts/registration-identity-candidate.reader';
+import { PrismaRegistrationIdentityCandidateReader } from './repositories/prisma-registration-identity-candidate.reader';
+import { PreAdmissionAccessRepository } from '../../application/contracts/pre-admission-access.repository';
+import { PrismaPreAdmissionAccessRepository } from './repositories/prisma-pre-admission-access.repository';
 
 @Global()
 @Module({
@@ -49,13 +54,26 @@ import { PrismaFixedPointRepository } from './repositories/prisma-fixed-point.re
       provide: TenantAuditLogsRepository,
       useClass: PrismaTenantAuditLogsRepository,
     },
-    { provide: WhatsAppRepository, useClass: PrismaWhatsAppRepository },
+    PrismaWhatsAppRepository,
+    { provide: WhatsAppRepository, useExisting: PrismaWhatsAppRepository },
+    {
+      provide: CommercialQuoteRepository,
+      useExisting: PrismaWhatsAppRepository,
+    },
     { provide: DataExchangeRepository, useClass: PrismaDataExchangeRepository },
     { provide: RoutingRepository, useClass: PrismaRoutingRepository },
     { provide: PassengerRepository, useClass: PrismaPassengerRepository },
     { provide: ContractRepository, useClass: PrismaContractRepository },
     { provide: RouteRepository, useClass: PrismaRouteRepository },
     { provide: FixedPointRepository, useClass: PrismaFixedPointRepository },
+    {
+      provide: RegistrationIdentityCandidateReader,
+      useClass: PrismaRegistrationIdentityCandidateReader,
+    },
+    {
+      provide: PreAdmissionAccessRepository,
+      useClass: PrismaPreAdmissionAccessRepository,
+    },
   ],
   exports: [
     PrismaService,
@@ -65,12 +83,15 @@ import { PrismaFixedPointRepository } from './repositories/prisma-fixed-point.re
     PasswordChangeChallengesRepository,
     TenantAuditLogsRepository,
     WhatsAppRepository,
+    CommercialQuoteRepository,
     DataExchangeRepository,
     RoutingRepository,
     PassengerRepository,
     ContractRepository,
     RouteRepository,
     FixedPointRepository,
+    RegistrationIdentityCandidateReader,
+    PreAdmissionAccessRepository,
   ],
 })
 export class DatabaseModule {}

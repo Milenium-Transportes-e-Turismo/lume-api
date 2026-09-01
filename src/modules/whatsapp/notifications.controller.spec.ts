@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AuthenticatedPrincipal } from '../../application/presenters/user.presenter';
-import type { QuoteProposalUseCase } from '../../application/use-cases/whatsapp/whatsapp.use-cases';
+import type { QuoteProposalUseCase } from '../../application/use-cases/commercial/commercial-quotes.use-case';
 import type { UserDepartment } from '../../domain/access/access.constants';
 import { NotificationsController } from './notifications.controller';
 

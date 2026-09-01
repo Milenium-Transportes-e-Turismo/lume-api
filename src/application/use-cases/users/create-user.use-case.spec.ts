@@ -65,6 +65,32 @@ describe('tenant-scoped user use cases', () => {
     expect(output.permissions).toContain('financial:manage');
   });
 
+  it('allows Cadastro view, creation and editing permissions for Management', async () => {
+    const output = await createUser.execute({
+      companyId: store.companies[0].id,
+      name: 'Gerente de Cadastros',
+      username: 'gerente.cadastros',
+      email: 'gerente.cadastros@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['management'],
+      permissionCodes: ['clients:view', 'clients:create', 'clients:update'],
+    });
+
+    expect(output.permissionCodes).toEqual([
+      'clients:create',
+      'clients:update',
+      'clients:view',
+    ]);
+    expect(output.permissions).toEqual(
+      expect.arrayContaining([
+        'clients:view',
+        'clients:create',
+        'clients:update',
+      ]),
+    );
+    expect(output.permissions).not.toContain('clients:manage');
+  });
+
   it('rejects administrative permission for a Commercial-only user', async () => {
     await expect(
       createUser.execute({

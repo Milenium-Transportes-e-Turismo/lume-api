@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { formatWhatsAppPhone } from '../../shared/utils/normalization';
 
 import {
+  CommercialClosureClassification,
   ConversationState,
   DeliveryStatus,
   DepartmentCode,
@@ -30,7 +31,7 @@ import {
 import {
   dateOnlyFromDateTime,
   presentDateOnly,
-} from '../../domain/whatsapp/quote-schedule';
+} from '../../domain/commercial/quote-schedule';
 import {
   emptyImportCounts,
   IMPORT_DEPARTMENT_CODES,
@@ -102,6 +103,18 @@ const REQUEST_TO_PRISMA: Record<string, RequestStatus> = {
   rejected: RequestStatus.REJECTED,
   cancelled: RequestStatus.CANCELLED,
 };
+
+function legacyClosureClassification(
+  status: RequestStatus,
+): CommercialClosureClassification | null {
+  if (status === RequestStatus.REJECTED) {
+    return CommercialClosureClassification.QUOTE_REJECTED;
+  }
+  if (status === RequestStatus.CANCELLED) {
+    return CommercialClosureClassification.LEGACY_UNCLASSIFIED;
+  }
+  return null;
+}
 
 const DIRECTION_TO_PRISMA: Record<string, MessageDirection> = {
   inbound: MessageDirection.INBOUND,
@@ -490,6 +503,7 @@ function selectedQuoteSnapshot(
     confirmedSummary: unknown;
     confirmedVersion: number | null;
     requestedByUserId: string | null;
+    closureClassification: CommercialClosureClassification | null;
     decisionReason: string | null;
     decidedAt: Date | null;
     decidedByUserId: string | null;
@@ -523,6 +537,7 @@ function selectedQuoteSnapshot(
     confirmedSummary: row.confirmedSummary,
     confirmedVersion: row.confirmedVersion,
     requestedByUserId: row.requestedByUserId,
+    closureClassification: row.closureClassification,
     decisionReason: row.decisionReason,
     decidedAt: row.decidedAt?.toISOString() ?? null,
     decidedByUserId: row.decidedByUserId,
@@ -2980,6 +2995,9 @@ export class WhatsAppImportService {
         : undefined;
       const quoteData = {
         status: REQUEST_TO_PRISMA[row.requestStatus],
+        closureClassification: legacyClosureClassification(
+          REQUEST_TO_PRISMA[row.requestStatus],
+        ),
         contactName: row.quoteContactName ?? null,
         document: row.quoteDocument ?? null,
         email: row.quoteEmail ?? null,
@@ -3795,6 +3813,12 @@ export class WhatsAppImportService {
     const batchConversationIds = new Set(
       records.map((record) => record.conversationId),
     );
+    const latestRecordIdByConversation = new Map<string, string>();
+    for (const record of records) {
+      if (!latestRecordIdByConversation.has(record.conversationId)) {
+        latestRecordIdByConversation.set(record.conversationId, record.id);
+      }
+    }
     const blockers: ImportIssue[] = [];
     for (const record of records) {
       const created =
@@ -3844,16 +3868,19 @@ export class WhatsAppImportService {
         );
       }
       const expectedAfter = record.afterSnapshot as unknown as Snapshot;
+      const isLatestConversationRecord =
+        latestRecordIdByConversation.get(record.conversationId) === record.id;
       if (
-        !snapshotEquals(currentSnapshot.contact, expectedAfter.contact) ||
-        !snapshotEquals(
-          currentSnapshot.conversation,
-          expectedAfter.conversation,
-        ) ||
-        !snapshotEquals(
-          currentSnapshot.quoteRequest,
-          expectedAfter.quoteRequest,
-        )
+        isLatestConversationRecord &&
+        (!snapshotEquals(currentSnapshot.contact, expectedAfter.contact) ||
+          !snapshotEquals(
+            currentSnapshot.conversation,
+            expectedAfter.conversation,
+          ) ||
+          !snapshotEquals(
+            currentSnapshot.quoteRequest,
+            expectedAfter.quoteRequest,
+          ))
       ) {
         issue(
           blockers,
@@ -4308,12 +4335,17 @@ export class WhatsAppImportService {
     companyId: string,
     snapshot: Record<string, unknown>,
   ): Promise<void> {
+    const restoredStatus = snapshot.status as RequestStatus;
     await transaction.quoteRequest.update({
       where: {
         id_companyId: { id: String(snapshot.id), companyId },
       },
       data: {
-        status: snapshot.status as RequestStatus,
+        status: restoredStatus,
+        closureClassification:
+          typeof snapshot.closureClassification === 'string'
+            ? (snapshot.closureClassification as CommercialClosureClassification)
+            : legacyClosureClassification(restoredStatus),
         contactName:
           typeof snapshot.contactName === 'string'
             ? snapshot.contactName

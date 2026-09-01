@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { Injectable } from '@nestjs/common';
 
@@ -9,11 +9,18 @@ import {
   validationError,
 } from '../../../core/errors/app-error';
 import {
+  createRegistrationConsolidationPreview,
+  type RegistrationConsolidationTransferCandidate,
+} from '../../../domain/registrations/registration-consolidation';
+import {
   DEFAULT_REGISTRATION_ROLES,
   DEFAULT_REGISTRATION_TAGS,
+  assertTemporaryRegistrationCanBeRegularized,
+  canAuthorizeTemporaryRegistration,
   normalizeRegistrationInput,
   normalizeRegistrationPromotionPayload,
   normalizeRegistrationSearch,
+  registrationOperationalRequirements,
   type NormalizedRegistrationInput,
   type RegistrationInput,
   type RegistrationPromotionPayload,
@@ -29,6 +36,7 @@ import { rethrowKnownPrismaConflict } from '../../../infra/database/prisma/prism
 import type { AuthenticatedPrincipal } from '../../presenters/user.presenter';
 
 const registrationInclude = {
+  temporaryResponsible: { select: { id: true, name: true } },
   roleAssignments: { include: { role: true } },
   tagAssignments: { include: { tag: true } },
   registrationPhones: { orderBy: [{ isPrimary: 'desc' }, { id: 'asc' }] },
@@ -68,6 +76,16 @@ type RegistrationRow = Prisma.RoutingCompanyGetPayload<{
   include: typeof registrationInclude;
 }>;
 
+type RegistrationOutput = ReturnType<typeof presentRegistration>;
+
+type RegistrationCommandHistory = {
+  readonly routingCompanyId: string;
+  readonly actorUserId: string | null;
+  readonly commandFingerprint: string | null;
+  readonly action: string;
+  readonly afterSnapshot: Prisma.JsonValue;
+};
+
 export interface RegistrationListQuery {
   page: number;
   pageSize: number;
@@ -76,6 +94,8 @@ export interface RegistrationListQuery {
   type?: 'pf' | 'pj';
   roleCodes?: string[];
   tagCodes?: string[];
+  temporary?: boolean;
+  regularization?: 'pending' | 'overdue';
   sort?: 'name' | 'status' | 'updated';
 }
 
@@ -126,6 +146,12 @@ function presentRegistration(row: RegistrationRow) {
     cpf: row.cpf,
     cnpj: row.cnpj,
     avicExternalId: row.avicExternalId,
+    isTemporary: row.isTemporary,
+    temporaryReason: row.temporaryReason,
+    regularizationDueAt: row.regularizationDueAt?.toISOString() ?? null,
+    regularizedAt: row.regularizedAt?.toISOString() ?? null,
+    regularizationRequirements: row.regularizationRequirements,
+    temporaryResponsible: row.temporaryResponsible,
     roles: row.roleAssignments
       .map(({ role }) => ({
         id: role.id,
@@ -202,6 +228,86 @@ function snapshot(registration: ReturnType<typeof presentRegistration>) {
   return JSON.parse(JSON.stringify(registration)) as Prisma.InputJsonValue;
 }
 
+function registrationFromSnapshot(value: Prisma.JsonValue): RegistrationOutput {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw conflict(
+      'O resultado original deste comando não está disponível para replay.',
+    );
+  }
+  return value as RegistrationOutput;
+}
+
+function canonicalizeCommandValue(value: unknown): unknown {
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(canonicalizeCommandValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, nested]) => nested !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => [key, canonicalizeCommandValue(nested)]),
+    );
+  }
+  return value;
+}
+
+function registrationMutationFingerprint(input: {
+  readonly companyId: string;
+  readonly registrationId: string | null;
+  readonly actorUserId: string;
+  readonly operation: 'create' | 'update';
+  readonly payload: Readonly<Record<string, unknown>>;
+}): string {
+  const payload = Object.fromEntries(
+    Object.entries(input.payload).filter(([key]) => key !== 'commandId'),
+  );
+  return createHash('sha256')
+    .update(
+      JSON.stringify(
+        canonicalizeCommandValue({
+          ...input,
+          payload,
+        }),
+      ),
+    )
+    .digest('hex');
+}
+
+function replayRegistrationCommand(
+  history: RegistrationCommandHistory,
+  expected: {
+    readonly registrationId?: string;
+    readonly actorUserId: string;
+    readonly commandFingerprint: string;
+    readonly actions: readonly string[];
+  },
+): RegistrationOutput {
+  if (!history.commandFingerprint) {
+    throw conflict(
+      'Este commandId pertence ao histórico legado e não pode ser repetido com segurança.',
+    );
+  }
+  if (
+    (expected.registrationId &&
+      history.routingCompanyId !== expected.registrationId) ||
+    history.actorUserId !== expected.actorUserId ||
+    history.commandFingerprint !== expected.commandFingerprint ||
+    !expected.actions.includes(history.action)
+  ) {
+    throw conflict('O commandId já foi utilizado com outros dados.');
+  }
+  return registrationFromSnapshot(history.afterSnapshot);
+}
+
+function mayHaveConcurrentRegistrationReplay(error: unknown): boolean {
+  if (!error || typeof error !== 'object' || !('code' in error)) return false;
+  return (
+    error.code === 'P2002' ||
+    error.code === 'P2034' ||
+    error.code === 'CONFLICT'
+  );
+}
+
 function normalizeCatalogCode(value: string): string {
   const code = value
     .normalize('NFKD')
@@ -224,10 +330,70 @@ function compact(value?: string | null): string | null {
 export class RegistrationsService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private async replayMutationAfterConflict(input: {
+    readonly companyId: string;
+    readonly commandId: string;
+    readonly registrationId?: string;
+    readonly actorUserId: string;
+    readonly commandFingerprint: string;
+    readonly actions: readonly string[];
+  }): Promise<RegistrationOutput | null> {
+    const history = await this.prisma.routingCompanyHistory.findUnique({
+      where: {
+        companyId_commandId: {
+          companyId: input.companyId,
+          commandId: input.commandId,
+        },
+      },
+    });
+    return history ? replayRegistrationCommand(history, input) : null;
+  }
+
   private assertInternal(current: AuthenticatedPrincipal) {
     if (current.routingCompanyId) {
       throw forbidden(
         'Usuários de clientes não podem alterar o Cadastro geral.',
+      );
+    }
+  }
+
+  private assertTemporaryRegistrationAuthorization(
+    current: AuthenticatedPrincipal,
+  ) {
+    if (canAuthorizeTemporaryRegistration(current)) {
+      return;
+    }
+    throw forbidden(
+      'Cadastro temporário exige Gerência ou permissão para gerenciar Cadastros.',
+    );
+  }
+
+  private async assertTemporaryResponsible(
+    transaction: Prisma.TransactionClient,
+    companyId: string,
+    responsibleUserId: string,
+  ): Promise<void> {
+    const responsible = await transaction.user.findUnique({
+      where: {
+        id_companyId: { id: responsibleUserId, companyId },
+      },
+      select: {
+        isActive: true,
+        deletedAt: true,
+        status: true,
+        routingCompanyId: true,
+        documentAccessMode: true,
+      },
+    });
+    if (
+      !responsible?.isActive ||
+      responsible.deletedAt ||
+      responsible.status !== 'ACTIVE' ||
+      responsible.routingCompanyId ||
+      responsible.documentAccessMode !== 'STANDARD'
+    ) {
+      throw validationError(
+        'Selecione um usuário interno e ativo do tenant como responsável pela regularização.',
       );
     }
   }
@@ -401,6 +567,28 @@ export class RegistrationsService {
   }> {
     this.assertInternal(current);
     const graph = normalizeRegistrationPromotionPayload(payload);
+    if (
+      graph.registrations.some(({ registration }) => registration.isTemporary)
+    ) {
+      this.assertTemporaryRegistrationAuthorization(current);
+      await Promise.all(
+        [
+          ...new Set(
+            graph.registrations.flatMap(({ registration }) =>
+              registration.temporaryResponsibleUserId
+                ? [registration.temporaryResponsibleUserId]
+                : [],
+            ),
+          ),
+        ].map((responsibleUserId) =>
+          this.assertTemporaryResponsible(
+            transaction,
+            current.companyId,
+            responsibleUserId,
+          ),
+        ),
+      );
+    }
     await this.ensureCatalog(current.companyId, transaction);
     const roleCodes = [
       ...new Set(
@@ -472,6 +660,11 @@ export class RegistrationsService {
           legalPhones: normalized.legalPhones,
           status: normalized.status.toUpperCase() as RoutingCompanyStatus,
           avicExternalId: normalized.avicExternalId,
+          isTemporary: normalized.isTemporary,
+          temporaryReason: normalized.temporaryReason,
+          regularizationDueAt: normalized.regularizationDueAt,
+          regularizationRequirements: normalized.regularizationRequirements,
+          temporaryResponsibleUserId: normalized.temporaryResponsibleUserId,
           createdByUserId: current.id,
           externalReferences: normalized.avicExternalId
             ? {
@@ -485,29 +678,21 @@ export class RegistrationsService {
             : undefined,
           roleAssignments: {
             create: normalized.roleCodes.map((code) => ({
-              companyId: current.companyId,
               roleId: roleByCode.get(code)!.id,
               assignedByUserId: current.id,
             })),
           },
           tagAssignments: {
             create: normalized.tagCodes.map((code) => ({
-              companyId: current.companyId,
               tagId: tagByCode.get(code)!.id,
               assignedByUserId: current.id,
             })),
           },
           registrationPhones: {
-            create: normalized.phones.map((phone) => ({
-              companyId: current.companyId,
-              ...phone,
-            })),
+            create: normalized.phones,
           },
           registrationEmails: {
-            create: normalized.emails.map((email) => ({
-              companyId: current.companyId,
-              ...email,
-            })),
+            create: normalized.emails,
           },
         },
       });
@@ -592,6 +777,14 @@ export class RegistrationsService {
       ...(query.type
         ? { clientType: query.type.toUpperCase() as RoutingClientType }
         : {}),
+      ...(query.temporary !== undefined
+        ? { isTemporary: query.temporary }
+        : {}),
+      ...(query.regularization === 'pending'
+        ? { isTemporary: true }
+        : query.regularization === 'overdue'
+          ? { isTemporary: true, regularizationDueAt: { lt: new Date() } }
+          : {}),
       ...(roleCodes?.length
         ? { roleAssignments: { some: { role: { code: { in: roleCodes } } } } }
         : {}),
@@ -723,13 +916,168 @@ export class RegistrationsService {
     return presentRegistration(row);
   }
 
+  async consolidationPreview(
+    current: AuthenticatedPrincipal,
+    principalRegistrationId: string,
+    duplicateRegistrationId: string,
+  ) {
+    this.assertInternal(current);
+    return this.prisma.$transaction(async (transaction) => {
+      const [principal, duplicate] = await Promise.all([
+        transaction.routingCompany.findUnique({
+          where: {
+            id_companyId: {
+              id: principalRegistrationId,
+              companyId: current.companyId,
+            },
+          },
+          select: {
+            id: true,
+            companyId: true,
+            clientType: true,
+            version: true,
+          },
+        }),
+        transaction.routingCompany.findUnique({
+          where: {
+            id_companyId: {
+              id: duplicateRegistrationId,
+              companyId: current.companyId,
+            },
+          },
+          include: {
+            users: { select: { id: true } },
+            passengers: { select: { id: true } },
+            importRecords: { select: { id: true } },
+            routes: { select: { id: true } },
+            contracts: { select: { id: true } },
+            fixedPoints: { select: { id: true } },
+            roleAssignments: { select: { id: true } },
+            tagAssignments: { select: { id: true } },
+            registrationPhones: { select: { id: true } },
+            registrationEmails: { select: { id: true } },
+            outgoingRegistrationRelationships: {
+              where: { active: true },
+              select: { id: true },
+            },
+            incomingRegistrationRelationships: {
+              where: { active: true },
+              select: { id: true },
+            },
+            externalReferences: { select: { id: true } },
+            promotedCandidates: { select: { id: true } },
+          },
+        }),
+      ]);
+      if (!principal) throw notFound('Cadastro principal');
+      if (!duplicate) throw notFound('Cadastro duplicado');
+
+      const transfers: RegistrationConsolidationTransferCandidate[] = [];
+      const collect = (
+        rows: readonly { id: string }[],
+        resourceType: string,
+        referenceField: string,
+      ) => {
+        for (const row of rows) {
+          transfers.push({
+            resourceType,
+            resourceId: row.id,
+            referenceField,
+            companyId: current.companyId,
+            fromRegistrationId: duplicate.id,
+            toRegistrationId: principal.id,
+            reversible: false,
+          });
+        }
+      };
+
+      collect(duplicate.users, 'user-access-scope', 'routingCompanyId');
+      collect(duplicate.passengers, 'passenger', 'routingCompanyId');
+      collect(
+        duplicate.importRecords,
+        'passenger-import-record',
+        'routingCompanyId',
+      );
+      collect(duplicate.routes, 'route-plan', 'routingCompanyId');
+      collect(duplicate.contracts, 'continuous-contract', 'routingCompanyId');
+      collect(duplicate.fixedPoints, 'fixed-point', 'routingCompanyId');
+      collect(duplicate.roleAssignments, 'registration-role', 'registrationId');
+      collect(duplicate.tagAssignments, 'registration-tag', 'registrationId');
+      collect(
+        duplicate.registrationPhones,
+        'registration-phone',
+        'registrationId',
+      );
+      collect(
+        duplicate.registrationEmails,
+        'registration-email',
+        'registrationId',
+      );
+      collect(
+        duplicate.outgoingRegistrationRelationships,
+        'registration-relationship',
+        'sourceRegistrationId',
+      );
+      collect(
+        duplicate.incomingRegistrationRelationships,
+        'registration-relationship',
+        'targetRegistrationId',
+      );
+      collect(
+        duplicate.externalReferences,
+        'registration-external-reference',
+        'registrationId',
+      );
+      collect(
+        duplicate.promotedCandidates,
+        'registration-candidate',
+        'promotedRegistrationId',
+      );
+
+      return createRegistrationConsolidationPreview({
+        companyId: current.companyId,
+        principal: {
+          id: principal.id,
+          companyId: principal.companyId,
+          type: principal.clientType.toLowerCase() as 'pf' | 'pj',
+          version: principal.version,
+        },
+        duplicate: {
+          id: duplicate.id,
+          companyId: duplicate.companyId,
+          type: duplicate.clientType.toLowerCase() as 'pf' | 'pj',
+          version: duplicate.version,
+        },
+        transfers,
+        applicationAvailable: false,
+      });
+    });
+  }
+
   async create(
     current: AuthenticatedPrincipal,
     input: RegistrationMutationInput,
   ) {
     this.assertInternal(current);
     const id = randomUUID();
-    const normalized = normalizeRegistrationInput(input, id);
+    const commandPayload = {
+      ...input,
+      expectedVersion: 0,
+      temporaryResponsibleUserId: input.isTemporary
+        ? (input.temporaryResponsibleUserId ?? current.id)
+        : null,
+    };
+    const commandFingerprint = registrationMutationFingerprint({
+      companyId: current.companyId,
+      registrationId: null,
+      actorUserId: current.id,
+      operation: 'create',
+      payload: commandPayload,
+    });
+    const normalized = normalizeRegistrationInput(commandPayload, id);
+    if (normalized.isTemporary) {
+      this.assertTemporaryRegistrationAuthorization(current);
+    }
     try {
       const row = await this.prisma.$transaction(async (transaction) => {
         const repeated = await transaction.routingCompanyHistory.findUnique({
@@ -741,15 +1089,18 @@ export class RegistrationsService {
           },
         });
         if (repeated) {
-          return transaction.routingCompany.findUniqueOrThrow({
-            where: {
-              id_companyId: {
-                id: repeated.routingCompanyId,
-                companyId: current.companyId,
-              },
-            },
-            include: registrationInclude,
+          return replayRegistrationCommand(repeated, {
+            actorUserId: current.id,
+            commandFingerprint,
+            actions: ['REGISTRATION_CREATED'],
           });
+        }
+        if (normalized.isTemporary) {
+          await this.assertTemporaryResponsible(
+            transaction,
+            current.companyId,
+            normalized.temporaryResponsibleUserId!,
+          );
         }
         await this.ensureCatalog(current.companyId, transaction);
         await this.assertNoDuplicateRegistration(
@@ -804,6 +1155,11 @@ export class RegistrationsService {
             legalPhones: normalized.legalPhones,
             status: normalized.status.toUpperCase() as RoutingCompanyStatus,
             avicExternalId: normalized.avicExternalId,
+            isTemporary: normalized.isTemporary,
+            temporaryReason: normalized.temporaryReason,
+            regularizationDueAt: normalized.regularizationDueAt,
+            regularizationRequirements: normalized.regularizationRequirements,
+            temporaryResponsibleUserId: normalized.temporaryResponsibleUserId,
             createdByUserId: current.id,
             externalReferences: normalized.avicExternalId
               ? {
@@ -817,29 +1173,21 @@ export class RegistrationsService {
               : undefined,
             roleAssignments: {
               create: roles.map((role) => ({
-                companyId: current.companyId,
                 roleId: role.id,
                 assignedByUserId: current.id,
               })),
             },
             tagAssignments: {
               create: tags.map((tag) => ({
-                companyId: current.companyId,
                 tagId: tag.id,
                 assignedByUserId: current.id,
               })),
             },
             registrationPhones: {
-              create: normalized.phones.map((phone) => ({
-                companyId: current.companyId,
-                ...phone,
-              })),
+              create: normalized.phones,
             },
             registrationEmails: {
-              create: normalized.emails.map((email) => ({
-                companyId: current.companyId,
-                ...email,
-              })),
+              create: normalized.emails,
             },
           },
           include: registrationInclude,
@@ -850,14 +1198,25 @@ export class RegistrationsService {
             routingCompanyId: created.id,
             actorUserId: current.id,
             commandId: input.commandId,
+            commandFingerprint,
             action: 'REGISTRATION_CREATED',
             afterSnapshot: snapshot(presentRegistration(created)),
           },
         });
         return created;
       });
-      return presentRegistration(row);
+      return 'clientType' in row ? presentRegistration(row) : row;
     } catch (error) {
+      if (mayHaveConcurrentRegistrationReplay(error)) {
+        const replayed = await this.replayMutationAfterConflict({
+          companyId: current.companyId,
+          commandId: input.commandId,
+          actorUserId: current.id,
+          commandFingerprint,
+          actions: ['REGISTRATION_CREATED'],
+        });
+        if (replayed) return replayed;
+      }
       rethrowKnownPrismaConflict(error);
     }
   }
@@ -868,7 +1227,13 @@ export class RegistrationsService {
     input: RegistrationMutationInput & { expectedVersion: number },
   ) {
     this.assertInternal(current);
-    const normalized = normalizeRegistrationInput(input, registrationId);
+    const commandFingerprint = registrationMutationFingerprint({
+      companyId: current.companyId,
+      registrationId,
+      actorUserId: current.id,
+      operation: 'update',
+      payload: { ...input },
+    });
     try {
       const row = await this.prisma.$transaction(async (transaction) => {
         const repeated = await transaction.routingCompanyHistory.findUnique({
@@ -880,17 +1245,11 @@ export class RegistrationsService {
           },
         });
         if (repeated) {
-          if (repeated.routingCompanyId !== registrationId) {
-            throw conflict('O commandId já foi utilizado em outro Cadastro.');
-          }
-          return transaction.routingCompany.findUniqueOrThrow({
-            where: {
-              id_companyId: {
-                id: registrationId,
-                companyId: current.companyId,
-              },
-            },
-            include: registrationInclude,
+          return replayRegistrationCommand(repeated, {
+            registrationId,
+            actorUserId: current.id,
+            commandFingerprint,
+            actions: ['REGISTRATION_UPDATED', 'REGISTRATION_REGULARIZED'],
           });
         }
         const before = await transaction.routingCompany.findUnique({
@@ -900,6 +1259,45 @@ export class RegistrationsService {
           include: registrationInclude,
         });
         if (!before) throw notFound('Cadastro');
+        const keepExpiredDeadline =
+          before.isTemporary && input.regularizationDueAt === undefined;
+        const normalized = normalizeRegistrationInput(
+          {
+            ...input,
+            isTemporary: input.isTemporary ?? before.isTemporary,
+            temporaryReason:
+              input.temporaryReason === undefined
+                ? before.temporaryReason
+                : input.temporaryReason,
+            regularizationDueAt:
+              input.regularizationDueAt === undefined
+                ? before.regularizationDueAt
+                : input.regularizationDueAt,
+            temporaryResponsibleUserId:
+              input.temporaryResponsibleUserId === undefined
+                ? (before.temporaryResponsibleUserId ?? current.id)
+                : input.temporaryResponsibleUserId,
+          },
+          registrationId,
+          new Date(),
+          keepExpiredDeadline,
+        );
+        const isRegularizing = before.isTemporary && !normalized.isTemporary;
+        const tracksOperationalRequirements =
+          before.isTemporary || before.regularizedAt !== null;
+        if (normalized.isTemporary || isRegularizing) {
+          this.assertTemporaryRegistrationAuthorization(current);
+        }
+        if (isRegularizing) {
+          assertTemporaryRegistrationCanBeRegularized(normalized);
+        }
+        if (normalized.isTemporary) {
+          await this.assertTemporaryResponsible(
+            transaction,
+            current.companyId,
+            normalized.temporaryResponsibleUserId!,
+          );
+        }
         await this.ensureCatalog(current.companyId, transaction);
         const [roles, tags] = await Promise.all([
           transaction.registrationRole.findMany({
@@ -954,6 +1352,25 @@ export class RegistrationsService {
             legalPhones: normalized.legalPhones,
             status: normalized.status.toUpperCase() as RoutingCompanyStatus,
             avicExternalId: normalized.avicExternalId,
+            isTemporary: normalized.isTemporary,
+            temporaryReason: normalized.isTemporary
+              ? normalized.temporaryReason
+              : before.temporaryReason,
+            regularizationDueAt: normalized.isTemporary
+              ? normalized.regularizationDueAt
+              : before.regularizationDueAt,
+            regularizedAt:
+              before.isTemporary && !normalized.isTemporary
+                ? new Date()
+                : before.regularizedAt,
+            regularizationRequirements: normalized.isTemporary
+              ? normalized.regularizationRequirements
+              : tracksOperationalRequirements
+                ? registrationOperationalRequirements(normalized.roleCodes)
+                : normalized.regularizationRequirements,
+            temporaryResponsibleUserId: normalized.isTemporary
+              ? normalized.temporaryResponsibleUserId
+              : before.temporaryResponsibleUserId,
             version: { increment: 1 },
           },
         });
@@ -1088,17 +1505,43 @@ export class RegistrationsService {
             routingCompanyId: registrationId,
             actorUserId: current.id,
             commandId: input.commandId,
-            action: 'REGISTRATION_UPDATED',
+            commandFingerprint,
+            action:
+              before.isTemporary && !after.isTemporary
+                ? 'REGISTRATION_REGULARIZED'
+                : 'REGISTRATION_UPDATED',
             beforeSnapshot: snapshot(presentRegistration(before)),
             afterSnapshot: snapshot(presentRegistration(after)),
           },
         });
         return after;
       });
-      return presentRegistration(row);
+      return 'clientType' in row ? presentRegistration(row) : row;
     } catch (error) {
+      if (mayHaveConcurrentRegistrationReplay(error)) {
+        const replayed = await this.replayMutationAfterConflict({
+          companyId: current.companyId,
+          commandId: input.commandId,
+          registrationId,
+          actorUserId: current.id,
+          commandFingerprint,
+          actions: ['REGISTRATION_UPDATED', 'REGISTRATION_REGULARIZED'],
+        });
+        if (replayed) return replayed;
+      }
       rethrowKnownPrismaConflict(error);
     }
+  }
+
+  regularize(
+    current: AuthenticatedPrincipal,
+    registrationId: string,
+    input: RegistrationMutationInput & { expectedVersion: number },
+  ) {
+    return this.update(current, registrationId, {
+      ...input,
+      isTemporary: false,
+    });
   }
 
   async createRelationship(

@@ -4,6 +4,7 @@ import {
   notFound,
   validationError,
 } from '../../../core/errors/app-error';
+import { assertRegistrationAllowsCommercialCommitment } from '../../../domain/registrations/registration';
 import {
   CONTRACT_PERIODICITIES,
   CONTRACT_STATUSES,
@@ -83,6 +84,7 @@ export class RoutingContractsUseCase {
     if (!company || company.status !== 'active') {
       throw validationError('Selecione uma empresa cliente ativa.');
     }
+    assertRegistrationAllowsCommercialCommitment(company);
   }
 
   async create(

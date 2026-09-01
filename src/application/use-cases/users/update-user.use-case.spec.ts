@@ -60,6 +60,37 @@ describe('UpdateUserUseCase', () => {
     ]);
   });
 
+  it('assigns Cadastro view, creation and editing permissions to existing Management users', async () => {
+    const created = await create.execute({
+      companyId: store.companies[0].id,
+      name: 'Gerente Existente',
+      username: 'gerente.existente',
+      email: 'gerente.existente@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['management'],
+      permissionCodes: [],
+    });
+
+    const updated = await useCase.execute({
+      companyId: store.companies[0].id,
+      userId: created.id,
+      permissionCodes: ['clients:view', 'clients:create', 'clients:update'],
+    });
+
+    expect(updated.permissionCodes).toEqual([
+      'clients:create',
+      'clients:update',
+      'clients:view',
+    ]);
+    expect(updated.permissions).toEqual(
+      expect.arrayContaining([
+        'clients:view',
+        'clients:create',
+        'clients:update',
+      ]),
+    );
+  });
+
   it('keeps a document-only candidate editable and promotes it to collaborator', async () => {
     const candidate = await create.execute({
       companyId: store.companies[0].id,

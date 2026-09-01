@@ -25,6 +25,7 @@ import type { Response } from 'express';
 
 import type { AuthenticatedPrincipal } from '../../application/presenters/user.presenter';
 import { DocumentManagementUseCase } from '../../application/use-cases/documents/document-management.use-case';
+import { LegacyDocumentSubjectPreviewService } from '../../application/use-cases/documents/legacy-document-subject-preview.service';
 import { validationError } from '../../core/errors/app-error';
 import type { DocumentFileSide } from '../../domain/documents/document-workflow';
 import { CurrentUser } from '../../shared/http/decorators/current-user.decorator';
@@ -95,7 +96,10 @@ function parseFileMetadata(body: UploadDocumentSubmissionDto, count: number) {
 @ApiBearerAuth()
 @Controller('document-management')
 export class DocumentManagementController {
-  constructor(private readonly documents: DocumentManagementUseCase) {}
+  constructor(
+    private readonly documents: DocumentManagementUseCase,
+    private readonly legacySubjects: LegacyDocumentSubjectPreviewService,
+  ) {}
 
   @Get('document-types')
   @RequireAnyPermission('documents:manage')
@@ -324,6 +328,16 @@ export class DocumentManagementController {
     @Body() body: UpdateExtractedFieldsDto,
   ) {
     return this.documents.updateExtractedData(current, submissionId, body);
+  }
+
+  @Get('submissions/:submissionId/legacy-subject-preview')
+  @RequireAnyPermission('documents:manage')
+  legacySubjectPreview(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Param('submissionId', new ParseUUIDPipe({ version: '4' }))
+    submissionId: string,
+  ) {
+    return this.legacySubjects.preview(current, submissionId);
   }
 
   @Post('submissions/:submissionId/reviews')

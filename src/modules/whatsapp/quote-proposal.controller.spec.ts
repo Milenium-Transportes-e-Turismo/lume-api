@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AuthenticatedPrincipal } from '../../application/presenters/user.presenter';
-import type { QuoteProposalUseCase } from '../../application/use-cases/whatsapp/whatsapp.use-cases';
+import type { QuoteProposalUseCase } from '../../application/use-cases/commercial/commercial-quotes.use-case';
 import { REQUIRED_PERMISSIONS } from '../../shared/http/decorators/require-permissions.decorator';
 import { QuoteProposalListQueryDto } from './dto/whatsapp.dto';
 import {

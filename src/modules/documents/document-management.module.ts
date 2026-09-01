@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 
 import { DOCUMENT_REVIEW_AGENT } from '../../application/contracts/document-review-agent';
 import { DocumentManagementUseCase } from '../../application/use-cases/documents/document-management.use-case';
+import { LegacyDocumentSubjectPreviewService } from '../../application/use-cases/documents/legacy-document-subject-preview.service';
 import {
   FallbackDocumentReviewAgent,
   LocalStructuralReviewAgent,
@@ -38,6 +39,7 @@ import { DocumentManagementController } from './document-management.controller';
       },
     },
     DocumentManagementUseCase,
+    LegacyDocumentSubjectPreviewService,
   ],
   exports: [DocumentManagementUseCase],
 })

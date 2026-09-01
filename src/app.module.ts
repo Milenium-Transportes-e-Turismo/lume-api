@@ -20,6 +20,10 @@ import { PlatformAdministrationModule } from './modules/administration/platform-
 import { AppErrorFilter } from './shared/http/filters/app-error.filter';
 import { RoutingModule } from './modules/routing/routing.module';
 import { RegistrationsModule } from './modules/registrations/registrations.module';
+import { CommercialModule } from './modules/commercial/commercial.module';
+import { OperationalTripsModule } from './modules/trips/operational-trips.module';
+import { IdentityModule } from './modules/identity/identity.module';
+import { PreAdmissionModule } from './modules/pre-admission/pre-admission.module';
 
 @Module({
   imports: [
@@ -54,6 +58,10 @@ import { RegistrationsModule } from './modules/registrations/registrations.modul
     PlatformAdministrationModule,
     RoutingModule,
     RegistrationsModule,
+    CommercialModule,
+    OperationalTripsModule,
+    IdentityModule,
+    PreAdmissionModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AppErrorFilter },

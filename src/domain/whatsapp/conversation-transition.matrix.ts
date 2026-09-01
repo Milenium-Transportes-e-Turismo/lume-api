@@ -37,6 +37,8 @@ const actorsByTransition: Readonly<
   'proposal-response-received': ['webhook', 'system'],
   'return-to-main-menu': ['system'],
   'take-over': ['user'],
+  'request-transfer': ['user'],
+  'accept-transfer': ['user'],
   'return-to-bot': ['user'],
   forward: ['user', 'system'],
   'change-department': ['user'],
@@ -329,6 +331,36 @@ export function resolveConversationTransition(
     case 'take-over':
       return {
         ...current,
+        conversationState: 'human-active',
+        flowStep: 'human-service',
+        resumeState: null,
+        resumeFlowStep: resolveBotFlowStep(current),
+      };
+
+    case 'request-transfer':
+      assertState(current, ['human-active'], name);
+      if (!input.targetDepartment) {
+        throw validationError(
+          'Informe o departamento de destino da transferência.',
+        );
+      }
+      if (input.targetDepartment === current.department) {
+        throw validationError(
+          'O destino da transferência deve ser diferente do departamento atual.',
+        );
+      }
+      return current;
+
+    case 'accept-transfer':
+      assertState(current, ['human-active'], name);
+      if (!input.targetDepartment) {
+        throw validationError(
+          'A transferência pendente não possui departamento de destino.',
+        );
+      }
+      return {
+        ...current,
+        department: input.targetDepartment,
         conversationState: 'human-active',
         flowStep: 'human-service',
         resumeState: null,

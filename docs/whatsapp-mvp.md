@@ -37,6 +37,14 @@ isoladas para análise. Um evento nunca é encaminhado para dois consumidores.
 somente a sessão humana, remove a atribuição e volta ao menu inicial. A conversa
 canônica e todo o histórico são preservados para o próximo contato.
 
+Somente o atendente responsável pode devolver a conversa ao bot; a checagem é
+feita dentro da mesma transação da mudança. A transferência entre departamentos
+é solicitada com departamento de destino e motivo. Até o aceite, o atendimento
+permanece ativo, atribuído ao atendente e ao departamento de origem, enquanto a
+pendência aparece para o destino. O aceite por usuário elegível altera
+departamento e responsável na mesma transação. Ambos os passos exigem a versão
+esperada e permanecem auditáveis.
+
 ## Orçamentos e anexos
 
 O envio de proposta em PDF assume o remetente como atendente, cria mensagem

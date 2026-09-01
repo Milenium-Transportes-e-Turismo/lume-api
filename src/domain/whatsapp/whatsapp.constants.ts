@@ -1,4 +1,11 @@
 import type { Department } from '../access/access.constants';
+import {
+  ACTIVE_QUOTE_REQUEST_STATUSES,
+  QUOTE_REQUEST_STATUSES,
+  type QuoteRequestStatus,
+} from '../commercial/quote-status';
+
+export { ACTIVE_QUOTE_REQUEST_STATUSES };
 
 export const CONVERSATION_STATES = [
   'bot-active',
@@ -19,22 +26,8 @@ export const FLOW_STEPS = [
   'closed',
 ] as const;
 
-export const REQUEST_STATUSES = [
-  'not-started',
-  'collecting-information',
-  'waiting-for-customer',
-  'under-review',
-  'approved',
-  'rejected',
-  'cancelled',
-] as const;
-
-export const ACTIVE_QUOTE_REQUEST_STATUSES = [
-  'collecting-information',
-  'waiting-for-customer',
-  'under-review',
-  'approved',
-] as const satisfies readonly (typeof REQUEST_STATUSES)[number][];
+/** @deprecated Importe QUOTE_REQUEST_STATUSES do contexto Comercial. */
+export const REQUEST_STATUSES = QUOTE_REQUEST_STATUSES;
 
 export const MESSAGE_DIRECTIONS = ['inbound', 'outbound'] as const;
 
@@ -59,8 +52,6 @@ export const MESSAGE_KINDS = [
   'unknown',
 ] as const;
 
-export const QUOTE_PROPOSAL_MAX_PDF_BYTES = 10 * 1024 * 1024;
-
 export const UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT =
   'Ainda não consigo interpretar esse tipo de arquivo. Por favor, envie sua resposta em texto.';
 
@@ -77,6 +68,8 @@ export const TRANSITION_NAMES = [
   'new-quote-request',
   'return-to-main-menu',
   'take-over',
+  'request-transfer',
+  'accept-transfer',
   'return-to-bot',
   'forward',
   'change-department',
@@ -92,7 +85,8 @@ export const TRANSITION_NAMES = [
 
 export type ConversationState = (typeof CONVERSATION_STATES)[number];
 export type FlowStep = (typeof FLOW_STEPS)[number];
-export type RequestStatus = (typeof REQUEST_STATUSES)[number];
+/** @deprecated Importe QuoteRequestStatus do contexto Comercial. */
+export type RequestStatus = QuoteRequestStatus;
 export type MessageDirection = (typeof MESSAGE_DIRECTIONS)[number];
 export type DeliveryStatus = (typeof DELIVERY_STATUSES)[number];
 export type MessageKind = (typeof MESSAGE_KINDS)[number];

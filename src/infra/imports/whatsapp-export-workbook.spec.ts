@@ -109,9 +109,17 @@ describe('createWhatsAppImportWorkbook', () => {
     await firstWorkbook.xlsx.load(first.content);
     await secondWorkbook.xlsx.load(second.content);
 
+    const firstArchive = await JSZip.loadAsync(first.content);
+    const archiveEntryDates = new Set(
+      Object.values(firstArchive.files).map((entry) =>
+        entry.date.toISOString(),
+      ),
+    );
+
     expect(firstWorkbook.getWorksheet('Mensagens')?.getCell('B2').text).toBe(
       secondWorkbook.getWorksheet('Mensagens')?.getCell('B2').text,
     );
+    expect(archiveEntryDates).toEqual(new Set(['2000-01-01T00:00:00.000Z']));
     expect(first.content.equals(second.content)).toBe(true);
   });
 

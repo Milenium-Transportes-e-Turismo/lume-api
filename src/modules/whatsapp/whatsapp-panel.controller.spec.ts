@@ -2,8 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { ConfigService } from '@nestjs/config';
 
 import type { AuthenticatedPrincipal } from '../../application/presenters/user.presenter';
+import type { QuoteProposalUseCase } from '../../application/use-cases/commercial/commercial-quotes.use-case';
 import type { QueryWhatsAppUseCase } from '../../application/use-cases/whatsapp/whatsapp.use-cases';
-import { ConversationListQueryDto } from './dto/whatsapp.dto';
+import {
+  ConversationListQueryDto,
+  MessageListQueryDto,
+  TransitionListQueryDto,
+} from './dto/whatsapp.dto';
 import { WhatsAppPanelController } from './whatsapp-panel.controller';
 
 function principal(
@@ -32,7 +37,16 @@ function principal(
 
 function setup(configOverrides: Readonly<Record<string, unknown>> = {}) {
   const listConversations = vi.fn();
-  const queryUseCase = { listConversations };
+  const getConversation = vi.fn();
+  const listMessages = vi.fn();
+  const listTransitions = vi.fn();
+  const queryUseCase = {
+    listConversations,
+    getConversation,
+    listMessages,
+    listTransitions,
+  };
+  const commercialQuotes = { currentForConversation: vi.fn() };
   const ensureConversation = { execute: vi.fn() };
   const transition = { execute: vi.fn() };
   const createHumanOutbound = { execute: vi.fn() };
@@ -43,6 +57,7 @@ function setup(configOverrides: Readonly<Record<string, unknown>> = {}) {
   };
   const controller = new WhatsAppPanelController(
     queryUseCase as unknown as QueryWhatsAppUseCase,
+    commercialQuotes as unknown as QuoteProposalUseCase,
     ensureConversation as never,
     transition as never,
     createHumanOutbound as never,
@@ -60,12 +75,75 @@ function setup(configOverrides: Readonly<Record<string, unknown>> = {}) {
   return {
     controller,
     listConversations,
+    getConversation,
+    listMessages,
+    listTransitions,
     ensureConversation,
     transition,
     createHumanOutbound,
     mediaStorage,
   };
 }
+
+describe('WhatsAppPanelController conversation scope', () => {
+  it('scopes detail, messages and transitions to assigned departments', () => {
+    const { controller, getConversation, listMessages, listTransitions } =
+      setup();
+    const current = principal({ departments: ['operations', 'monitoring'] });
+    const conversationId = '00000000-0000-4000-8000-000000000003';
+    const messageQuery = new MessageListQueryDto();
+    const transitionQuery = new TransitionListQueryDto();
+
+    void controller.detail(current, conversationId);
+    void controller.messages(current, conversationId, messageQuery);
+    void controller.transitions(current, conversationId, transitionQuery);
+
+    const scope = { departments: ['operations', 'monitoring'] };
+    expect(getConversation).toHaveBeenCalledWith(
+      current.companyId,
+      conversationId,
+      scope,
+    );
+    expect(listMessages).toHaveBeenCalledWith(
+      current.companyId,
+      conversationId,
+      messageQuery,
+      scope,
+    );
+    expect(listTransitions).toHaveBeenCalledWith(
+      current.companyId,
+      conversationId,
+      transitionQuery,
+      scope,
+    );
+  });
+
+  it('allows a tenant-wide scope only for a manager without departments', () => {
+    const { controller, getConversation } = setup();
+    const current = principal({
+      departments: [],
+      permissions: ['whatsapp-conversations:manage'],
+    });
+
+    void controller.detail(current, '00000000-0000-4000-8000-000000000003');
+
+    expect(getConversation).toHaveBeenCalledWith(
+      current.companyId,
+      '00000000-0000-4000-8000-000000000003',
+      { departments: null },
+    );
+  });
+
+  it('rejects conversation reads without a department or management access', () => {
+    const { controller, getConversation } = setup();
+    const current = principal({ departments: [], permissions: [] });
+
+    expect(() =>
+      controller.detail(current, '00000000-0000-4000-8000-000000000003'),
+    ).toThrowError(expect.objectContaining({ code: 'FORBIDDEN' }));
+    expect(getConversation).not.toHaveBeenCalled();
+  });
+});
 
 describe('WhatsAppPanelController start conversation', () => {
   it('reuses the canonical conversation and assigns the current attendant', async () => {
@@ -96,6 +174,109 @@ describe('WhatsAppPanelController start conversation', () => {
         name: 'take-over',
         expectedVersion: 7,
         actorUserId: '00000000-0000-4000-8000-000000000001',
+      }),
+    );
+  });
+});
+
+describe('WhatsAppPanelController transfer acceptance', () => {
+  it('keeps the legacy forward route as a reasoned transfer request', () => {
+    const { controller, transition } = setup();
+
+    void controller.forward(
+      principal(),
+      '00000000-0000-4000-8000-000000000003',
+      {
+        commandId: '00000000-0000-4000-8000-000000000010',
+        expectedVersion: 3,
+        targetDepartment: 'financial',
+        reason: 'Cliente solicitou apoio sobre a cobrança.',
+      },
+    );
+
+    expect(transition.execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'request-transfer',
+        targetDepartment: 'financial',
+        metadata: {
+          source: 'panel-legacy-forward',
+          reason: 'Cliente solicitou apoio sobre a cobrança.',
+        },
+      }),
+    );
+  });
+
+  it('records the reason when requesting a transfer', () => {
+    const { controller, transition } = setup();
+
+    void controller.requestTransfer(
+      principal(),
+      '00000000-0000-4000-8000-000000000003',
+      {
+        commandId: '00000000-0000-4000-8000-000000000010',
+        expectedVersion: 3,
+        targetDepartment: 'financial',
+        reason: 'Cliente solicitou apoio sobre a cobrança.',
+      },
+    );
+
+    expect(transition.execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'request-transfer',
+        targetDepartment: 'financial',
+        metadata: {
+          source: 'panel-transfer-request',
+          reason: 'Cliente solicitou apoio sobre a cobrança.',
+        },
+      }),
+    );
+  });
+
+  it('sends an explicit versioned accept-transfer command', () => {
+    const { controller, transition } = setup();
+
+    void controller.acceptTransfer(
+      principal(),
+      '00000000-0000-4000-8000-000000000003',
+      {
+        commandId: '00000000-0000-4000-8000-000000000010',
+        expectedVersion: 4,
+      },
+    );
+
+    expect(transition.execute).toHaveBeenCalledWith({
+      companyId: '00000000-0000-4000-8000-000000000002',
+      conversationId: '00000000-0000-4000-8000-000000000003',
+      commandId: '00000000-0000-4000-8000-000000000010',
+      expectedVersion: 4,
+      name: 'accept-transfer',
+      actorType: 'user',
+      actorUserId: '00000000-0000-4000-8000-000000000001',
+    });
+  });
+
+  it('records a reason in the legacy department correction route', () => {
+    const { controller, transition } = setup();
+
+    void controller.changeDepartment(
+      principal(),
+      '00000000-0000-4000-8000-000000000003',
+      {
+        commandId: '00000000-0000-4000-8000-000000000010',
+        expectedVersion: 4,
+        targetDepartment: 'financial',
+        reason: 'Correção do departamento classificado inicialmente.',
+      },
+    );
+
+    expect(transition.execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'change-department',
+        targetDepartment: 'financial',
+        metadata: {
+          source: 'panel-department-change',
+          reason: 'Correção do departamento classificado inicialmente.',
+        },
       }),
     );
   });
@@ -140,16 +321,38 @@ describe('WhatsAppPanelController dashboard indicators', () => {
     expect(listConversations).not.toHaveBeenCalled();
   });
 
-  it('requires an explicit department when the user has multiple assignments', () => {
+  it('unifies the queues assigned to a user with multiple departments', () => {
     const { controller, listConversations } = setup();
 
-    expect(() =>
-      controller.dashboard(
-        principal({ departments: ['operations', 'monitoring'] }),
-        new ConversationListQueryDto(),
-      ),
-    ).toThrowError(expect.objectContaining({ code: 'VALIDATION_ERROR' }));
-    expect(listConversations).not.toHaveBeenCalled();
+    const query = new ConversationListQueryDto();
+    void controller.dashboard(
+      principal({ departments: ['operations', 'monitoring'] }),
+      query,
+    );
+
+    expect(listConversations).toHaveBeenCalledWith(
+      '00000000-0000-4000-8000-000000000002',
+      expect.objectContaining({
+        departments: ['operations', 'monitoring'],
+      }),
+    );
+  });
+
+  it('applies the same department scope to the regular conversation list', () => {
+    const { controller, listConversations } = setup();
+    const query = new ConversationListQueryDto();
+
+    void controller.list(
+      principal({ departments: ['operations', 'monitoring'] }),
+      query,
+    );
+
+    expect(listConversations).toHaveBeenCalledWith(
+      '00000000-0000-4000-8000-000000000002',
+      expect.objectContaining({
+        departments: ['operations', 'monitoring'],
+      }),
+    );
   });
 
   it('allows an administrator without department assignment to read tenant totals', () => {

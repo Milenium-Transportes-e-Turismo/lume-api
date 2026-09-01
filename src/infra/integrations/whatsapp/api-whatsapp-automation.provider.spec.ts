@@ -1,6 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 import { describe, expect, it, vi } from 'vitest';
 
+import type { CommercialQuoteRepository } from '../../../application/contracts/commercial-quote.repository';
 import type { WhatsAppRepository } from '../../../application/contracts/whatsapp.repository';
 import { WhatsAppAutomationExecutionError } from '../../../application/contracts/whatsapp-automation.provider';
 import type { HttpEvolutionOutboundGateway } from '../evolution/evolution-outbound.client';
@@ -191,6 +192,7 @@ function createSubject(input?: {
   };
   const subject = new ApiWhatsAppAutomationProvider(
     repository as unknown as WhatsAppRepository,
+    repository as unknown as CommercialQuoteRepository,
     agent as unknown as OpenAiCompatibleWhatsAppConversationAgent,
     checkpointStore as unknown as WhatsAppAutomationCheckpointStore,
     decisionStore as unknown as WhatsAppAutomationDecisionStore,

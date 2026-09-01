@@ -125,9 +125,12 @@ export class PrismaUsersRepository extends UsersRepository {
       try {
         return await operation();
       } catch (error) {
-        if (!isSerializationConflict(error) || attempt >= 2) {
+        if (!isSerializationConflict(error) || attempt >= 4) {
           throw error;
         }
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(5 * 2 ** attempt, 40)),
+        );
       }
     }
   }

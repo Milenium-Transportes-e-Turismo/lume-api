@@ -14,7 +14,24 @@ import ExcelJS, { type Worksheet } from 'exceljs';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { AccessTokenService } from '../src/application/contracts/cryptography';
+import {
+  CommercialQuoteRepository,
+  type QuoteRequestPatch,
+} from '../src/application/contracts/commercial-quote.repository';
 import { UsersRepository } from '../src/application/contracts/repositories';
+import {
+  type ClaimEvolutionDispatchInput,
+  type CompleteOutboxExecutionInput,
+  type CreateOutboundInput,
+  type EvolutionResultInput,
+  type TransitionCommand,
+  WhatsAppRepository,
+} from '../src/application/contracts/whatsapp.repository';
+import {
+  dateOnlyFromDateTime,
+  parseBusinessDateTime,
+} from '../src/domain/commercial/quote-schedule';
 import { UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT } from '../src/domain/whatsapp/whatsapp.constants';
 import {
   DeliveryStatus,
@@ -30,10 +47,10 @@ import {
   MESSAGE_HEADERS,
 } from '../src/infra/imports/whatsapp-import.types';
 import { configureBodyParsers } from '../src/shared/http/configure-body-parsers';
+import { formatWhatsAppPhone } from '../src/shared/utils/normalization';
 
 const channelId = '00000000-0000-4000-8000-000000000221';
-const serviceKeyId = '00000000-0000-4000-8000-000000000222';
-const serviceSecret = 'n8n-service-secret-with-more-than-32-characters';
+const e2eDispatchOwnerId = '00000000-0000-4000-8000-000000000223';
 const webhookSecret = 'evolution-webhook-secret-with-more-than-32-characters';
 const tenantId = '00000000-0000-4000-8000-000000000210';
 const installationId = '00000000-0000-4000-8000-000000000211';
@@ -237,9 +254,12 @@ function configureEnvironment(mediaStoragePath: string): string {
       'image/jpeg,image/png,image/webp,image/gif,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,text/csv,application/octet-stream,audio/ogg,audio/mpeg,audio/mp4,audio/aac,audio/wav,video/mp4,video/webm,video/quicktime',
     WHATSAPP_MEDIA_STORAGE_DRIVER: 'filesystem',
     WHATSAPP_MEDIA_STORAGE_PATH: mediaStoragePath,
-    N8N_SERVICE_KEY_ID: serviceKeyId,
-    N8N_SERVICE_SECRET: serviceSecret,
-    N8N_DISPATCH_ENABLED: 'false',
+    WHATSAPP_IMPORT_ROOT: join(mediaStoragePath, 'imports'),
+    WHATSAPP_IMPORT_UPLOAD_TEMP_ROOT: join(
+      mediaStoragePath,
+      'imports',
+      'incoming',
+    ),
     RETENTION_JOB_ENABLED: 'false',
     SWAGGER_ENABLED: 'false',
   });
@@ -337,12 +357,88 @@ function tokenWebhook(
 describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
   let app: NestExpressApplication;
   let prisma: import('../src/infra/database/prisma/prisma.service').PrismaService;
+  let accessTokens: AccessTokenService;
+  let whatsappRepository: WhatsAppRepository;
+  let commercialQuoteRepository: CommercialQuoteRepository;
   let accessToken: string;
-  const serviceToken = `${serviceKeyId}.${serviceSecret}`;
+  let commercialAccessToken: string;
+  let commercialAttendant: { id: string; name: string; tokenVersion: number };
   let conversationId: string;
   let quoteRequestId: string;
   let selectedCommandId: string;
   let mediaStoragePath: string;
+
+  type AutomationBody = Record<string, unknown> & {
+    id: string;
+    version: number;
+    conversationId: string;
+    messageId: string;
+    attemptId: string;
+    attempts: Array<Record<string, unknown> & { id: string }>;
+    message: AutomationBody;
+    conversation: AutomationBody;
+  };
+
+  const automationBody = (value: unknown) => value as AutomationBody;
+  const transitionSystem = async (
+    input: Omit<TransitionCommand, 'companyId' | 'actorType'>,
+  ) =>
+    automationBody(
+      await whatsappRepository.transition({
+        ...input,
+        companyId: tenantId,
+        actorType: 'system',
+      }),
+    );
+  const createAutomaticOutbound = async (
+    input: Omit<CreateOutboundInput, 'companyId' | 'automatic'>,
+  ) =>
+    automationBody(
+      await whatsappRepository.createOutbound({
+        ...input,
+        companyId: tenantId,
+        automatic: true,
+      }),
+    );
+  const claimEvolution = async (
+    input: Omit<ClaimEvolutionDispatchInput, 'companyId' | 'ownerId'>,
+  ) =>
+    automationBody(
+      await whatsappRepository.claimEvolutionDispatch({
+        ...input,
+        companyId: tenantId,
+        ownerId: e2eDispatchOwnerId,
+      }),
+    );
+  const recordEvolution = async (
+    input: Omit<EvolutionResultInput, 'companyId'>,
+  ) =>
+    automationBody(
+      await whatsappRepository.recordEvolutionResult({
+        ...input,
+        companyId: tenantId,
+      }),
+    );
+  const completeAutomationOutbox = async (
+    input: Omit<CompleteOutboxExecutionInput, 'companyId'>,
+  ) =>
+    automationBody(
+      await whatsappRepository.completeOutboxExecution({
+        ...input,
+        companyId: tenantId,
+      }),
+    );
+  const patchQuoteFromAutomation = async (
+    quoteId: string,
+    input: QuoteRequestPatch,
+  ) =>
+    automationBody(
+      await commercialQuoteRepository.patchQuoteRequest(
+        tenantId,
+        quoteId,
+        input,
+      ),
+    );
 
   beforeAll(async () => {
     mediaStoragePath = await mkdtemp(
@@ -389,6 +485,9 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     );
     await app.init();
     prisma = app.get(prismaModule.PrismaService);
+    accessTokens = app.get(AccessTokenService);
+    whatsappRepository = app.get(WhatsAppRepository);
+    commercialQuoteRepository = app.get(CommercialQuoteRepository);
     await app.get(ProductionBootstrapService).execute();
 
     const firstAccess = await request(app.getHttpServer())
@@ -439,6 +538,25 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         }
       });
     accessToken = login.body.accessToken as string;
+    commercialAttendant = await prisma.user.create({
+      data: {
+        companyId: tenantId,
+        name: 'Atendente Comercial E2E',
+        username: 'atendente.comercial.e2e',
+        usernameNormalized: 'atendente.comercial.e2e',
+        email: 'atendente.comercial.e2e@example.test',
+        emailNormalized: 'atendente.comercial.e2e@example.test',
+        passwordHash: 'hash-e2e-sem-uso',
+        departments: ['commercial'],
+        permissionCodes: ['whatsapp-conversations:manage'],
+      },
+      select: { id: true, name: true, tokenVersion: true },
+    });
+    commercialAccessToken = await accessTokens.sign({
+      sub: commercialAttendant.id,
+      companyId: tenantId,
+      tokenVersion: commercialAttendant.tokenVersion,
+    });
   }, 60_000);
 
   afterAll(async () => {
@@ -787,18 +905,16 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     const outboundBody = {
       commandId,
       expectedVersion: 1,
-      automatic: true,
-      purpose: 'main-menu',
-      kind: 'text',
+      purpose: 'main-menu' as const,
+      kind: 'text' as const,
       text: 'Mensagem automática',
     };
-    const response = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversationId}/messages/outbound`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send(outboundBody)
-      .expect(201);
+    const response = {
+      body: await createAutomaticOutbound({
+        ...outboundBody,
+        conversationId,
+      }),
+    };
 
     expect(response.body).toMatchObject({
       deliveryStatus: 'pending',
@@ -807,45 +923,36 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     expect(response.body.attempts[0]).toMatchObject({ status: 'pending' });
     const persisted = await prisma.whatsAppMessage.findUniqueOrThrow({
       where: {
-        id_companyId: { id: response.body.id as string, companyId: tenantId },
+        id_companyId: { id: response.body.id, companyId: tenantId },
       },
     });
     expect(persisted.deliveryStatus).toBe('PENDING');
     expect(persisted.providerMessageId).toBeNull();
 
-    const claim = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/messages/${response.body.id as string}/evolution-dispatch-claims`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    const claim = {
+      body: await claimEvolution({
+        messageId: response.body.id,
         commandId: randomUUID(),
         attemptId: response.body.attempts[0].id,
-      })
-      .expect(201);
+      }),
+    };
     expect(claim.body).toMatchObject({
       shouldSend: true,
       state: 'leased',
     });
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/messages/${response.body.id as string}/evolution-result`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId: randomUUID(),
-        attemptId: response.body.attempts[0].id,
-        status: 'sent',
-        providerMessageId: 'evolution-main-menu',
-      })
-      .expect(201);
-    const replay = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversationId}/messages/outbound`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send(outboundBody)
-      .expect(201);
+    await recordEvolution({
+      messageId: response.body.id,
+      commandId: randomUUID(),
+      attemptId: response.body.attempts[0].id,
+      status: 'sent',
+      providerMessageId: 'evolution-main-menu',
+    });
+    const replay = {
+      body: await createAutomaticOutbound({
+        ...outboundBody,
+        conversationId,
+      }),
+    };
     expect(replay.body).toMatchObject({
       id: response.body.id,
       deliveryStatus: 'sent',
@@ -887,76 +994,61 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     const unsupportedConversationId = inbound.body.conversationId as string;
     const inboundMessageId = inbound.body.messageId as string;
 
-    const forwarded = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${unsupportedConversationId}/transitions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    await expect(
+      createAutomaticOutbound({
+        conversationId: unsupportedConversationId,
         commandId: randomUUID(),
         expectedVersion: 1,
-        name: 'forward',
-        targetDepartment: 'commercial',
-      })
-      .expect(201);
-    expect(forwarded.body).toMatchObject({
-      conversationState: 'sent-to-human',
-      flowStep: 'human-service',
-      version: 2,
-    });
-
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${unsupportedConversationId}/messages/outbound`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId: randomUUID(),
-        expectedVersion: 2,
-        automatic: true,
-        purpose: 'main-menu',
-        kind: 'text',
-        text: UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT,
-      })
-      .expect(403);
-
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${unsupportedConversationId}/messages/outbound`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId: randomUUID(),
-        expectedVersion: 2,
-        automatic: true,
         purpose: 'unsupported-message-kind',
         inReplyToMessageId: inboundMessageId,
         kind: 'text',
         text: 'Não consigo processar a imagem.',
-      })
-      .expect(400);
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
 
-    const reply = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${unsupportedConversationId}/messages/outbound`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    const reply = {
+      body: await createAutomaticOutbound({
+        conversationId: unsupportedConversationId,
         commandId: randomUUID(),
-        expectedVersion: 2,
-        automatic: true,
+        expectedVersion: 1,
         purpose: 'unsupported-message-kind',
         inReplyToMessageId: inboundMessageId,
         kind: 'text',
         text: UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT,
-      })
-      .expect(201);
+      }),
+    };
     expect(reply.body).toMatchObject({
       automationPurpose: 'unsupported-message-kind',
       deliveryStatus: 'pending',
       kind: 'text',
       text: UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT,
     });
+
+    const forwarded = {
+      body: await transitionSystem({
+        conversationId: unsupportedConversationId,
+        commandId: randomUUID(),
+        expectedVersion: 1,
+        name: 'forward',
+        targetDepartment: 'commercial',
+      }),
+    };
+    expect(forwarded.body).toMatchObject({
+      conversationState: 'sent-to-human',
+      flowStep: 'human-service',
+      version: 2,
+    });
+
+    await expect(
+      createAutomaticOutbound({
+        conversationId: unsupportedConversationId,
+        commandId: randomUUID(),
+        expectedVersion: 2,
+        purpose: 'main-menu',
+        kind: 'text',
+        text: UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT,
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
 
     expect(
       await prisma.whatsAppConversation.findUniqueOrThrow({
@@ -1002,6 +1094,9 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       fileName,
     ) => {
       const providerMessageId = `provider-media-${expectedKind}-${randomUUID()}`;
+      const expectedStoredSize = Buffer.byteLength(
+        `retained:${providerMessageId}`,
+      );
       const mediaPayload = webhookPayload(
         providerMessageId,
         `5511988${Math.floor(100000 + Math.random() * 899999)}`,
@@ -1037,14 +1132,14 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       expect(persisted.text).toBeNull();
       expect(persisted.media).toMatchObject({
         mimeType,
-        size: 256,
+        size: expectedStoredSize,
         fileName,
       });
       expect(persisted.media).not.toHaveProperty('url');
       expect(persisted).toMatchObject({
         mediaStorageKey: expect.any(String),
         mediaMimeType: mimeType,
-        mediaSizeBytes: expect.any(Number),
+        mediaSizeBytes: expectedStoredSize,
         mediaOriginalName: fileName,
         mediaSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
         mediaStoredAt: expect.any(Date),
@@ -1082,7 +1177,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
             text: null,
             media: expect.objectContaining({
               mimeType,
-              size: 256,
+              size: expectedStoredSize,
               fileName,
             }),
           }),
@@ -1215,6 +1310,9 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     'documentWithCaptionMessage',
   ] as const)('persiste mídia encapsulada em %s', async (wrapperKind) => {
     const providerMessageId = `provider-wrapped-${wrapperKind}-${randomUUID()}`;
+    const expectedStoredSize = Buffer.byteLength(
+      `retained:${providerMessageId}`,
+    );
     const mediaPayload = webhookPayload(
       providerMessageId,
       `5511977${Math.floor(100000 + Math.random() * 899999)}`,
@@ -1248,7 +1346,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     expect(persisted.kind.toLowerCase()).toBe('image');
     expect(persisted.media).toMatchObject({
       mimeType: 'image/jpeg',
-      size: 512,
+      size: expectedStoredSize,
       fileName: 'imagem-encapsulada.jpg',
     });
   });
@@ -1265,7 +1363,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .post(
         `/api/v1/whatsapp/conversations/${canonicalConversationId}/actions/close`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({
         commandId: randomUUID(),
         expectedVersion: 1,
@@ -1357,19 +1455,16 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     ).expect(202);
     const departmentConversationId = inbound.body.conversationId as string;
 
-    const collecting = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${departmentConversationId}/transitions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    const collecting = {
+      body: await transitionSystem({
+        conversationId: departmentConversationId,
         commandId: randomUUID(),
         expectedVersion: 1,
         name: 'start-department-contact',
         targetDepartment: 'maintenance',
         metadata: { departmentOption: '7' },
-      })
-      .expect(201);
+      }),
+    };
     expect(collecting.body).toMatchObject({
       department: 'maintenance',
       conversationState: 'bot-active',
@@ -1418,16 +1513,16 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       }),
     ]);
 
-    const durableBatch = await request(app.getHttpServer())
-      .get(
-        `/api/v1/internal/whatsapp/conversations/${departmentConversationId}/automation-batch`,
-      )
-      .query({
-        sourceEventId: nameOutbox.correlationId,
-        windowSeconds: 120,
-      })
-      .set('authorization', `Bearer ${serviceToken}`)
-      .expect(200);
+    const durableBatch = {
+      body: automationBody(
+        await whatsappRepository.getAutomationBatch(
+          tenantId,
+          departmentConversationId,
+          nameOutbox.correlationId,
+          120,
+        ),
+      ),
+    };
     expect(durableBatch.body).toMatchObject({
       conversation: {
         id: departmentConversationId,
@@ -1455,50 +1550,38 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       conversation: { departmentContactOption: '7' },
     });
 
-    const notification = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${departmentConversationId}/messages/outbound`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    const notification = {
+      body: await createAutomaticOutbound({
+        conversationId: departmentConversationId,
         commandId: randomUUID(),
         expectedVersion: 2,
-        automatic: true,
         purpose: 'department-notification',
         recipientPhone: '5534998385144',
         kind: 'text',
         text: 'Telefone do cliente: 5511988887777\nNome e motivo informados: Cliente E2E - manutenção',
-      })
-      .expect(201);
+      }),
+    };
     expect(notification.body).toMatchObject({
       deliveryStatus: 'pending',
       automationPurpose: 'department-notification',
       recipientPhone: '5534998385144',
     });
 
-    const claim = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/messages/${notification.body.id as string}/evolution-dispatch-claims`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    const claim = {
+      body: await claimEvolution({
+        messageId: notification.body.id,
         commandId: randomUUID(),
         attemptId: notification.body.attempts[0].id,
-      })
-      .expect(201);
+      }),
+    };
     expect(claim.body).toMatchObject({ shouldSend: true });
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/messages/${notification.body.id as string}/evolution-result`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId: randomUUID(),
-        attemptId: notification.body.attempts[0].id,
-        status: 'sent',
-        providerMessageId: 'evolution-department-notification',
-      })
-      .expect(201);
+    await recordEvolution({
+      messageId: notification.body.id,
+      commandId: randomUUID(),
+      attemptId: notification.body.attempts[0].id,
+      status: 'sent',
+      providerMessageId: 'evolution-department-notification',
+    });
 
     const persisted = await prisma.whatsAppConversation.findUniqueOrThrow({
       where: {
@@ -1523,28 +1606,21 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       ]),
     );
 
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${departmentConversationId}/messages/outbound`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    await expect(
+      createAutomaticOutbound({
+        conversationId: departmentConversationId,
         commandId: randomUUID(),
         expectedVersion: 2,
-        automatic: true,
         purpose: 'main-menu',
         recipientPhone: '5534998385144',
         kind: 'text',
         text: 'Não deve aceitar destinatário alternativo',
-      })
-      .expect(400);
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
 
-    const completed = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${departmentConversationId}/transitions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    const completed = {
+      body: await transitionSystem({
+        conversationId: departmentConversationId,
         commandId: randomUUID(),
         expectedVersion: 2,
         name: 'return-to-main-menu',
@@ -1553,8 +1629,8 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
           departmentOption: '7',
           reason: 'department-contact-forwarded',
         },
-      })
-      .expect(201);
+      }),
+    };
     expect(completed.body).toMatchObject({
       department: 'maintenance',
       conversationState: 'bot-active',
@@ -1598,9 +1674,11 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     });
     expect(registeredDepartments.map(({ code }) => code).sort()).toEqual(
       [
+        'CLIENT_COMPANY',
         'COMMERCIAL',
         'CONTROLLING',
         'FINANCIAL',
+        'INFORMATION_TECHNOLOGY',
         'MAINTENANCE',
         'MANAGEMENT',
         'MONITORING',
@@ -1644,6 +1722,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         data: {
           companyId: tenantId,
           phoneNormalized: fixture.phone,
+          phoneDisplay: formatWhatsAppPhone(fixture.phone),
           displayName: fixture.department,
         },
       });
@@ -1717,129 +1796,104 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
   });
 
   it('aplica matriz, commandId idempotente e conflito expectedVersion', async () => {
-    const forbiddenActor = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversationId}/transitions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    await expect(
+      transitionSystem({
+        conversationId,
         commandId: randomUUID(),
         expectedVersion: 1,
         name: 'take-over',
-      })
-      .expect(403);
-    expect(forbiddenActor.body.message).toContain('ator n8n');
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
 
     const commandId = randomUUID();
     selectedCommandId = commandId;
-    const selected = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversationId}/transitions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId,
-        expectedVersion: 1,
-        name: 'select-commercial',
-      })
-      .expect(201);
-    expect(selected.body).toMatchObject({
+    const selected = await transitionSystem({
+      conversationId,
+      commandId,
+      expectedVersion: 1,
+      name: 'select-commercial',
+    });
+    expect(selected).toMatchObject({
       flowStep: 'commercial-menu',
       version: 2,
       idempotent: false,
     });
 
-    const duplicate = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversationId}/transitions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId,
-        expectedVersion: 1,
-        name: 'select-commercial',
-      })
-      .expect(201);
-    expect(duplicate.body).toMatchObject({ version: 2, idempotent: true });
+    const duplicate = await transitionSystem({
+      conversationId,
+      commandId,
+      expectedVersion: 1,
+      name: 'select-commercial',
+    });
+    expect(duplicate).toMatchObject({ version: 2, idempotent: true });
     expect(
       await prisma.whatsAppConversationTransition.count({
         where: { companyId: tenantId, commandId },
       }),
     ).toBe(1);
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversationId}/transitions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    await expect(
+      transitionSystem({
+        conversationId,
         commandId,
         expectedVersion: 1,
         name: 'start-quote',
-      })
-      .expect(409);
+      }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
 
-    const conflict = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversationId}/transitions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    await expect(
+      transitionSystem({
+        conversationId,
         commandId: randomUUID(),
         expectedVersion: 1,
         name: 'start-quote',
-      })
-      .expect(409);
-    expect(conflict.body.details).toEqual({ currentVersion: 2 });
+      }),
+    ).rejects.toMatchObject({
+      code: 'CONFLICT',
+      details: { currentVersion: 2 },
+    });
   });
 
   it('preserva dados na correção e confirmação nunca fecha a conversa', async () => {
     const transition = async (
       name: string,
       expectedVersion: number,
-    ): Promise<Record<string, unknown>> => {
-      const response = await request(app.getHttpServer())
-        .post(
-          `/api/v1/internal/whatsapp/conversations/${conversationId}/transitions`,
-        )
-        .set('authorization', `Bearer ${serviceToken}`)
-        .send({ commandId: randomUUID(), expectedVersion, name })
-        .expect(201);
-      return response.body as Record<string, unknown>;
-    };
+    ): Promise<Record<string, unknown>> =>
+      transitionSystem({
+        conversationId,
+        commandId: randomUUID(),
+        expectedVersion,
+        name,
+      });
 
     const collecting = await transition('start-quote', 2);
-    const oldReplay = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversationId}/transitions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId: selectedCommandId,
-        expectedVersion: 1,
-        name: 'select-commercial',
-      })
-      .expect(201);
-    expect(oldReplay.body).toMatchObject({
+    const oldReplay = await transitionSystem({
+      conversationId,
+      commandId: selectedCommandId,
+      expectedVersion: 1,
+      name: 'select-commercial',
+    });
+    expect(oldReplay).toMatchObject({
       version: 2,
       flowStep: 'commercial-menu',
       idempotent: true,
     });
     quoteRequestId = (collecting.currentQuoteRequest as Record<string, string>)
       .id;
-    await request(app.getHttpServer())
-      .patch(`/api/v1/internal/whatsapp/quote-requests/${quoteRequestId}`)
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId: randomUUID(),
-        expectedVersion: 1,
-        contactName: 'Cliente E2E',
-        serviceType: 'Fretamento eventual',
-        origin: 'São Paulo',
-        destination: 'Campinas',
-        departureAt: '2026-08-01T10:00:00.000Z',
-        passengerCount: 12,
-      })
-      .expect(200);
+    const departureAt = parseBusinessDateTime(
+      '2026-08-01T10:00:00.000Z',
+      'departureAt',
+    );
+    await patchQuoteFromAutomation(quoteRequestId, {
+      commandId: randomUUID(),
+      expectedVersion: 1,
+      contactName: 'Cliente E2E',
+      serviceType: 'Fretamento eventual',
+      origin: 'São Paulo',
+      destination: 'Campinas',
+      departureDate: dateOnlyFromDateTime(departureAt),
+      departureAt,
+      passengerCount: 12,
+    });
     await transition('present-quote-summary', 3);
     const awaitingReply = await signedWebhook(
       app,
@@ -1917,29 +1971,56 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         }),
       ]),
     );
-    await request(app.getHttpServer())
-      .patch(`/api/v1/internal/whatsapp/quote-requests/${quoteRequestId}`)
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    await expect(
+      patchQuoteFromAutomation(quoteRequestId, {
         commandId: randomUUID(),
         expectedVersion: persistedQuote.version,
         origin: 'Origem indevidamente alterada',
-      })
-      .expect(400);
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversationId}/transitions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+    await expect(
+      transitionSystem({
+        conversationId,
         commandId: randomUUID(),
         expectedVersion: 8,
         name: 'start-quote',
-      })
-      .expect(400);
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
   });
 
   it('mantém o bot ativo em análise e preserva o histórico após take-over', async () => {
+    const phone = '5511988881199';
+    const contact = await prisma.whatsAppContact.create({
+      data: {
+        companyId: tenantId,
+        phoneNormalized: phone,
+        phoneDisplay: formatWhatsAppPhone(phone),
+        displayName: 'Cliente análise e take-over',
+      },
+    });
+    const analysisConversation = await prisma.whatsAppConversation.create({
+      data: {
+        companyId: tenantId,
+        channelId,
+        contactId: contact.id,
+        department: 'COMMERCIAL',
+        conversationState: 'BOT_ACTIVE',
+        flowStep: 'COMMERCIAL_FOLLOW_UP_MENU',
+        requestStatus: 'UNDER_REVIEW',
+        version: 8,
+      },
+    });
+    const conversationId = analysisConversation.id;
+    await prisma.quoteRequest.create({
+      data: {
+        companyId: tenantId,
+        conversationId,
+        sequence: 1,
+        status: 'UNDER_REVIEW',
+        confirmedAt: new Date(),
+        confirmedVersion: 1,
+      },
+    });
     const beforeAutomatedInbounds =
       await prisma.whatsAppConversation.findUniqueOrThrow({
         where: { id_companyId: { id: conversationId, companyId: tenantId } },
@@ -1965,10 +2046,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     ];
     const automatedResponses = await Promise.all(
       automatedInbounds.map(({ providerMessageId, text }) =>
-        signedWebhook(
-          app,
-          webhookPayload(providerMessageId, '5511988881111', text),
-        ),
+        signedWebhook(app, webhookPayload(providerMessageId, phone, text)),
       ),
     );
     for (const response of automatedResponses) {
@@ -1997,11 +2075,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     });
     const contextual = await signedWebhook(
       app,
-      webhookPayload(
-        'provider-contextual-contact',
-        '5511988881111',
-        'E o orçamento?',
-      ),
+      webhookPayload('provider-contextual-contact', phone, 'E o orçamento?'),
     ).expect(202);
     expect(contextual.body).toMatchObject({
       automationAllowed: true,
@@ -2009,8 +2083,8 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     });
 
     const state = await request(app.getHttpServer())
-      .get(`/api/v1/internal/whatsapp/conversations/${conversationId}`)
-      .set('authorization', `Bearer ${serviceToken}`)
+      .get(`/api/v1/whatsapp/conversations/${conversationId}`)
+      .set('authorization', `Bearer ${accessToken}`)
       .expect(200);
     expect(state.body).toMatchObject({
       conversationState: 'bot-active',
@@ -2023,13 +2097,13 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .post(
         `/api/v1/whatsapp/conversations/${conversationId}/actions/take-over`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({ commandId: randomUUID(), expectedVersion: 9 })
       .expect(201);
 
     const humanMessage = await request(app.getHttpServer())
       .post(`/api/v1/whatsapp/conversations/${conversationId}/messages`)
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({
         commandId: randomUUID(),
         idempotencyKey: randomUUID(),
@@ -2042,7 +2116,10 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       message: {
         deliveryStatus: 'pending',
         direction: 'outbound',
-        sentBy: { name: 'Admin E2E' },
+        sentBy: {
+          id: commercialAttendant.id,
+          name: commercialAttendant.name,
+        },
       },
       conversation: {
         conversationState: 'human-active',
@@ -2073,30 +2150,24 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     );
     const competingClaims = await Promise.all(
       competingClaimBodies.map((body) =>
-        request(app.getHttpServer())
-          .post(
-            `/api/v1/internal/whatsapp/messages/${humanMessage.body.message.id as string}/evolution-dispatch-claims`,
-          )
-          .set('authorization', `Bearer ${serviceToken}`)
-          .send(body)
-          .expect(201),
+        claimEvolution({
+          messageId: humanMessage.body.message.id as string,
+          ...body,
+        }),
       ),
     );
     expect(
-      competingClaims.filter((response) => response.body.shouldSend === true),
+      competingClaims.filter((response) => response.shouldSend === true),
     ).toHaveLength(1);
     const winningClaimIndex = competingClaims.findIndex(
-      (response) => response.body.shouldSend === true,
+      (response) => response.shouldSend === true,
     );
     const claimBody = competingClaimBodies[winningClaimIndex];
-    const duplicateClaim = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/messages/${humanMessage.body.message.id as string}/evolution-dispatch-claims`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send(claimBody)
-      .expect(201);
-    expect(duplicateClaim.body.shouldSend).toBe(false);
+    const duplicateClaim = await claimEvolution({
+      messageId: humanMessage.body.message.id as string,
+      ...claimBody,
+    });
+    expect(duplicateClaim.shouldSend).toBe(false);
     await prisma.whatsAppMessageAttempt.update({
       where: {
         id_companyId: {
@@ -2106,63 +2177,45 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       },
       data: { dispatchLeaseUntil: new Date(Date.now() - 1_000) },
     });
-    const unknownClaim = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/messages/${humanMessage.body.message.id as string}/evolution-dispatch-claims`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send(claimBody)
-      .expect(201);
-    expect(unknownClaim.body).toMatchObject({
+    const unknownClaim = await claimEvolution({
+      messageId: humanMessage.body.message.id as string,
+      ...claimBody,
+    });
+    expect(unknownClaim).toMatchObject({
       shouldSend: false,
       state: 'unknown',
       requiresReconciliation: true,
     });
-    const reconciledClaim = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/messages/${humanMessage.body.message.id as string}/evolution-dispatch-claims`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId: randomUUID(),
-        attemptId: claimBody.attemptId,
-        reconciliation: 'confirmed-not-sent',
-      })
-      .expect(201);
-    expect(reconciledClaim.body).toMatchObject({
+    const reconciledClaim = await claimEvolution({
+      messageId: humanMessage.body.message.id as string,
+      commandId: randomUUID(),
+      attemptId: claimBody.attemptId,
+      reconciliation: 'confirmed-not-sent',
+    });
+    expect(reconciledClaim).toMatchObject({
       shouldSend: true,
       state: 'leased',
     });
-    const evolutionResultUrl =
-      `/api/v1/internal/whatsapp/messages/` +
-      `${humanMessage.body.message.id as string}/evolution-result`;
     const [sentResult, failedResult] = await Promise.all([
-      request(app.getHttpServer())
-        .post(evolutionResultUrl)
-        .set('authorization', `Bearer ${serviceToken}`)
-        .send({
-          commandId: randomUUID(),
-          attemptId: claimBody.attemptId,
-          status: 'sent',
-          providerMessageId: 'evolution-human-message',
-        })
-        .expect(201),
-      request(app.getHttpServer())
-        .post(evolutionResultUrl)
-        .set('authorization', `Bearer ${serviceToken}`)
-        .send({
-          commandId: randomUUID(),
-          attemptId: claimBody.attemptId,
-          status: 'failed',
-          errorCode: 'CONCURRENT_FAILURE',
-          errorMessage: 'Resultado concorrente simulado.',
-        })
-        .expect(201),
+      recordEvolution({
+        messageId: humanMessage.body.message.id as string,
+        commandId: randomUUID(),
+        attemptId: claimBody.attemptId,
+        status: 'sent',
+        providerMessageId: 'evolution-human-message',
+      }),
+      recordEvolution({
+        messageId: humanMessage.body.message.id as string,
+        commandId: randomUUID(),
+        attemptId: claimBody.attemptId,
+        status: 'failed',
+        errorCode: 'CONCURRENT_FAILURE',
+        errorMessage: 'Resultado concorrente simulado.',
+      }),
     ]);
-    expect([
-      sentResult.body.deliveryStatus,
-      failedResult.body.deliveryStatus,
-    ]).toContain('sent');
+    expect([sentResult.deliveryStatus, failedResult.deliveryStatus]).toContain(
+      'sent',
+    );
     expect(
       await prisma.whatsAppMessage.findUniqueOrThrow({
         where: {
@@ -2211,10 +2264,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     ];
     const inboundResponses = await Promise.all(
       humanInbounds.map(({ providerMessageId, text }) =>
-        signedWebhook(
-          app,
-          webhookPayload(providerMessageId, '5511988881111', text),
-        ),
+        signedWebhook(app, webhookPayload(providerMessageId, phone, text)),
       ),
     );
     for (const response of inboundResponses) {
@@ -2289,32 +2339,15 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       humanNotifications.every((event) => event.status === 'PENDING'),
     ).toBe(true);
 
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversationId}/messages/outbound`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    await expect(
+      createAutomaticOutbound({
+        conversationId,
         commandId: randomUUID(),
         expectedVersion: 11,
-        automatic: true,
         kind: 'text',
         text: 'Não pode enviar',
-      })
-      .expect(403);
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversationId}/messages/outbound`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId: randomUUID(),
-        expectedVersion: 11,
-        automatic: false,
-        kind: 'text',
-        text: 'Tentativa de contornar o bloqueio',
-      })
-      .expect(400);
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
     const after = await prisma.whatsAppConversation.findUniqueOrThrow({
       where: { id_companyId: { id: conversationId, companyId: tenantId } },
     });
@@ -2322,6 +2355,40 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
   });
 
   it('isola consultas do painel por companyId e nova solicitação cria novo registro', async () => {
+    const ownedPhone = '5511966666677';
+    const ownedContact = await prisma.whatsAppContact.create({
+      data: {
+        companyId: tenantId,
+        phoneNormalized: ownedPhone,
+        phoneDisplay: formatWhatsAppPhone(ownedPhone),
+        displayName: 'Cliente isolado do tenant E2E',
+      },
+    });
+    const ownedConversation = await prisma.whatsAppConversation.create({
+      data: {
+        companyId: tenantId,
+        channelId,
+        contactId: ownedContact.id,
+        department: 'COMMERCIAL',
+        conversationState: 'HUMAN_ACTIVE',
+        flowStep: 'HUMAN_SERVICE',
+        requestStatus: 'UNDER_REVIEW',
+        resumeState: 'BOT_ACTIVE',
+        resumeFlowStep: 'COMMERCIAL_FOLLOW_UP_MENU',
+        assignedToUserId: commercialAttendant.id,
+      },
+    });
+    const conversationId = ownedConversation.id;
+    await prisma.quoteRequest.create({
+      data: {
+        companyId: tenantId,
+        conversationId,
+        sequence: 1,
+        status: 'UNDER_REVIEW',
+        confirmedAt: new Date(),
+        confirmedVersion: 1,
+      },
+    });
     const foreignCompanyId = '00000000-0000-4000-8000-000000000299';
     await prisma.company.create({
       data: {
@@ -2352,6 +2419,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       data: {
         companyId: foreignCompanyId,
         phoneNormalized: '5511966666666',
+        phoneDisplay: formatWhatsAppPhone('5511966666666'),
       },
     });
     const foreignConversation = await prisma.whatsAppConversation.create({
@@ -2383,28 +2451,518 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .post(
         `/api/v1/whatsapp/conversations/${conversationId}/actions/return-to-bot`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({ commandId: randomUUID(), expectedVersion: current.version })
       .expect(201);
     const returned = await prisma.whatsAppConversation.findUniqueOrThrow({
       where: { id_companyId: { id: conversationId, companyId: tenantId } },
     });
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversationId}/transitions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId: randomUUID(),
-        expectedVersion: returned.version,
-        name: 'new-quote-request',
-      })
-      .expect(201);
+    await transitionSystem({
+      conversationId,
+      commandId: randomUUID(),
+      expectedVersion: returned.version,
+      name: 'new-quote-request',
+    });
     expect(
       await prisma.quoteRequest.count({
         where: { companyId: tenantId, conversationId },
       }),
     ).toBe(2);
+  });
+
+  it('impede que um token de outro atendente devolva a conversa ao bot', async () => {
+    const otherAttendantSuffix = randomUUID().slice(0, 8);
+    const otherAttendant = await prisma.user.create({
+      data: {
+        companyId: tenantId,
+        name: 'Atendente responsável pelo retorno',
+        username: `responsavel.${otherAttendantSuffix}`,
+        usernameNormalized: `responsavel.${otherAttendantSuffix}`,
+        email: `${randomUUID()}@example.test`,
+        emailNormalized: `${randomUUID()}@example.test`,
+        passwordHash: 'hash-e2e-sem-uso',
+        departments: ['commercial'],
+      },
+    });
+    const contact = await prisma.whatsAppContact.create({
+      data: {
+        companyId: tenantId,
+        phoneNormalized: '5511988877241',
+        phoneDisplay: '(11) 98887-7241',
+        displayName: 'Cliente atribuído a outro atendente',
+      },
+    });
+    const conversation = await prisma.whatsAppConversation.create({
+      data: {
+        companyId: tenantId,
+        channelId,
+        contactId: contact.id,
+        department: 'COMMERCIAL',
+        conversationState: 'HUMAN_ACTIVE',
+        flowStep: 'HUMAN_SERVICE',
+        requestStatus: 'UNDER_REVIEW',
+        resumeState: 'BOT_ACTIVE',
+        resumeFlowStep: 'COMMERCIAL_FOLLOW_UP_MENU',
+        assignedToUserId: otherAttendant.id,
+      },
+    });
+    const commandId = randomUUID();
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/whatsapp/conversations/${conversation.id}/actions/return-to-bot`,
+      )
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({ commandId, expectedVersion: conversation.version })
+      .expect(403)
+      .expect(({ body }) => {
+        expect(body.code).toBe('FORBIDDEN');
+      });
+
+    await expect(
+      prisma.whatsAppConversation.findUniqueOrThrow({
+        where: {
+          id_companyId: { id: conversation.id, companyId: tenantId },
+        },
+      }),
+    ).resolves.toMatchObject({
+      conversationState: 'HUMAN_ACTIVE',
+      flowStep: 'HUMAN_SERVICE',
+      assignedToUserId: otherAttendant.id,
+      version: conversation.version,
+    });
+    await expect(
+      prisma.whatsAppConversationTransition.count({
+        where: { companyId: tenantId, commandId },
+      }),
+    ).resolves.toBe(0);
+  });
+
+  it('não expõe conversa, mensagens, transições, orçamento ou mídia fora do departamento', async () => {
+    const secretMarker = `segredo-idor-${randomUUID()}`;
+    const providerMessageId = `provider-idor-media-${randomUUID()}`;
+    const mediaPayload = webhookPayload(
+      providerMessageId,
+      '5511988877243',
+      secretMarker,
+    );
+    mediaPayload.data.pushName = secretMarker;
+    mediaPayload.data.message = {
+      imageMessage: {
+        mimetype: 'image/jpeg',
+        fileLength: 128,
+        fileName: `${secretMarker}.jpg`,
+        url: 'https://evolution.example.test/media/idor.jpg',
+      },
+    } as unknown as typeof mediaPayload.data.message;
+    const inbound = await signedMediaWebhook(app, mediaPayload);
+    expect(inbound.status, JSON.stringify(inbound.body)).toBe(202);
+    const restrictedConversationId = inbound.body.conversationId as string;
+    const mediaMessage = await prisma.whatsAppMessage.findUniqueOrThrow({
+      where: {
+        companyId_channelId_providerMessageId: {
+          companyId: tenantId,
+          channelId,
+          providerMessageId,
+        },
+      },
+    });
+    await prisma.quoteRequest.create({
+      data: {
+        companyId: tenantId,
+        conversationId: restrictedConversationId,
+        sequence: 1,
+        status: 'COLLECTING_INFORMATION',
+        confirmedSummary: { secretMarker },
+      },
+    });
+    await transitionSystem({
+      conversationId: restrictedConversationId,
+      commandId: randomUUID(),
+      expectedVersion: inbound.body.version as number,
+      name: 'start-department-contact',
+      targetDepartment: 'operations',
+      metadata: { departmentOption: '2' },
+    });
+
+    const restrictedPaths = [
+      `/api/v1/whatsapp/conversations/${restrictedConversationId}`,
+      `/api/v1/whatsapp/conversations/${restrictedConversationId}/messages`,
+      `/api/v1/whatsapp/conversations/${restrictedConversationId}/transitions`,
+      `/api/v1/whatsapp/conversations/${restrictedConversationId}/quote-request`,
+      `/api/v1/whatsapp/conversations/${restrictedConversationId}/messages/${mediaMessage.id}/content`,
+    ];
+    for (const path of restrictedPaths) {
+      const response = await request(app.getHttpServer())
+        .get(path)
+        .set('authorization', `Bearer ${commercialAccessToken}`)
+        .expect(404);
+      expect(response.body).toMatchObject({ code: 'NOT_FOUND' });
+      expect(JSON.stringify(response.body)).not.toContain(secretMarker);
+      expect(response.headers['x-whatsapp-media-filename']).toBeUndefined();
+      expect(response.headers['x-whatsapp-media-kind']).toBeUndefined();
+    }
+  });
+
+  it('impede encerramento por outro atendente ou departamento sem produzir efeitos', async () => {
+    const suffix = randomUUID().slice(0, 8);
+    const [otherCommercialOwner, operationsOwner] = await Promise.all([
+      prisma.user.create({
+        data: {
+          companyId: tenantId,
+          name: 'Outro atendente Comercial',
+          username: `outro.comercial.${suffix}`,
+          usernameNormalized: `outro.comercial.${suffix}`,
+          email: `outro.comercial.${suffix}@example.test`,
+          emailNormalized: `outro.comercial.${suffix}@example.test`,
+          passwordHash: 'hash-e2e-sem-uso',
+          departments: ['commercial'],
+        },
+      }),
+      prisma.user.create({
+        data: {
+          companyId: tenantId,
+          name: 'Atendente Operacional',
+          username: `operacional.${suffix}`,
+          usernameNormalized: `operacional.${suffix}`,
+          email: `operacional.${suffix}@example.test`,
+          emailNormalized: `operacional.${suffix}@example.test`,
+          passwordHash: 'hash-e2e-sem-uso',
+          departments: ['operations'],
+        },
+      }),
+    ]);
+    const [commercialContact, operationsContact] = await Promise.all([
+      prisma.whatsAppContact.create({
+        data: {
+          companyId: tenantId,
+          phoneNormalized: '5511988877244',
+          phoneDisplay: '(11) 98887-7244',
+          displayName: 'Cliente de outro atendente',
+        },
+      }),
+      prisma.whatsAppContact.create({
+        data: {
+          companyId: tenantId,
+          phoneNormalized: '5511988877245',
+          phoneDisplay: '(11) 98887-7245',
+          displayName: 'Cliente do Operacional',
+        },
+      }),
+    ]);
+    const [assignedConversation, otherDepartmentConversation] =
+      await Promise.all([
+        prisma.whatsAppConversation.create({
+          data: {
+            companyId: tenantId,
+            channelId,
+            contactId: commercialContact.id,
+            department: 'COMMERCIAL',
+            conversationState: 'HUMAN_ACTIVE',
+            flowStep: 'HUMAN_SERVICE',
+            assignedToUserId: otherCommercialOwner.id,
+          },
+        }),
+        prisma.whatsAppConversation.create({
+          data: {
+            companyId: tenantId,
+            channelId,
+            contactId: operationsContact.id,
+            department: 'OPERATIONS',
+            conversationState: 'HUMAN_ACTIVE',
+            flowStep: 'HUMAN_SERVICE',
+            assignedToUserId: operationsOwner.id,
+          },
+        }),
+      ]);
+    const attempts = [
+      {
+        conversation: assignedConversation,
+        expectedMessage:
+          'Somente o atendente responsável pode executar esta ação na conversa atribuída.',
+      },
+      {
+        conversation: otherDepartmentConversation,
+        expectedMessage:
+          'Somente um usuário do departamento responsável pode executar esta ação.',
+      },
+    ];
+
+    for (const { conversation, expectedMessage } of attempts) {
+      const commandId = randomUUID();
+      await request(app.getHttpServer())
+        .post(`/api/v1/whatsapp/conversations/${conversation.id}/actions/close`)
+        .set('authorization', `Bearer ${commercialAccessToken}`)
+        .send({
+          commandId,
+          expectedVersion: conversation.version,
+          reason: 'Tentativa de encerramento não autorizada.',
+        })
+        .expect(403)
+        .expect(({ body }) =>
+          expect(body).toMatchObject({
+            code: 'FORBIDDEN',
+            message: expectedMessage,
+          }),
+        );
+
+      await expect(
+        prisma.whatsAppConversation.findUniqueOrThrow({
+          where: {
+            id_companyId: { id: conversation.id, companyId: tenantId },
+          },
+        }),
+      ).resolves.toMatchObject({
+        conversationState: 'HUMAN_ACTIVE',
+        assignedToUserId: conversation.assignedToUserId,
+        closedAt: null,
+        version: conversation.version,
+      });
+      await expect(
+        prisma.whatsAppConversationTransition.count({
+          where: { companyId: tenantId, commandId },
+        }),
+      ).resolves.toBe(0);
+      await expect(
+        prisma.integrationOutbox.count({
+          where: {
+            companyId: tenantId,
+            aggregateId: conversation.id,
+            topic: 'whatsapp.outbound.requested',
+          },
+        }),
+      ).resolves.toBe(0);
+      await expect(
+        prisma.whatsAppMessage.count({
+          where: {
+            companyId: tenantId,
+            conversationId: conversation.id,
+            direction: 'OUTBOUND',
+          },
+        }),
+      ).resolves.toBe(0);
+      await expect(
+        prisma.tenantAuditLog.count({
+          where: {
+            companyId: tenantId,
+            targetId: conversation.id,
+            action: 'whatsapp.conversation.close',
+          },
+        }),
+      ).resolves.toBe(0);
+    }
+  });
+
+  it('solicita e aceita transferência somente pelo departamento de destino', async () => {
+    const outsiderSuffix = randomUUID().slice(0, 8);
+    const destinationSuffix = randomUUID().slice(0, 8);
+    const outsiderEmail = `${randomUUID()}@example.test`;
+    const destinationEmail = `${randomUUID()}@example.test`;
+    const [outsider, destinationAttendant] = await Promise.all([
+      prisma.user.create({
+        data: {
+          companyId: tenantId,
+          name: 'Atendente fora do destino',
+          username: `fora.${outsiderSuffix}`,
+          usernameNormalized: `fora.${outsiderSuffix}`,
+          email: outsiderEmail,
+          emailNormalized: outsiderEmail,
+          passwordHash: 'hash-e2e-sem-uso',
+          departments: ['commercial'],
+          permissionCodes: ['whatsapp-conversations:manage'],
+        },
+      }),
+      prisma.user.create({
+        data: {
+          companyId: tenantId,
+          name: 'Atendente do destino',
+          username: `destino.${destinationSuffix}`,
+          usernameNormalized: `destino.${destinationSuffix}`,
+          email: destinationEmail,
+          emailNormalized: destinationEmail,
+          passwordHash: 'hash-e2e-sem-uso',
+          // Prova técnica do aceite no backend. O rollout para um usuário
+          // exclusivamente Operacional aguarda a decisão da matriz de acesso.
+          departments: ['commercial', 'operations'],
+          permissionCodes: ['whatsapp-conversations:manage'],
+        },
+      }),
+    ]);
+    const [outsiderToken, destinationToken] = await Promise.all([
+      accessTokens.sign({
+        sub: outsider.id,
+        companyId: tenantId,
+        tokenVersion: outsider.tokenVersion,
+      }),
+      accessTokens.sign({
+        sub: destinationAttendant.id,
+        companyId: tenantId,
+        tokenVersion: destinationAttendant.tokenVersion,
+      }),
+    ]);
+    const inbound = await signedWebhook(
+      app,
+      webhookPayload(
+        `provider-transfer-${randomUUID()}`,
+        '5511988877242',
+        'Preciso falar com o Operacional',
+      ),
+    ).expect(202);
+    const conversationId = inbound.body.conversationId as string;
+    const taken = await request(app.getHttpServer())
+      .post(
+        `/api/v1/whatsapp/conversations/${conversationId}/actions/take-over`,
+      )
+      .set('authorization', `Bearer ${outsiderToken}`)
+      .send({ commandId: randomUUID(), expectedVersion: 1 })
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/whatsapp/conversations/${conversationId}/actions/request-transfer`,
+      )
+      .set('authorization', `Bearer ${outsiderToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: taken.body.version,
+        targetDepartment: 'operations',
+      })
+      .expect(400);
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/whatsapp/conversations/${conversationId}/actions/request-transfer`,
+      )
+      .set('authorization', `Bearer ${outsiderToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: taken.body.version,
+        reason: 'Transferência operacional necessária.',
+      })
+      .expect(400);
+    await expect(
+      prisma.whatsAppConversation.findUniqueOrThrow({
+        where: { id_companyId: { id: conversationId, companyId: tenantId } },
+      }),
+    ).resolves.toMatchObject({
+      conversationState: 'HUMAN_ACTIVE',
+      assignedToUserId: expect.any(String),
+      version: taken.body.version,
+    });
+
+    const requestCommandId = randomUUID();
+    const requested = await request(app.getHttpServer())
+      .post(
+        `/api/v1/whatsapp/conversations/${conversationId}/actions/request-transfer`,
+      )
+      .set('authorization', `Bearer ${outsiderToken}`)
+      .send({
+        commandId: requestCommandId,
+        expectedVersion: taken.body.version,
+        targetDepartment: 'operations',
+        reason: 'Transferência operacional necessária.',
+      })
+      .expect(201);
+    expect(requested.body).toMatchObject({
+      department: 'commercial',
+      conversationState: 'human-active',
+      assignedTo: taken.body.assignedTo,
+      pendingTransfer: {
+        targetDepartment: 'operations',
+        reason: 'Transferência operacional necessária.',
+        requestedAt: expect.any(String),
+        requestedBy: taken.body.assignedTo,
+      },
+      version: taken.body.version + 1,
+    });
+    await expect(
+      prisma.whatsAppConversationTransition.findUniqueOrThrow({
+        where: {
+          companyId_commandId: {
+            companyId: tenantId,
+            commandId: requestCommandId,
+          },
+        },
+      }),
+    ).resolves.toMatchObject({
+      name: 'request-transfer',
+      metadata: {
+        source: 'panel-transfer-request',
+        reason: 'Transferência operacional necessária.',
+        transfer: {
+          status: 'requested',
+          sourceDepartment: 'commercial',
+          targetDepartment: 'operations',
+          reason: 'Transferência operacional necessária.',
+          requestedByUserId: taken.body.assignedTo.id,
+          requestedAt: expect.any(String),
+        },
+      },
+    });
+
+    await request(app.getHttpServer())
+      .get('/api/v1/whatsapp/conversations?department=operations')
+      .set('authorization', `Bearer ${destinationToken}`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body.data).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              id: conversationId,
+              department: 'commercial',
+              assignedTo: taken.body.assignedTo,
+              pendingTransfer: expect.objectContaining({
+                targetDepartment: 'operations',
+              }),
+            }),
+          ]),
+        );
+      });
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/whatsapp/conversations/${conversationId}/actions/accept-transfer`,
+      )
+      .set('authorization', `Bearer ${outsiderToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: requested.body.version,
+      })
+      .expect(403);
+    await expect(
+      prisma.whatsAppConversation.findUniqueOrThrow({
+        where: { id_companyId: { id: conversationId, companyId: tenantId } },
+      }),
+    ).resolves.toMatchObject({
+      department: 'COMMERCIAL',
+      conversationState: 'HUMAN_ACTIVE',
+      assignedToUserId: taken.body.assignedTo.id,
+      pendingTransferDepartment: 'OPERATIONS',
+      pendingTransferReason: 'Transferência operacional necessária.',
+      version: requested.body.version,
+    });
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/whatsapp/conversations/${conversationId}/actions/accept-transfer`,
+      )
+      .set('authorization', `Bearer ${destinationToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: requested.body.version,
+      })
+      .expect(201)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          department: 'operations',
+          conversationState: 'human-active',
+          assignedTo: {
+            id: destinationAttendant.id,
+            name: destinationAttendant.name,
+          },
+          pendingTransfer: null,
+          version: requested.body.version + 1,
+        }),
+      );
   });
 
   it('devolve orçamento confirmado ao bot e publica o próximo inbound para o menu de acompanhamento', async () => {
@@ -2416,22 +2974,18 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     const followUpConversationId = first.body.conversationId as string;
 
     const transition = async (
-      name: string,
+      name: TransitionCommand['name'],
       expectedVersion: number,
-      targetDepartment?: string,
-    ) =>
-      request(app.getHttpServer())
-        .post(
-          `/api/v1/internal/whatsapp/conversations/${followUpConversationId}/transitions`,
-        )
-        .set('authorization', `Bearer ${serviceToken}`)
-        .send({
-          commandId: randomUUID(),
-          expectedVersion,
-          name,
-          ...(targetDepartment ? { targetDepartment } : {}),
-        })
-        .expect(201);
+      targetDepartment?: TransitionCommand['targetDepartment'],
+    ) => ({
+      body: await transitionSystem({
+        conversationId: followUpConversationId,
+        commandId: randomUUID(),
+        expectedVersion,
+        name,
+        ...(targetDepartment ? { targetDepartment } : {}),
+      }),
+    });
 
     await transition('select-commercial', 1);
     await transition('start-quote', 2);
@@ -2442,20 +2996,21 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       },
       orderBy: { sequence: 'desc' },
     });
-    await request(app.getHttpServer())
-      .patch(`/api/v1/internal/whatsapp/quote-requests/${quote.id}`)
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId: randomUUID(),
-        expectedVersion: quote.version,
-        contactName: 'Cliente acompanhamento',
-        serviceType: 'Fretamento eventual',
-        origin: 'Uberlândia',
-        destination: 'Goiânia',
-        departureAt: '2026-08-10T10:00:00.000Z',
-        passengerCount: 20,
-      })
-      .expect(200);
+    const departureAt = parseBusinessDateTime(
+      '2026-08-10T10:00:00.000Z',
+      'departureAt',
+    );
+    await patchQuoteFromAutomation(quote.id, {
+      commandId: randomUUID(),
+      expectedVersion: quote.version,
+      contactName: 'Cliente acompanhamento',
+      serviceType: 'Fretamento eventual',
+      origin: 'Uberlândia',
+      destination: 'Goiânia',
+      departureDate: dateOnlyFromDateTime(departureAt),
+      departureAt,
+      passengerCount: 20,
+    });
     await transition('present-quote-summary', 3);
     await transition('confirm-quote', 4);
 
@@ -2463,32 +3018,31 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .post(
         `/api/v1/whatsapp/conversations/${followUpConversationId}/actions/take-over`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({ commandId: randomUUID(), expectedVersion: 5 })
       .expect(201);
     await request(app.getHttpServer())
       .post(
-        `/api/v1/whatsapp/conversations/${followUpConversationId}/actions/forward`,
+        `/api/v1/whatsapp/conversations/${followUpConversationId}/actions/return-to-bot`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({
         commandId: randomUUID(),
         expectedVersion: 6,
-        targetDepartment: 'commercial',
       })
       .expect(201);
     await request(app.getHttpServer())
       .post(
         `/api/v1/whatsapp/conversations/${followUpConversationId}/actions/take-over`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({ commandId: randomUUID(), expectedVersion: 7 })
       .expect(201);
     const returned = await request(app.getHttpServer())
       .post(
         `/api/v1/whatsapp/conversations/${followUpConversationId}/actions/return-to-bot`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({ commandId: randomUUID(), expectedVersion: 8 })
       .expect(201);
 
@@ -2532,43 +3086,31 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       },
     });
 
-    const menuOutbound = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${followUpConversationId}/messages/outbound`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    const menuOutbound = {
+      body: await createAutomaticOutbound({
+        conversationId: followUpConversationId,
         commandId: randomUUID(),
         expectedVersion: 10,
-        automatic: true,
         purpose: 'commercial-follow-up-menu',
         kind: 'text',
         text: 'Menu de acompanhamento',
-      })
-      .expect(201);
-    const menuClaim = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/messages/${menuOutbound.body.id as string}/evolution-dispatch-claims`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+      }),
+    };
+    const menuClaim = {
+      body: await claimEvolution({
+        messageId: menuOutbound.body.id,
         commandId: randomUUID(),
         attemptId: menuOutbound.body.attempts[0].id,
-      })
-      .expect(201);
+      }),
+    };
     expect(menuClaim.body.shouldSend).toBe(true);
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/messages/${menuOutbound.body.id as string}/evolution-result`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId: randomUUID(),
-        attemptId: menuOutbound.body.attempts[0].id,
-        status: 'sent',
-        providerMessageId: 'evolution-follow-up-menu',
-      })
-      .expect(201);
+    await recordEvolution({
+      messageId: menuOutbound.body.id,
+      commandId: randomUUID(),
+      attemptId: menuOutbound.body.attempts[0].id,
+      status: 'sent',
+      providerMessageId: 'evolution-follow-up-menu',
+    });
     expect(
       (
         await prisma.whatsAppConversation.findUniqueOrThrow({
@@ -2676,20 +3218,17 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       }),
     ]);
 
-    const completion = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/outbox-events/${processing.id}/completions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    const completion = {
+      body: await completeAutomationOutbox({
+        eventId: processing.id,
         commandId: randomUUID(),
         executionId,
         aggregateType: 'whatsapp-conversation',
         aggregateId,
         outcome: 'succeeded',
         consumedSourceEventIds: [firstSourceEventId, secondSourceEventId],
-      })
-      .expect(201);
+      }),
+    };
 
     expect(completion.body).toMatchObject({
       eventId: processing.id,
@@ -2719,6 +3258,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       data: {
         companyId: tenantId,
         phoneNormalized: '5511977773131',
+        phoneDisplay: formatWhatsAppPhone('5511977773131'),
         displayName: 'Cliente ciclo substituído',
       },
     });
@@ -2787,17 +3327,13 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
 
     const commandId = randomUUID();
     const transitionRequest = () =>
-      request(app.getHttpServer())
-        .post(
-          `/api/v1/internal/whatsapp/conversations/${conversation.id}/transitions`,
-        )
-        .set('authorization', `Bearer ${serviceToken}`)
-        .send({
-          commandId,
-          expectedVersion: 1,
-          name: 'new-quote-request',
-        });
-    const newCycle = await transitionRequest().expect(201);
+      transitionSystem({
+        conversationId: conversation.id,
+        commandId,
+        expectedVersion: 1,
+        name: 'new-quote-request',
+      });
+    const newCycle = { body: await transitionRequest() };
     expect(newCycle.body).toMatchObject({
       idempotent: false,
       conversationState: 'bot-active',
@@ -2809,9 +3345,9 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         status: 'collecting-information',
       },
     });
-    await transitionRequest()
-      .expect(201)
-      .expect(({ body }) => expect(body.idempotent).toBe(true));
+    await expect(transitionRequest()).resolves.toMatchObject({
+      idempotent: true,
+    });
 
     const quotes = await prisma.quoteRequest.findMany({
       where: { companyId: tenantId, conversationId: conversation.id },
@@ -2900,12 +3436,13 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
               id: supersededQuote.id,
               quoteRequest: expect.objectContaining({
                 status: 'cancelled',
-                decision: {
+                decision: expect.objectContaining({
                   status: 'cancelled',
+                  classification: 'superseded',
                   reason: 'Substituído por uma nova solicitação de orçamento.',
                   decidedAt: expect.any(String),
                   decidedBy: null,
-                },
+                }),
               }),
             }),
           ]),
@@ -2956,6 +3493,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       data: {
         companyId: tenantId,
         phoneNormalized: '5511987654321',
+        phoneDisplay: formatWhatsAppPhone('5511987654321'),
         displayName: 'Cliente proposta após acompanhamento',
       },
     });
@@ -3006,23 +3544,20 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .expect(201);
     const documentId = upload.body.proposalDocument.id as string;
 
-    await request(app.getHttpServer())
-      .post(`/api/v1/whatsapp/conversations/${conversation.id}/actions/forward`)
-      .set('authorization', `Bearer ${accessToken}`)
-      .send({
+    await expect(
+      transitionSystem({
+        conversationId: conversation.id,
         commandId: randomUUID(),
         expectedVersion: 1,
+        name: 'forward',
         targetDepartment: 'commercial',
-      })
-      .expect(201)
-      .expect(({ body }) => {
-        expect(body).toMatchObject({
-          conversationState: 'sent-to-human',
-          flowStep: 'human-service',
-          requestStatus: 'under-review',
-          version: 2,
-        });
-      });
+      }),
+    ).resolves.toMatchObject({
+      conversationState: 'sent-to-human',
+      flowStep: 'human-service',
+      requestStatus: 'under-review',
+      version: 2,
+    });
 
     await request(app.getHttpServer())
       .get('/api/v1/whatsapp/quote-proposals?page=1&pageSize=100')
@@ -3070,7 +3605,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       },
       conversation: {
         id: conversation.id,
-        conversationState: 'bot-active',
+        conversationState: 'human-active',
         flowStep: 'quote-send-pending',
         requestStatus: 'under-review',
         assignedTo: { id: actor.id, name: actor.name },
@@ -3082,17 +3617,14 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         sentBy: { id: actor.id, name: actor.name },
       },
     });
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversation.id}/transitions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    await expect(
+      transitionSystem({
+        conversationId: conversation.id,
         commandId: randomUUID(),
         expectedVersion: 3,
         name: 'new-quote-request',
-      })
-      .expect(409);
+      }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
     await expect(
       prisma.quoteRequest.count({
         where: { companyId: tenantId, conversationId: conversation.id },
@@ -3121,6 +3653,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         data: {
           companyId: tenantId,
           phoneNormalized: `551197777${suffix}`,
+          phoneDisplay: formatWhatsAppPhone(`551197777${suffix}`),
           displayName: `Cliente bloqueado ${suffix}`,
         },
       });
@@ -3215,6 +3748,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       data: {
         companyId: tenantId,
         phoneNormalized: '5511977773232',
+        phoneDisplay: formatWhatsAppPhone('5511977773232'),
         displayName: 'Cliente status manual',
       },
     });
@@ -3297,6 +3831,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         commandId: randomUUID(),
         expectedVersion: conversation.version + 1,
         status: 'cancelled',
+        closureClassification: 'opportunity-abandoned',
         reason: cancellationReason,
       })
       .expect(200)
@@ -3306,6 +3841,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
           quoteRequest: {
             status: 'cancelled',
             decision: {
+              classification: 'opportunity-abandoned',
               reason: cancellationReason,
               decidedBy: { id: actor.id, name: actor.name },
             },
@@ -3331,6 +3867,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       metadata: expect.objectContaining({
         fromStatus: 'under-review',
         toStatus: 'cancelled',
+        closureClassification: 'opportunity-abandoned',
         reason: cancellationReason,
       }),
     });
@@ -3344,6 +3881,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       data: {
         companyId: tenantId,
         phoneNormalized: '5511977773333',
+        phoneDisplay: formatWhatsAppPhone('5511977773333'),
         displayName: 'Cliente proposta PDF',
       },
     });
@@ -3580,7 +4118,6 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
           mimetype: 'application/pdf',
           sizeBytes: pdf.byteLength,
           sha256: upload.body.proposalDocument.sha256,
-          downloadPath: `/internal/whatsapp/proposal-documents/${documentId}/content`,
         },
       },
     });
@@ -3601,43 +4138,34 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       aggregateId: outbound.aggregateId,
       outcome: 'succeeded',
     };
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/outbox-events/${outbound.id}/completions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send(outboundCompletion)
-      .expect(409);
+    await expect(
+      completeAutomationOutbox({
+        ...outboundCompletion,
+        eventId: outbound.id,
+      }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
 
-    const internalDownload = await request(app.getHttpServer())
-      .get(`/api/v1/internal/whatsapp/proposal-documents/${documentId}/content`)
-      .set('authorization', `Bearer ${serviceToken}`)
-      .buffer(true)
-      .parse((response, callback) => {
-        const chunks: Buffer[] = [];
-        response.on('data', (chunk: Buffer) => chunks.push(chunk));
-        response.on('end', () => callback(null, Buffer.concat(chunks)));
-      })
-      .expect(200);
-    expect(internalDownload.body).toEqual(pdf);
+    const internalDocument =
+      (await commercialQuoteRepository.getQuoteProposalDocument(
+        tenantId,
+        documentId,
+      )) as { content: Buffer };
+    expect(internalDocument.content).toEqual(pdf);
 
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/messages/${messageId}/evolution-dispatch-claims`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({ commandId: randomUUID(), attemptId })
-      .expect(201);
+    await claimEvolution({
+      messageId,
+      commandId: randomUUID(),
+      attemptId,
+    });
 
-    await request(app.getHttpServer())
-      .post(`/api/v1/internal/whatsapp/messages/${messageId}/evolution-result`)
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    await expect(
+      recordEvolution({
+        messageId,
         commandId: randomUUID(),
         attemptId,
         status: 'sent',
-      })
-      .expect(400);
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
     expect(
       await prisma.whatsAppConversation.findUniqueOrThrow({
         where: {
@@ -3662,45 +4190,32 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         commandId: randomUUID(),
         expectedVersion: 2,
         targetDepartment: 'operations',
+        reason: 'Tentativa de transferência para Operacional.',
       })
       .expect(409);
 
     const resultCommandId = randomUUID();
-    await request(app.getHttpServer())
-      .post(`/api/v1/internal/whatsapp/messages/${messageId}/evolution-result`)
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId: resultCommandId,
-        attemptId,
-        status: 'sent',
-        providerMessageId: 'evolution-proposal-pdf-e2e',
-      })
-      .expect(201);
-    await request(app.getHttpServer())
-      .post(`/api/v1/internal/whatsapp/messages/${messageId}/evolution-result`)
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId: resultCommandId,
-        attemptId,
-        status: 'sent',
-        providerMessageId: 'evolution-proposal-pdf-e2e',
-      })
-      .expect(201)
-      .expect(({ body }) => expect(body.idempotent).toBe(true));
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/outbox-events/${outbound.id}/completions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send(outboundCompletion)
-      .expect(201)
-      .expect(({ body }) => {
-        expect(body).toMatchObject({
-          eventId: outbound.id,
-          outcome: 'succeeded',
-          status: 'delivered',
-        });
-      });
+    const evolutionResult = {
+      messageId,
+      commandId: resultCommandId,
+      attemptId,
+      status: 'sent' as const,
+      providerMessageId: 'evolution-proposal-pdf-e2e',
+    };
+    await recordEvolution(evolutionResult);
+    await expect(recordEvolution(evolutionResult)).resolves.toMatchObject({
+      idempotent: true,
+    });
+    await expect(
+      completeAutomationOutbox({
+        ...outboundCompletion,
+        eventId: outbound.id,
+      }),
+    ).resolves.toMatchObject({
+      eventId: outbound.id,
+      outcome: 'succeeded',
+      status: 'delivered',
+    });
 
     expect(
       await prisma.whatsAppConversation.findUniqueOrThrow({
@@ -3893,12 +4408,13 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
           stage: 'cancelled',
           quoteRequest: expect.objectContaining({
             status: 'rejected',
-            decision: {
+            decision: expect.objectContaining({
               status: 'rejected',
+              classification: 'quote-rejected',
               reason: 'Cliente solicitou uma nova data para a viagem.',
               decidedAt: expect.any(String),
               decidedBy: { id: actor.id, name: actor.name },
-            },
+            }),
           }),
         }),
       ]),
@@ -3907,11 +4423,16 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         sent: expect.any(Number),
         approved: expect.any(Number),
         cancelled: expect.any(Number),
+        rejected: expect.any(Number),
+        commercialClosures: expect.any(Number),
         cancellationReasons: expect.arrayContaining([
           {
             reason: 'Cliente solicitou uma nova data para a viagem.',
             count: 1,
           },
+        ]),
+        closureClassifications: expect.arrayContaining([
+          { classification: 'quote-rejected', count: 1 },
         ]),
       },
       filters: {
@@ -3922,6 +4443,34 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     });
     expect(cancelledProposals.body.summary.cancelled).toBeGreaterThanOrEqual(1);
 
+    const approvedContact = await prisma.whatsAppContact.create({
+      data: {
+        companyId: tenantId,
+        phoneNormalized: '5511977773334',
+        phoneDisplay: formatWhatsAppPhone('5511977773334'),
+        displayName: 'Cliente proposta aprovada',
+      },
+    });
+    const approvedConversation = await prisma.whatsAppConversation.create({
+      data: {
+        companyId: tenantId,
+        channelId,
+        contactId: approvedContact.id,
+        department: 'COMMERCIAL',
+        conversationState: 'BOT_ACTIVE',
+        flowStep: 'COMMERCIAL_FOLLOW_UP_MENU',
+        requestStatus: 'APPROVED',
+      },
+    });
+    const approvedQuote = await prisma.quoteRequest.create({
+      data: {
+        companyId: tenantId,
+        conversationId: approvedConversation.id,
+        sequence: 1,
+        status: 'APPROVED',
+      },
+    });
+
     await request(app.getHttpServer())
       .get(
         '/api/v1/whatsapp/quote-proposals?stage=approved&page=1&pageSize=100',
@@ -3930,6 +4479,9 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .expect(200)
       .expect(({ body }) => {
         expect(body.summary.approved).toBeGreaterThanOrEqual(1);
+        expect(
+          (body.items as Array<{ id: string }>).map(({ id }) => id),
+        ).toContain(approvedQuote.id);
         expect(
           (body.items as Array<{ quoteRequest: { status: string } }>).every(
             (item) => item.quoteRequest.status === 'approved',
@@ -4007,7 +4559,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       },
       conversation: {
         id: proposalConversation.id,
-        conversationState: 'bot-active',
+        conversationState: 'human-active',
         flowStep: 'quote-send-pending',
         requestStatus: 'under-review',
         assignedTo: { id: actor.id, name: actor.name },
@@ -4139,7 +4691,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     expect(actor.isActive).toBe(true);
   });
 
-  it('bloqueia encerramento com proposta ativa e encerra conversa geral sem proposta', async () => {
+  it('permite encerramento com proposta ativa pela flag padrão e encerra conversa geral', async () => {
     const activeInbound = await signedWebhook(
       app,
       webhookPayload(
@@ -4176,18 +4728,18 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .post(
         `/api/v1/whatsapp/conversations/${activeConversationId}/actions/close`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({
         commandId: randomUUID(),
         expectedVersion: activeConversation.version,
         reason: 'Atendimento interrompido.',
       })
-      .expect(409)
+      .expect(201)
       .expect(({ body }) =>
         expect(body).toMatchObject({
-          details: {
-            requestStatus: 'collecting-information',
-          },
+          conversationState: 'closed',
+          requestStatus: 'collecting-information',
+          version: activeConversation.version + 1,
         }),
       );
     expect(
@@ -4200,9 +4752,9 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         },
       }),
     ).toMatchObject({
-      conversationState: 'BOT_ACTIVE',
-      closedAt: null,
-      version: activeConversation.version,
+      conversationState: 'CLOSED',
+      closedAt: expect.any(Date),
+      version: activeConversation.version + 1,
     });
 
     const approvedHistoryInbound = await signedWebhook(
@@ -4264,7 +4816,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .post(
         `/api/v1/whatsapp/conversations/${approvedHistoryConversationId}/actions/close`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({
         commandId: randomUUID(),
         expectedVersion: approvedHistoryConversation.version,
@@ -4301,7 +4853,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .post(
         `/api/v1/whatsapp/conversations/${generalConversationId}/actions/close`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({
         commandId: randomUUID(),
         expectedVersion: generalConversation.version + 1,
@@ -4318,7 +4870,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .post(
         `/api/v1/whatsapp/conversations/${generalConversationId}/actions/close`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({
         commandId: closeCommandId,
         expectedVersion: generalConversation.version,
@@ -4422,7 +4974,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .post(
         `/api/v1/whatsapp/conversations/${rejectedConversationId}/actions/close`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({
         commandId: randomUUID(),
         expectedVersion: rejectedConversation.version,
@@ -4435,7 +4987,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .post(
         `/api/v1/whatsapp/conversations/${rejectedConversationId}/actions/close`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({
         commandId: rejectedCloseCommandId,
         expectedVersion: rejectedConversation.version,
@@ -4464,14 +5016,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       webhookPayload('close-rejected-first-contact', phone, 'Olá'),
     ).expect(202);
     const rejectedConversationId = firstInbound.body.conversationId as string;
-    const assignee = await prisma.user.findFirstOrThrow({
-      where: {
-        companyId: tenantId,
-        usernameNormalized: 'admin.e2e',
-        isActive: true,
-      },
-      select: { id: true },
-    });
+    const assignee = commercialAttendant;
 
     const rejected = await prisma.whatsAppConversation.update({
       where: {
@@ -4506,7 +5051,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .post(
         `/api/v1/whatsapp/conversations/${rejectedConversationId}/actions/close-after-rejection`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({
         commandId: closeCommandId,
         expectedVersion: rejected.version,
@@ -4618,7 +5163,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .post(
         `/api/v1/whatsapp/conversations/${rejectedConversationId}/actions/close`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
       .send({
         commandId: closeCommandId,
         expectedVersion: rejected.version,
@@ -4694,6 +5239,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       data: {
         companyId: tenantId,
         phoneNormalized: '5534996305110',
+        phoneDisplay: formatWhatsAppPhone('5534996305110'),
         displayName: 'Cliente ciclo múltiplo',
       },
     });
@@ -4808,25 +5354,18 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     ) => {
       const messageId = sent.body.message.id as string;
       const attemptId = sent.body.message.attempts[0].id as string;
-      await request(app.getHttpServer())
-        .post(
-          `/api/v1/internal/whatsapp/messages/${messageId}/evolution-dispatch-claims`,
-        )
-        .set('authorization', `Bearer ${serviceToken}`)
-        .send({ commandId: randomUUID(), attemptId })
-        .expect(201);
-      await request(app.getHttpServer())
-        .post(
-          `/api/v1/internal/whatsapp/messages/${messageId}/evolution-result`,
-        )
-        .set('authorization', `Bearer ${serviceToken}`)
-        .send({
-          commandId: randomUUID(),
-          attemptId,
-          status,
-          ...(providerMessageId ? { providerMessageId } : {}),
-        })
-        .expect(201);
+      await claimEvolution({
+        messageId,
+        commandId: randomUUID(),
+        attemptId,
+      });
+      await recordEvolution({
+        messageId,
+        commandId: randomUUID(),
+        attemptId,
+        status,
+        ...(providerMessageId ? { providerMessageId } : {}),
+      });
     };
     await recordDelivery(firstSend, 'sent', 'evolution-multi-a');
     await expect(
@@ -4946,34 +5485,44 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       ),
     ).expect(202);
     expect(customerResponse.body.version).toBe(8);
+    const takenForNewCycle = await request(app.getHttpServer())
+      .post(
+        `/api/v1/whatsapp/conversations/${conversation.id}/actions/take-over`,
+      )
+      .set('authorization', `Bearer ${commercialAccessToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: customerResponse.body.version,
+      })
+      .expect(201);
     const returned = await request(app.getHttpServer())
       .post(
         `/api/v1/whatsapp/conversations/${conversation.id}/actions/return-to-bot`,
       )
-      .set('authorization', `Bearer ${accessToken}`)
-      .send({ commandId: randomUUID(), expectedVersion: 8 })
+      .set('authorization', `Bearer ${commercialAccessToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: takenForNewCycle.body.version,
+      })
       .expect(201);
     expect(returned.body).toMatchObject({
       conversationState: 'bot-active',
       flowStep: 'commercial-follow-up-menu',
       requestStatus: 'waiting-for-customer',
-      version: 9,
+      version: customerResponse.body.version + 2,
     });
-    const newCycle = await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversation.id}/transitions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    const newCycle = {
+      body: await transitionSystem({
+        conversationId: conversation.id,
         commandId: randomUUID(),
-        expectedVersion: 9,
+        expectedVersion: returned.body.version,
         name: 'new-quote-request',
-      })
-      .expect(201);
+      }),
+    };
     expect(newCycle.body).toMatchObject({
       flowStep: 'quote-data-collection',
       requestStatus: 'collecting-information',
-      version: 10,
+      version: returned.body.version + 1,
     });
     const quotes = await prisma.quoteRequest.findMany({
       where: { companyId: tenantId, conversationId: conversation.id },
@@ -4986,50 +5535,40 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     ]);
 
     const nextCycleQuote = quotes[1];
-    await request(app.getHttpServer())
-      .patch(`/api/v1/internal/whatsapp/quote-requests/${nextCycleQuote.id}`)
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
+    const nextDepartureAt = parseBusinessDateTime(
+      '2026-12-10T12:00:00.000Z',
+      'departureAt',
+    );
+    await patchQuoteFromAutomation(nextCycleQuote.id, {
+      commandId: randomUUID(),
+      expectedVersion: nextCycleQuote.version,
+      contactName: 'Cliente ciclo múltiplo',
+      serviceType: 'Fretamento eventual',
+      origin: 'Uberlândia',
+      destination: 'Brasília',
+      departureDate: dateOnlyFromDateTime(nextDepartureAt),
+      departureAt: nextDepartureAt,
+      passengerCount: 22,
+    });
+    await transitionSystem({
+      conversationId: conversation.id,
+      commandId: randomUUID(),
+      expectedVersion: newCycle.body.version,
+      name: 'present-quote-summary',
+    });
+    await expect(
+      transitionSystem({
+        conversationId: conversation.id,
         commandId: randomUUID(),
-        expectedVersion: nextCycleQuote.version,
-        contactName: 'Cliente ciclo múltiplo',
-        serviceType: 'Fretamento eventual',
-        origin: 'Uberlândia',
-        destination: 'Brasília',
-        departureAt: '2026-12-10T12:00:00.000Z',
-        passengerCount: 22,
-      })
-      .expect(200);
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversation.id}/transitions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId: randomUUID(),
-        expectedVersion: 10,
-        name: 'present-quote-summary',
-      })
-      .expect(201);
-    await request(app.getHttpServer())
-      .post(
-        `/api/v1/internal/whatsapp/conversations/${conversation.id}/transitions`,
-      )
-      .set('authorization', `Bearer ${serviceToken}`)
-      .send({
-        commandId: randomUUID(),
-        expectedVersion: 11,
+        expectedVersion: newCycle.body.version + 1,
         name: 'confirm-quote',
-      })
-      .expect(201)
-      .expect(({ body }) =>
-        expect(body).toMatchObject({
-          conversationState: 'bot-active',
-          flowStep: 'commercial-follow-up-menu',
-          requestStatus: 'under-review',
-          version: 12,
-        }),
-      );
+      }),
+    ).resolves.toMatchObject({
+      conversationState: 'bot-active',
+      flowStep: 'commercial-follow-up-menu',
+      requestStatus: 'under-review',
+      version: newCycle.body.version + 2,
+    });
     await request(app.getHttpServer())
       .get('/api/v1/whatsapp/quote-proposals?page=1&pageSize=100')
       .set('authorization', `Bearer ${accessToken}`)
@@ -5051,6 +5590,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       data: {
         companyId: tenantId,
         phoneNormalized: '5534996305220',
+        phoneDisplay: formatWhatsAppPhone('5534996305220'),
         displayName: 'Cliente encerrado',
       },
     });
@@ -5173,6 +5713,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         data: {
           companyId: tenantId,
           phoneNormalized: phone,
+          phoneDisplay: formatWhatsAppPhone(phone),
           displayName: 'Nome atual do contato',
         },
       });
@@ -5647,7 +6188,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
           ...input,
           cutoffAt: new Date(cutoffAt.getTime() + 1),
         }),
-      ).rejects.toThrow(/batchId.*tenant.*planilha diferente/i);
+      ).rejects.toThrow(/conteúdo diferente.*integridade dos dados/i);
 
       await prisma.whatsAppImportBatch.update({
         where: { id: batchId },
@@ -5862,4 +6403,709 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       await rm(importRoot, { recursive: true, force: true });
     }
   }, 60_000);
+
+  it('permite à Gerência operar Cadastro temporário somente com SEC-01/02 atribuídas', async () => {
+    const suffix = randomUUID().slice(0, 8);
+    const manager = await prisma.user.create({
+      data: {
+        companyId: tenantId,
+        name: 'Gerente de Cadastros E2E',
+        username: `ger.cad.${suffix}`,
+        usernameNormalized: `ger.cad.${suffix}`,
+        email: `ger.cad.${suffix}@example.test`,
+        emailNormalized: `ger.cad.${suffix}@example.test`,
+        passwordHash: 'hash-e2e-sem-uso',
+        departments: ['management'],
+        permissionCodes: ['clients:view', 'clients:create', 'clients:update'],
+      },
+      select: { id: true, tokenVersion: true },
+    });
+    const managerToken = await accessTokens.sign({
+      sub: manager.id,
+      companyId: tenantId,
+      tokenVersion: manager.tokenVersion,
+    });
+
+    await request(app.getHttpServer())
+      .get('/api/v1/registrations/catalog')
+      .set('authorization', `Bearer ${managerToken}`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body.roles).toEqual(
+          expect.arrayContaining([expect.objectContaining({ code: 'client' })]),
+        );
+      });
+
+    const registrationPayload = {
+      type: 'pf',
+      firstName: 'Cadastro',
+      lastName: 'Emergencial E2E',
+      isTemporary: true,
+      temporaryReason: 'Atendimento emergencial autorizado pela Gerência.',
+      roleCodes: ['client'],
+      phones: [
+        {
+          number: '5511970000001',
+          type: 'mobile',
+          isPrimary: true,
+          hasWhatsApp: true,
+        },
+      ],
+      commandId: randomUUID(),
+    };
+    const created = await request(app.getHttpServer())
+      .post('/api/v1/registrations')
+      .set('authorization', `Bearer ${managerToken}`)
+      .send(registrationPayload)
+      .expect(201);
+    expect(created.body).toMatchObject({
+      type: 'pf',
+      isTemporary: true,
+      temporaryReason: registrationPayload.temporaryReason,
+      temporaryResponsible: { id: manager.id },
+      version: 1,
+    });
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/registrations/${created.body.id as string}`)
+      .set('authorization', `Bearer ${managerToken}`)
+      .expect(200)
+      .expect(({ body }) => expect(body.id).toBe(created.body.id));
+    await request(app.getHttpServer())
+      .get('/api/v1/registrations?temporary=true')
+      .set('authorization', `Bearer ${managerToken}`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ id: created.body.id, isTemporary: true }),
+          ]),
+        );
+      });
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/registrations/${created.body.id as string}`)
+      .set('authorization', `Bearer ${managerToken}`)
+      .send({
+        ...registrationPayload,
+        lastName: 'Emergencial Revisado E2E',
+        commandId: randomUUID(),
+        expectedVersion: 1,
+      })
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body).toMatchObject({
+          id: created.body.id,
+          displayName: 'Cadastro Emergencial Revisado E2E',
+          isTemporary: true,
+          version: 2,
+        });
+      });
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/registrations/${created.body.id as string}/history`)
+      .set('authorization', `Bearer ${managerToken}`)
+      .expect(403);
+    await request(app.getHttpServer())
+      .post('/api/v1/registrations/catalog/roles')
+      .set('authorization', `Bearer ${managerToken}`)
+      .send({ code: `gerencia-${suffix}`, name: 'Papel não autorizado' })
+      .expect(403);
+  });
+
+  it('mantém a criação de Cadastro idempotente sob concorrência e devolve o snapshot original', async () => {
+    const suffix = randomUUID().slice(0, 8);
+    const commandId = randomUUID();
+    const payload = {
+      type: 'pf',
+      firstName: 'Cadastro',
+      lastName: `Idempotente ${suffix}`,
+      roleCodes: ['client'],
+      phones: [
+        {
+          number: '5511970000052',
+          type: 'mobile',
+          isPrimary: true,
+          hasWhatsApp: false,
+        },
+      ],
+      commandId,
+    };
+
+    const concurrentCreates = await Promise.all(
+      Array.from({ length: 2 }, () =>
+        request(app.getHttpServer())
+          .post('/api/v1/registrations')
+          .set('authorization', `Bearer ${accessToken}`)
+          .send(payload),
+      ),
+    );
+    expect(
+      concurrentCreates.map(({ status }) => status),
+      JSON.stringify(concurrentCreates.map(({ body }) => body)),
+    ).toEqual([201, 201]);
+    expect(concurrentCreates[1].body).toEqual(concurrentCreates[0].body);
+
+    const original = concurrentCreates[0].body as {
+      id: string;
+      displayName: string;
+      version: number;
+    };
+    await expect(
+      prisma.routingCompanyHistory.count({
+        where: { companyId: tenantId, commandId },
+      }),
+    ).resolves.toBe(1);
+
+    await request(app.getHttpServer())
+      .post('/api/v1/registrations')
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({ ...payload, lastName: `Com outro conteúdo ${suffix}` })
+      .expect(409)
+      .expect(({ body }) => expect(body.code).toBe('CONFLICT'));
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/registrations/${original.id}`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({
+        ...payload,
+        lastName: `Atualizado ${suffix}`,
+        commandId: randomUUID(),
+        expectedVersion: original.version,
+      })
+      .expect(200)
+      .expect(({ body }) => expect(body.version).toBe(original.version + 1));
+
+    await request(app.getHttpServer())
+      .post('/api/v1/registrations')
+      .set('authorization', `Bearer ${accessToken}`)
+      .send(payload)
+      .expect(201)
+      .expect(({ body }) => expect(body).toEqual(original));
+  });
+
+  it('mantém a consolidação de Cadastros fail-closed enquanto a aplicação não existe', async () => {
+    const [principal, duplicate] = await Promise.all([
+      prisma.routingCompany.create({
+        data: {
+          companyId: tenantId,
+          taxId: `pf${randomUUID().replaceAll('-', '').slice(0, 12)}`,
+          legalName: 'Pessoa Principal da Consolidação',
+          clientType: 'PF',
+          firstName: 'Pessoa Principal',
+          individualName: 'Pessoa Principal da Consolidação',
+        },
+      }),
+      prisma.routingCompany.create({
+        data: {
+          companyId: tenantId,
+          taxId: `pf${randomUUID().replaceAll('-', '').slice(0, 12)}`,
+          legalName: 'Pessoa Duplicada da Consolidação',
+          clientType: 'PF',
+          firstName: 'Pessoa Duplicada',
+          individualName: 'Pessoa Duplicada da Consolidação',
+        },
+      }),
+    ]);
+
+    await request(app.getHttpServer())
+      .get(
+        `/api/v1/registrations/${principal.id}/consolidation-preview?duplicateRegistrationId=${duplicate.id}`,
+      )
+      .set('authorization', `Bearer ${accessToken}`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body).toMatchObject({
+          status: 'preview',
+          principalRegistrationId: principal.id,
+          duplicateRegistrationId: duplicate.id,
+          canApply: false,
+          blockers: [{ code: 'application-not-available' }],
+        });
+      });
+
+    await expect(
+      prisma.routingCompany.findUniqueOrThrow({
+        where: {
+          id_companyId: { id: duplicate.id, companyId: tenantId },
+        },
+      }),
+    ).resolves.toMatchObject({ id: duplicate.id, version: 1 });
+  });
+
+  it('associa Usuário a Pessoa com idempotência e isolamento por tenant', async () => {
+    const otherCompanyId = randomUUID();
+    await prisma.company.create({
+      data: {
+        id: otherCompanyId,
+        legalName: 'Tenant estrangeiro de identidade E2E',
+        taxId: '99887766554433',
+      },
+    });
+    const person = await prisma.routingCompany.create({
+      data: {
+        companyId: tenantId,
+        taxId: '52998224725',
+        legalName: 'Pessoa Identidade E2E',
+        clientType: 'PF',
+        firstName: 'Pessoa',
+        lastName: 'Identidade E2E',
+        individualName: 'Pessoa Identidade E2E',
+        cpf: '52998224725',
+      },
+    });
+    await prisma.routingCompany.create({
+      data: {
+        companyId: otherCompanyId,
+        taxId: '52998224725',
+        legalName: 'Pessoa Homônima de Outro Tenant',
+        clientType: 'PF',
+        firstName: 'Pessoa',
+        individualName: 'Pessoa Homônima de Outro Tenant',
+        cpf: '52998224725',
+      },
+    });
+    const suffix = randomUUID().slice(0, 8);
+    const subject = await prisma.user.create({
+      data: {
+        companyId: tenantId,
+        name: 'Usuário Identidade E2E',
+        username: `ident.${suffix}`,
+        usernameNormalized: `ident.${suffix}`,
+        email: `ident.${suffix}@example.test`,
+        emailNormalized: `ident.${suffix}@example.test`,
+        cpfNormalized: '52998224725',
+        passwordHash: 'hash-e2e-sem-uso',
+      },
+    });
+    const foreignUser = await prisma.user.create({
+      data: {
+        companyId: otherCompanyId,
+        name: 'Usuário de Outro Tenant',
+        username: `foreign.${suffix}`,
+        usernameNormalized: `foreign.${suffix}`,
+        email: `foreign.${suffix}@example.test`,
+        emailNormalized: `foreign.${suffix}@example.test`,
+        passwordHash: 'hash-e2e-sem-uso',
+      },
+    });
+
+    const association = {
+      mode: 'automatic',
+      commandId: randomUUID(),
+      expectedVersion: 1,
+    };
+    const first = await request(app.getHttpServer())
+      .post(`/api/v1/identity/users/${subject.id}/person-association`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .send(association)
+      .expect(201);
+    expect(first.body).toMatchObject({
+      userId: subject.id,
+      personRegistrationId: person.id,
+      associationVersion: 2,
+      source: 'unique-exact-cpf',
+      idempotent: false,
+    });
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/identity/users/${subject.id}/person-association`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .send(association)
+      .expect(201)
+      .expect(({ body }) => {
+        expect(body).toMatchObject({
+          userId: subject.id,
+          personRegistrationId: person.id,
+          associationVersion: 2,
+          idempotent: true,
+        });
+      });
+
+    await expect(
+      prisma.userPersonAssociationHistory.count({
+        where: { companyId: tenantId, userId: subject.id },
+      }),
+    ).resolves.toBe(1);
+    await request(app.getHttpServer())
+      .post(`/api/v1/identity/users/${foreignUser.id}/person-association`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({ ...association, commandId: randomUUID() })
+      .expect(404);
+  });
+
+  it('serializa criação concorrente, resolve e revoga acesso seguro de pré-admissão', async () => {
+    const suffix = randomUUID().slice(0, 8);
+    const humanResources = await prisma.user.create({
+      data: {
+        companyId: tenantId,
+        name: 'RH legado Pré-admissão E2E',
+        username: `rh.preadm.${suffix}`,
+        usernameNormalized: `rh.preadm.${suffix}`,
+        email: `rh.preadm.${suffix}@example.test`,
+        emailNormalized: `rh.preadm.${suffix}@example.test`,
+        passwordHash: 'hash-e2e-sem-uso',
+        departments: ['human-resources'],
+        permissionCodes: ['documents:manage'],
+      },
+      select: { id: true, tokenVersion: true },
+    });
+    const humanResourcesToken = await accessTokens.sign({
+      sub: humanResources.id,
+      companyId: tenantId,
+      tokenVersion: humanResources.tokenVersion,
+    });
+    const person = await prisma.routingCompany.create({
+      data: {
+        companyId: tenantId,
+        taxId: '93541134780',
+        legalName: 'Candidata Pré-admissão E2E',
+        clientType: 'PF',
+        firstName: 'Candidata',
+        lastName: 'Pré-admissão E2E',
+        individualName: 'Candidata Pré-admissão E2E',
+        cpf: '93541134780',
+      },
+    });
+    const documentType = await prisma.documentType.create({
+      data: {
+        companyId: tenantId,
+        code: `preadm-e2e-${suffix}`,
+        name: 'Documento de admissão E2E',
+        acceptedMimeTypes: ['application/pdf'],
+        maxFileSizeBytes: 2_000_000,
+      },
+    });
+    const createPayload = {
+      commandId: randomUUID(),
+      expectedVersion: 0,
+      personRegistrationId: person.id,
+      requestedDocuments: [
+        {
+          documentTypeId: documentType.id,
+          instructions: 'Envie o documento completo e legível.',
+        },
+      ],
+    };
+
+    const concurrentReplay = await Promise.all(
+      Array.from({ length: 2 }, () =>
+        request(app.getHttpServer())
+          .post('/api/v1/pre-admission/accesses')
+          .set('authorization', `Bearer ${humanResourcesToken}`)
+          .send(createPayload),
+      ),
+    );
+    expect(concurrentReplay.map(({ status }) => status)).toEqual([201, 201]);
+    expect(concurrentReplay.map(({ body }) => body.id)).toEqual([
+      concurrentReplay[0].body.id,
+      concurrentReplay[0].body.id,
+    ]);
+    expect(
+      concurrentReplay
+        .map(({ body }) => body.idempotent as boolean)
+        .sort((left, right) => Number(left) - Number(right)),
+    ).toEqual([false, true]);
+    const created = concurrentReplay.find(
+      ({ body }) => body.idempotent === false,
+    )!;
+    expect(created.body).toMatchObject({
+      personRegistrationId: person.id,
+      status: 'active',
+      version: 1,
+      uploadAvailable: false,
+      idempotent: false,
+      token: expect.any(String),
+      requestedDocuments: [
+        expect.objectContaining({
+          documentTypeId: documentType.id,
+          code: documentType.code,
+        }),
+      ],
+    });
+    const token = created.body.token as string;
+
+    await request(app.getHttpServer())
+      .post('/api/v1/pre-admission/accesses')
+      .set('authorization', `Bearer ${humanResourcesToken}`)
+      .send(createPayload)
+      .expect(201)
+      .expect(({ body }) => {
+        expect(body).toMatchObject({
+          id: created.body.id,
+          token,
+          idempotent: true,
+        });
+      });
+    await request(app.getHttpServer())
+      .post('/api/v1/pre-admission/public/resolve')
+      .send({ token })
+      .expect(201)
+      .expect(({ body }) => {
+        expect(body).toMatchObject({
+          personName: 'Candidata Pré-admissão E2E',
+          status: 'active',
+          version: 1,
+          uploadAvailable: false,
+          requestedDocuments: [
+            expect.objectContaining({ code: documentType.code }),
+          ],
+        });
+        expect(body).not.toHaveProperty('personRegistrationId');
+      });
+
+    await prisma.routingCompany.update({
+      where: { id_companyId: { id: person.id, companyId: tenantId } },
+      data: { status: 'INACTIVE' },
+    });
+    const inactivePersonResolve = await request(app.getHttpServer())
+      .post('/api/v1/pre-admission/public/resolve')
+      .send({ token });
+    await prisma.routingCompany.update({
+      where: { id_companyId: { id: person.id, companyId: tenantId } },
+      data: { status: 'ACTIVE' },
+    });
+    expect(inactivePersonResolve.status).toBe(401);
+    expect(inactivePersonResolve.body).toMatchObject({
+      code: 'INVALID_PREADMISSION_TOKEN',
+    });
+    expect(inactivePersonResolve.body).not.toHaveProperty('personName');
+    expect(inactivePersonResolve.body).not.toHaveProperty('requestedDocuments');
+
+    await prisma.company.update({
+      where: { id: tenantId },
+      data: { status: 'SUSPENDED' },
+    });
+    const inactiveCompanyResolve = await request(app.getHttpServer())
+      .post('/api/v1/pre-admission/public/resolve')
+      .send({ token });
+    await prisma.company.update({
+      where: { id: tenantId },
+      data: { status: 'ACTIVE' },
+    });
+    expect(inactiveCompanyResolve.status).toBe(401);
+    expect(inactiveCompanyResolve.body).toMatchObject({
+      code: 'INVALID_PREADMISSION_TOKEN',
+    });
+    expect(inactiveCompanyResolve.body).not.toHaveProperty('personName');
+    expect(inactiveCompanyResolve.body).not.toHaveProperty(
+      'requestedDocuments',
+    );
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/pre-admission/accesses/${created.body.id as string}/revoke`,
+      )
+      .set('authorization', `Bearer ${humanResourcesToken}`)
+      .send({ commandId: randomUUID(), expectedVersion: 1 })
+      .expect(201)
+      .expect(({ body }) => {
+        expect(body).toMatchObject({
+          id: created.body.id,
+          status: 'revoked',
+          version: 2,
+          idempotent: false,
+        });
+        expect(body).not.toHaveProperty('token');
+      });
+    await request(app.getHttpServer())
+      .post('/api/v1/pre-admission/public/resolve')
+      .send({ token })
+      .expect(401)
+      .expect(({ body }) => {
+        expect(body.code).toBe('INVALID_PREADMISSION_TOKEN');
+      });
+
+    const competingCreates = await Promise.all(
+      Array.from({ length: 2 }, () =>
+        request(app.getHttpServer())
+          .post('/api/v1/pre-admission/accesses')
+          .set('authorization', `Bearer ${humanResourcesToken}`)
+          .send({ ...createPayload, commandId: randomUUID() }),
+      ),
+    );
+    expect(
+      competingCreates.map(({ status }) => status).sort((a, b) => a - b),
+    ).toEqual([201, 409]);
+    expect(
+      competingCreates.find(({ status }) => status === 409)?.body,
+    ).toMatchObject({ code: 'CONFLICT' });
+    await expect(
+      prisma.preAdmissionAccess.count({
+        where: {
+          companyId: tenantId,
+          personRegistrationId: person.id,
+          revokedAt: null,
+        },
+      }),
+    ).resolves.toBe(1);
+  });
+
+  it('cria viagem manual de contrato contínuo e preserva os ciclos suspensão e interrupção', async () => {
+    const customer = await request(app.getHttpServer())
+      .post('/api/v1/registrations')
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({
+        type: 'pj',
+        legalName: 'Cliente Contrato Contínuo E2E Ltda.',
+        tradeName: 'Cliente Contínuo E2E',
+        cnpj: '11.222.333/0001-81',
+        roleCodes: ['client'],
+        commandId: randomUUID(),
+      })
+      .expect(201);
+    const suffix = randomUUID().slice(0, 8).toUpperCase();
+    const contract = await request(app.getHttpServer())
+      .post('/api/v1/routing/contracts')
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({
+        routingCompanyId: customer.body.id,
+        code: `CTR-${suffix}`,
+        name: 'Contrato contínuo E2E',
+        operationType: 'Fretamento contínuo',
+        routeType: 'municipal',
+        status: 'active',
+        periodicity: 'daily',
+        contractedVehicleCount: 1,
+        predictedVehicleName: 'Ônibus E2E',
+        predictedVehicleCapacity: 46,
+        plannedKm: 20,
+        maxWalkingDistanceMeters: 500,
+        requiresDocumentation: false,
+        requiredDocumentTypeCodes: [],
+        unitName: 'Unidade E2E',
+        origin: {
+          label: 'Garagem E2E',
+          street: 'Rua de Origem',
+          number: '100',
+          district: 'Centro',
+          postalCode: '38400000',
+          city: 'Uberlândia',
+          state: 'MG',
+        },
+        destination: {
+          label: 'Unidade E2E',
+          street: 'Rua de Destino',
+          number: '200',
+          district: 'Distrito Industrial',
+          postalCode: '38408000',
+          city: 'Uberlândia',
+          state: 'MG',
+        },
+        validFrom: '2026-09-01',
+        validUntil: '2026-09-30',
+        costCenters: [{ code: `CC-${suffix}`, name: 'Centro E2E' }],
+        shifts: [
+          {
+            name: 'Manhã',
+            requiredArrivalTime: '08:00',
+            vehicleCount: 1,
+            vehicleCapacity: 46,
+            activeWeekdays: [1, 2, 3, 4, 5],
+          },
+        ],
+        commandId: randomUUID(),
+      })
+      .expect(201);
+    expect(contract.body).toMatchObject({ status: 'active', version: 1 });
+
+    const tripPayload = {
+      contractId: contract.body.id,
+      expectedContractVersion: 1,
+      code: `TRIP-${suffix}`,
+      serviceDate: '2026-09-10',
+      legs: [
+        { sequence: 1, label: 'Garagem E2E → Unidade E2E' },
+        { sequence: 2, label: 'Unidade E2E → Garagem E2E' },
+      ],
+      commandId: randomUUID(),
+    };
+    const created = await request(app.getHttpServer())
+      .post('/api/v1/trips')
+      .set('authorization', `Bearer ${accessToken}`)
+      .send(tripPayload)
+      .expect(201);
+    expect(created.body).toMatchObject({
+      trip: {
+        code: tripPayload.code,
+        source: {
+          kind: 'continuous-contract',
+          contractId: contract.body.id,
+          sourceVersion: 1,
+        },
+        status: 'draft',
+        version: 1,
+      },
+      idempotent: false,
+    });
+    const tripId = created.body.trip.id as string;
+
+    const apply = async (
+      expectedVersion: number,
+      body: Record<string, unknown>,
+      expectedStatus: string,
+    ) => {
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/trips/${tripId}/commands`)
+        .set('authorization', `Bearer ${accessToken}`)
+        .send({ ...body, commandId: randomUUID(), expectedVersion })
+        .expect(201);
+      expect(response.body.trip).toMatchObject({
+        id: tripId,
+        status: expectedStatus,
+        version: expectedVersion + 1,
+      });
+      return response.body;
+    };
+
+    await apply(1, { type: 'schedule' }, 'scheduled');
+    await apply(2, { type: 'start' }, 'in-execution');
+    await apply(
+      3,
+      { type: 'suspend', reason: 'Bloqueio temporário da via.' },
+      'suspended',
+    );
+    await apply(
+      4,
+      { type: 'resume', reason: 'Via liberada para circulação.' },
+      'in-execution',
+    );
+    await apply(
+      5,
+      {
+        type: 'interrupt',
+        reason: 'Falha mecânica impediu a continuidade.',
+        evidence: [
+          {
+            kind: 'manual-note',
+            description: 'Ocorrência registrada pelo Operacional no E2E.',
+          },
+        ],
+      },
+      'interrupted',
+    );
+    await apply(
+      6,
+      { type: 'close-early', reason: 'Encerramento antecipado autorizado.' },
+      'early-terminated',
+    );
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/trips/${tripId}/history`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body).toHaveLength(7);
+        const history = body as Array<{ toStatus: string }>;
+        expect(history.map((entry) => entry.toStatus)).toEqual([
+          'draft',
+          'scheduled',
+          'in-execution',
+          'suspended',
+          'in-execution',
+          'interrupted',
+          'early-terminated',
+        ]);
+      });
+  });
 });

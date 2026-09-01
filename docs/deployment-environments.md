@@ -55,6 +55,39 @@ docker compose -p lume-staging \
 Antes de liberar o teste, confirme o término do serviço `migrate`, a saúde da
 API e o endereço de recuperação de senha apontando para o Tenant Web de staging.
 
+### Pacote de migrations da evolução de domínio
+
+O próximo rollout inclui, nesta ordem:
+
+1. `20260830000100_temporary_registration`;
+2. `20260830000200_commercial_closure_classification`;
+3. `20260830000300_operational_trips`;
+4. `20260901000100_user_person_association`;
+5. `20260901000200_secure_pre_admission_access`;
+6. `20260901000300_pending_conversation_transfer`;
+7. `20260901000400_registration_command_idempotency`.
+
+Antes de aplicar em staging, faça backup recuperável, confirme o banco e a
+branch, execute `prisma migrate status` e registre o horário de início. Depois
+do serviço `migrate`, confira as sete migrations, FKs compostas por tenant,
+índices e constraints. Homologue pelo menos:
+
+- Cadastro temporário, regularização e bloqueio de contrato;
+- permissões individuais `clients:view/create/update` da Gerência;
+- associação versionada entre Usuário e Pessoa, inclusive repetição do mesmo
+  `commandId` e conflito de versão;
+- criação, resolução, renovação e revogação do link de pré-admissão, mantendo
+  `uploadAvailable=false`;
+- criação manual e máquina de estados das Viagens de contrato contínuo;
+- classificação dos encerramentos comerciais sem apagar registros legados;
+- devolução ao bot somente pelo responsável e transferência em que a origem
+  continua responsável até o aceite do destino;
+- leitura e mutação de conversa recusadas para outro tenant ou departamento.
+
+Não execute esse pacote em staging ou produção a partir de uma branch de
+trabalho. A aplicação em staging continua dependendo de autorização explícita,
+janela definida e acesso ao ambiente correto.
+
 ## Produção
 
 Depois da aprovação e do merge autorizado de `staging` em `main`:

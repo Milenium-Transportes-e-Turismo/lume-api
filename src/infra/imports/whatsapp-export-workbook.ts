@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
 
 import {
   CONVERSATION_HEADERS,
@@ -45,6 +46,24 @@ export interface WhatsAppExportMessageIdentity {
   readonly externalMessageId: string;
   readonly outbound: boolean;
   readonly message: ParsedWhatsAppExport['messages'][number];
+}
+
+const DETERMINISTIC_WORKBOOK_DATE = new Date('2000-01-01T00:00:00.000Z');
+
+async function writeDeterministicWorkbook(
+  workbook: ExcelJS.Workbook,
+): Promise<Buffer> {
+  const generated = Buffer.from(await workbook.xlsx.writeBuffer());
+  const archive = await JSZip.loadAsync(generated);
+
+  for (const entry of Object.values(archive.files)) {
+    entry.date = DETERMINISTIC_WORKBOOK_DATE;
+  }
+
+  return archive.generateAsync({
+    type: 'nodebuffer',
+    compression: 'DEFLATE',
+  });
 }
 
 export function identifyWhatsAppExportMessages(
@@ -250,9 +269,8 @@ export async function createWhatsAppImportWorkbook(
 
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Lume';
-  const deterministicWorkbookDate = new Date('2000-01-01T00:00:00.000Z');
-  workbook.created = deterministicWorkbookDate;
-  workbook.modified = deterministicWorkbookDate;
+  workbook.created = DETERMINISTIC_WORKBOOK_DATE;
+  workbook.modified = DETERMINISTIC_WORKBOOK_DATE;
   workbook.calcProperties.fullCalcOnLoad = false;
   const conversationSheet = addImportTable(
     workbook,
@@ -282,7 +300,7 @@ export async function createWhatsAppImportWorkbook(
   const occurredAtColumn = MESSAGE_HEADERS.indexOf('occurred_at') + 1;
   messageSheet.getColumn(occurredAtColumn).numFmt = 'dd/mm/yyyy hh:mm:ss';
 
-  const content = Buffer.from(await workbook.xlsx.writeBuffer());
+  const content = await writeDeterministicWorkbook(workbook);
   return {
     content,
     conversationCount: conversations.length,

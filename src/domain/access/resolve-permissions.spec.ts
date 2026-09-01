@@ -120,6 +120,11 @@ describe('resolveEffectivePermissions', () => {
     expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).not.toContain('users:manage');
     expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).toContain('settings:manage');
     expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).toContain('license:view');
+    expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).toContain('clients:view');
+    expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).toContain('clients:create');
+    expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).toContain('clients:update');
+    expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).not.toContain('clients:manage');
+    expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).not.toContain('clients:history');
     expect(
       MANAGEMENT_DEPARTMENT_PERMISSIONS.some(
         (permission) =>
@@ -127,5 +132,21 @@ describe('resolveEffectivePermissions', () => {
           permission.startsWith('whatsapp-conversations:'),
       ),
     ).toBe(false);
+  });
+
+  it('allows explicitly assigned Cadastro access for Management', () => {
+    const permissions = resolveEffectivePermissions(
+      ['management'],
+      ['clients:view', 'clients:create', 'clients:update', 'commercial:view'],
+    );
+
+    expect(permissions).toEqual(
+      expect.arrayContaining([
+        'clients:view',
+        'clients:create',
+        'clients:update',
+      ]),
+    );
+    expect(permissions).not.toContain('commercial:view');
   });
 });

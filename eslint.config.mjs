@@ -32,6 +32,23 @@ export default tseslint.config(
     },
   },
   {
+    files: ['src/domain/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/application/**', '**/infra/**', '**/modules/**'],
+              message:
+                'O domínio não pode depender das camadas de aplicação, infraestrutura ou composição HTTP.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     files: ['test/**/*.ts', 'src/**/*.spec.ts'],
     rules: {
       '@typescript-eslint/require-await': 'off',
