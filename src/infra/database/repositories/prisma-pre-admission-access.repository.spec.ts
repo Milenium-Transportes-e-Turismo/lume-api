@@ -18,6 +18,10 @@ const authorizedActor = {
   departments: ['human-resources'],
   permissionCodes: ['documents:manage'],
 };
+const authorizedPersonnelDepartmentActor = {
+  ...authorizedActor,
+  departments: ['personnel-department'],
+};
 
 const accessRow = {
   id: accessId,
@@ -88,9 +92,40 @@ describe('PrismaPreAdmissionAccessRepository', () => {
     expect(transaction.preAdmissionAccess.create).not.toHaveBeenCalled();
   });
 
-  it('creates person-bound scope, history and tenant audit in one transaction', async () => {
+  it('rejects an unrelated department even when it carries documents:manage', async () => {
     const transaction = {
-      user: { findUnique: vi.fn().mockResolvedValue(authorizedActor) },
+      user: {
+        findUnique: vi.fn().mockResolvedValue({
+          ...authorizedActor,
+          departments: ['operations'],
+        }),
+      },
+      preAdmissionAccessHistory: { findUnique: vi.fn() },
+      preAdmissionAccess: { create: vi.fn() },
+    };
+    const prisma = {
+      $transaction: vi.fn(
+        async (work: (client: typeof transaction) => Promise<unknown>) =>
+          work(transaction),
+      ),
+    } as unknown as PrismaService;
+
+    await expect(
+      new PrismaPreAdmissionAccessRepository(prisma).create(creationInput()),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(
+      transaction.preAdmissionAccessHistory.findUnique,
+    ).not.toHaveBeenCalled();
+    expect(transaction.preAdmissionAccess.create).not.toHaveBeenCalled();
+  });
+
+  it('allows Personnel Department and creates scope, history and audit in one transaction', async () => {
+    const transaction = {
+      user: {
+        findUnique: vi
+          .fn()
+          .mockResolvedValue(authorizedPersonnelDepartmentActor),
+      },
       preAdmissionAccessHistory: {
         findUnique: vi.fn().mockResolvedValue(null),
         create: vi
@@ -137,6 +172,16 @@ describe('PrismaPreAdmissionAccessRepository', () => {
       creationInput(),
     );
 
+    expect(transaction.user.findUnique).toHaveBeenCalledWith({
+      where: { id_companyId: { id: actorUserId, companyId } },
+      select: {
+        isActive: true,
+        status: true,
+        deletedAt: true,
+        departments: true,
+        permissionCodes: true,
+      },
+    });
     expect(transaction.routingCompany.findUnique).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id_companyId: { id: personRegistrationId, companyId } },

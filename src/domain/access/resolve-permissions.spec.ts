@@ -113,6 +113,27 @@ describe('resolveEffectivePermissions', () => {
     }
   });
 
+  it('publishes RH and Personnel Department with the same document capabilities', () => {
+    const documentPermissions = (
+      department: 'human-resources' | 'personnel-department',
+    ) =>
+      DEFAULT_DEPARTMENT_PERMISSIONS[department]
+        .filter((permission) => permission.startsWith('documents:'))
+        .sort();
+
+    expect(documentPermissions('human-resources')).toEqual(
+      documentPermissions('personnel-department'),
+    );
+    expect(documentPermissions('human-resources')).toEqual([
+      'documents:approve',
+      'documents:create',
+      'documents:export',
+      'documents:manage',
+      'documents:update',
+      'documents:view',
+    ]);
+  });
+
   it('does not treat the Management department as administrator authority', () => {
     expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).not.toContain('users:view');
     expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).not.toContain('users:create');

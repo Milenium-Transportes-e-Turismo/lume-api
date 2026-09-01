@@ -27,6 +27,72 @@ const current = {
   routingCompanyId: null,
 } as never;
 
+const activeActor = {
+  isActive: true,
+  status: 'ACTIVE',
+  deletedAt: null,
+  isAdministrator: true,
+  permissionCodes: [],
+};
+
+function continuousTripRow(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: 'trip-1',
+    companyId: 'company-1',
+    sourceKind: 'CONTINUOUS_CONTRACT',
+    contractId: 'contract-1',
+    confirmedServiceId: null,
+    code: 'TRIP-1',
+    sourceVersion: 1,
+    status: 'DRAFT',
+    serviceDate: new Date('2026-09-10T00:00:00.000Z'),
+    planVersion: 0,
+    scheduledAt: null,
+    startedAt: null,
+    endedAt: null,
+    version: 1,
+    createdByUserId: 'actor-1',
+    createdAt: new Date('2026-09-01T10:00:00.000Z'),
+    updatedAt: new Date('2026-09-01T10:00:00.000Z'),
+    legs: [{ id: 'leg-1', sequence: 1, label: 'Ida' }],
+    contract: {
+      routingCompanyId: 'customer-1',
+      status: 'ACTIVE',
+      validFrom: new Date('2026-01-01T00:00:00.000Z'),
+      validUntil: null,
+    },
+    confirmedService: null,
+    ...overrides,
+  };
+}
+
+function routePlanSelectionRow(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: 'selection-1',
+    companyId: 'company-1',
+    tripId: 'trip-1',
+    sourceRouteId: 'route-1',
+    sourceRouteVersion: 7,
+    sourcePlanVersion: 3,
+    routeAggregateVersionAtSelection: 8,
+    sourceSnapshot: {
+      route: { code: 'ROTA-1', name: 'Centro → Fábrica' },
+      points: [],
+    },
+    commandId: '00000000-0000-4000-8000-000000000010',
+    selectedByUserId: 'actor-1',
+    reason: null,
+    selectedAt: new Date('2026-09-01T11:00:00.000Z'),
+    supersededAt: null,
+    usedForExecutionAt: null,
+    ...overrides,
+  };
+}
+
 describe('OperationalTripsService', () => {
   it('replays a command with omitted leg IDs using the original HTTP payload fingerprint', async () => {
     const tripId = 'trip-1';
@@ -52,6 +118,7 @@ describe('OperationalTripsService', () => {
     const prisma = {
       $transaction: vi.fn((operation: (tx: unknown) => unknown) =>
         operation({
+          user: { findUnique: vi.fn().mockResolvedValue(activeActor) },
           operationalTripHistory: {
             findUnique: vi.fn().mockResolvedValue(repeated),
           },
@@ -85,8 +152,39 @@ describe('OperationalTripsService', () => {
     expect(transaction).not.toHaveBeenCalled();
   });
 
+  it('revalidates the actor before a trip mutation', async () => {
+    const historyLookup = vi.fn();
+    const transaction = {
+      user: {
+        findUnique: vi.fn().mockResolvedValue({
+          ...activeActor,
+          isActive: false,
+        }),
+      },
+      operationalTripHistory: { findUnique: historyLookup },
+    };
+    const service = new OperationalTripsService({
+      $transaction: vi.fn((operation: (tx: unknown) => unknown) =>
+        operation(transaction),
+      ),
+    } as never);
+
+    await expect(
+      service.create(current, {
+        contractId: 'contract-1',
+        expectedContractVersion: 1,
+        code: 'TRIP-1',
+        serviceDate: '2026-09-10',
+        legs: [],
+        commandId: '00000000-0000-4000-8000-000000000002',
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(historyLookup).not.toHaveBeenCalled();
+  });
+
   it('detects a contract changed since the operator loaded it', async () => {
     const transaction = {
+      user: { findUnique: vi.fn().mockResolvedValue(activeActor) },
       operationalTripHistory: {
         findUnique: vi.fn().mockResolvedValue(null),
       },
@@ -120,5 +218,122 @@ describe('OperationalTripsService', () => {
         commandId: '00000000-0000-4000-8000-000000000001',
       }),
     ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('rejects a route that changes while its authoritative lock is acquired', async () => {
+    const trip = continuousTripRow();
+    let route = {
+      id: 'route-1',
+      contractId: 'contract-1',
+      routingCompanyId: 'customer-1',
+      version: 8,
+      approvedVersion: 7,
+    };
+    const transaction = {
+      user: { findUnique: vi.fn().mockResolvedValue(activeActor) },
+      $queryRaw: vi.fn().mockImplementation(() => {
+        route = { ...route, version: 9 };
+        return Promise.resolve([{ id: route.id }]);
+      }),
+      operationalTripHistory: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue({}),
+      },
+      operationalTrip: {
+        findUnique: vi.fn().mockResolvedValue(trip),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        findUniqueOrThrow: vi
+          .fn()
+          .mockResolvedValue(continuousTripRow({ version: 2 })),
+      },
+      routingRoute: {
+        findUnique: vi.fn().mockImplementation(() => Promise.resolve(route)),
+      },
+      routingRouteApproval: {
+        findUnique: vi.fn().mockResolvedValue({ id: 'approval-1' }),
+      },
+      routingRouteVersion: {
+        findUnique: vi.fn().mockResolvedValue({
+          version: 7,
+          planVersion: 3,
+          snapshot: { route: { code: 'ROTA-1' }, points: [] },
+        }),
+      },
+      operationalTripRoutePlanSelection: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue(routePlanSelectionRow()),
+      },
+    };
+    const service = new OperationalTripsService({
+      $transaction: vi.fn((operation: (tx: unknown) => unknown) =>
+        operation(transaction),
+      ),
+      operationalTripHistory: {
+        findUnique: vi.fn().mockResolvedValue(null),
+      },
+    } as never);
+
+    await expect(
+      service.selectRoutePlan(current, 'trip-1', {
+        routeId: 'route-1',
+        expectedRouteVersion: 8,
+        expectedVersion: 1,
+        commandId: '00000000-0000-4000-8000-000000000011',
+      }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('applies the domain freeze rule before starting the trip', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-01T12:00:00.000Z'));
+    try {
+      const trip = continuousTripRow({
+        status: 'SCHEDULED',
+        scheduledAt: new Date('2026-09-01T11:30:00.000Z'),
+        version: 3,
+      });
+      const transaction = {
+        user: { findUnique: vi.fn().mockResolvedValue(activeActor) },
+        operationalTripHistory: {
+          findUnique: vi.fn().mockResolvedValue(null),
+          create: vi.fn().mockResolvedValue({}),
+        },
+        operationalTrip: {
+          findUnique: vi.fn().mockResolvedValue(trip),
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+          findUniqueOrThrow: vi.fn().mockResolvedValue(
+            continuousTripRow({
+              status: 'IN_EXECUTION',
+              scheduledAt: new Date('2026-09-01T11:30:00.000Z'),
+              startedAt: new Date('2026-09-01T12:00:00.000Z'),
+              version: 4,
+            }),
+          ),
+        },
+        operationalTripRoutePlanSelection: {
+          findFirst: vi.fn().mockResolvedValue(
+            routePlanSelectionRow({
+              selectedAt: new Date('2026-09-01T13:00:00.000Z'),
+            }),
+          ),
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        },
+      };
+      const service = new OperationalTripsService({
+        $transaction: vi.fn((operation: (tx: unknown) => unknown) =>
+          operation(transaction),
+        ),
+      } as never);
+
+      await expect(
+        service.apply(current, 'trip-1', {
+          type: 'start',
+          expectedVersion: 3,
+          commandId: '00000000-0000-4000-8000-000000000012',
+        }),
+      ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

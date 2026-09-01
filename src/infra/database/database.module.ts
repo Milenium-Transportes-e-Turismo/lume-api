@@ -32,6 +32,8 @@ import { RegistrationIdentityCandidateReader } from '../../application/contracts
 import { PrismaRegistrationIdentityCandidateReader } from './repositories/prisma-registration-identity-candidate.reader';
 import { PreAdmissionAccessRepository } from '../../application/contracts/pre-admission-access.repository';
 import { PrismaPreAdmissionAccessRepository } from './repositories/prisma-pre-admission-access.repository';
+import { ConfirmedServiceRepository } from '../../application/contracts/confirmed-service.repository';
+import { PrismaConfirmedServiceRepository } from './repositories/prisma-confirmed-service.repository';
 
 @Global()
 @Module({
@@ -74,6 +76,10 @@ import { PrismaPreAdmissionAccessRepository } from './repositories/prisma-pre-ad
       provide: PreAdmissionAccessRepository,
       useClass: PrismaPreAdmissionAccessRepository,
     },
+    {
+      provide: ConfirmedServiceRepository,
+      useClass: PrismaConfirmedServiceRepository,
+    },
   ],
   exports: [
     PrismaService,
@@ -92,6 +98,7 @@ import { PrismaPreAdmissionAccessRepository } from './repositories/prisma-pre-ad
     FixedPointRepository,
     RegistrationIdentityCandidateReader,
     PreAdmissionAccessRepository,
+    ConfirmedServiceRepository,
   ],
 })
 export class DatabaseModule {}

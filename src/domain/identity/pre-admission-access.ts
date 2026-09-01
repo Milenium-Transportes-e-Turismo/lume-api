@@ -4,16 +4,32 @@ export const PRE_ADMISSION_DEFAULT_VALIDITY_DAYS = 30;
 
 export type PreAdmissionAccessStatus = 'active' | 'expired' | 'revoked';
 
-export function assertCanManagePreAdmission(authority: {
+export const PRE_ADMISSION_MANAGEMENT_DEPARTMENTS = [
+  'human-resources',
+  'personnel-department',
+] as const;
+
+type PreAdmissionManagementAuthority = {
   readonly departments: readonly string[];
   readonly permissions: readonly string[];
-}): void {
-  if (
-    !authority.departments.includes('human-resources') ||
-    !authority.permissions.includes('documents:manage')
-  ) {
+};
+
+export function canManagePreAdmission(
+  authority: PreAdmissionManagementAuthority,
+): boolean {
+  return (
+    PRE_ADMISSION_MANAGEMENT_DEPARTMENTS.some((department) =>
+      authority.departments.includes(department),
+    ) && authority.permissions.includes('documents:manage')
+  );
+}
+
+export function assertCanManagePreAdmission(
+  authority: PreAdmissionManagementAuthority,
+): void {
+  if (!canManagePreAdmission(authority)) {
     throw forbidden(
-      'Somente o RH com permissão específica de gestão documental pode administrar acessos de pré-admissão.',
+      'Somente RH ou Departamento Pessoal com permissão específica de gestão documental pode administrar acessos de pré-admissão.',
     );
   }
 }

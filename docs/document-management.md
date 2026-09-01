@@ -23,8 +23,9 @@ permanecem não classificados e disponíveis para revisão humana.
 
 A primeira fatia do Acesso de Pré-admissão é ligada diretamente a uma Pessoa
 ativa do Cadastro Principal. Ela não cria `User`, não concede login e não
-reutiliza `routingCompanyId` como identidade. Somente um integrante de RH que
-também possua `documents:manage` pode criar, renovar ou revogar o acesso.
+reutiliza `routingCompanyId` como identidade. Somente um integrante de RH ou do
+Departamento Pessoal que também possua `documents:manage` pode criar, renovar
+ou revogar o acesso.
 
 O acesso vence em 30 dias por padrão. A renovação rotaciona o token e inicia
 outro prazo de 30 dias; a revogação bloqueia o token imediatamente. Criação,

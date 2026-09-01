@@ -188,8 +188,9 @@ Usuário.
 
 ### Pré-admissão por link seguro
 
-RH com `documents:manage` pode criar um acesso de 30 dias para uma Pessoa do
-Cadastro Principal em `POST /api/v1/pre-admission/accesses`, sem criar `User`.
+RH ou Departamento Pessoal com `documents:manage` pode criar um acesso de 30
+dias para uma Pessoa do Cadastro Principal em
+`POST /api/v1/pre-admission/accesses`, sem criar `User`.
 Renovação rotaciona o token; revogação o bloqueia imediatamente. O token bruto
 aparece somente nas respostas de criação/renovação e apenas seu hash permanece
 no PostgreSQL. O endpoint público recebe o token no corpo e expõe somente o
@@ -201,21 +202,50 @@ titular e autor do tipo `User`. A adaptação seguinte deve reutilizar a gestão
 o armazenamento documentais existentes com Titular Principal genérico, sem
 conta fictícia ou repositório paralelo.
 
-Até a decisão organizacional, a gestão permanece fail-closed em
-`human-resources` + `documents:manage`. `human-resources` é legado e não está no
-catálogo atribuível atual, que contém Departamento Pessoal; nenhum mapeamento
-foi presumido pela implementação.
+Os dois departamentos possuem o mesmo teto de capacidades `documents:*`, mas a
+autorização continua individual: pertencer ao departamento não concede
+`documents:manage` automaticamente. `human-resources` permanece aceito para
+contas legadas e Departamento Pessoal permanece como a opção atribuível no
+catálogo atual.
+
+### Aceite e confirmação comercial
+
+Aceite não confirma serviço nem cria Viagem. Para o serviço singular do
+orçamento legado, o Financeiro registra o ateste em
+`POST /api/v1/commercial/quote-requests/:id/financial-attestation`, o
+Operacional registra o seu em `operational-attestation` e somente então o
+Comercial finaliza em `confirmed-services`. Cada etapa possui ator, evidência,
+`commandId`, versão do orçamento, idempotência e revalidação de acesso dentro da
+transação. O estado pode ser recuperado em `confirmed-service-readiness`.
+
+Dispensas `not-applicable` permanecem bloqueadas até a definição de uma
+capacidade específica de Gerência/Diretoria. O modelo legado ainda representa
+um serviço por orçamento; itens comerciais múltiplos e cancelamento
+pós-confirmação continuam lacunas explícitas, sem fallback que apague o estágio
+alcançado.
 
 ### Viagens operacionais
 
 `POST /api/v1/trips` cria manualmente um rascunho a partir de contrato contínuo
-ativo e vigente. A requisição informa `expectedContractVersion`; mudanças
-seguintes usam `POST /api/v1/trips/:tripId/commands` com `commandId` e
+ativo e vigente ou de um Serviço Confirmado eventual. A origem contínua informa
+`expectedContractVersion`; a eventual informa `sourceKind=confirmed-service`,
+`confirmedServiceId` e `expectedConfirmedServiceVersion`. O aceite do orçamento
+não cria viagem: antes, as três áreas precisam concluir os atos separados. A
+origem eventual é bloqueada e revalidada, usa a data de saída confirmada e não
+aceita uma data divergente enviada pelo cliente.
+
+Mudanças seguintes usam `POST /api/v1/trips/:tripId/commands` com `commandId` e
 `expectedVersion`. A máquina preserva os caminhos `Em execução → Suspensa → Em
 execução` e `Em execução → Interrompida → encerramento antecipado`, mantendo
-planos versionados, ocorrências, evidências e histórico consultável. Nesta
-primeira fatia, serviços eventuais e efeitos financeiros/documentais ainda não
-são promovidos automaticamente para viagem.
+programações versionadas, ocorrências, evidências e histórico consultável.
+
+Para contratos contínuos, `POST /api/v1/trips/:tripId/route-plan` seleciona a
+versão aprovada de uma Rota e preserva cada seleção anterior. A versão vigente é
+congelada no início da Viagem; mudanças posteriores são desvios de execução.
+`GET /api/v1/trips/:tripId/route-plans` devolve somente um resumo operacional,
+sem nomes ou dados sensíveis de passageiros. Rotas eventuais, veículo/motorista,
+quilometragem, custos e efeitos financeiros/documentais ainda não compõem esta
+fatia.
 
 Os endpoints reconhecem as permissões canônicas `trips:view`, `trips:create`,
 `trips:update` e `trips:manage`. Durante a transição, os códigos equivalentes

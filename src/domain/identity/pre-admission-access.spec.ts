@@ -8,21 +8,25 @@ import {
 } from './pre-admission-access';
 
 describe('Acesso de Pré-admissão', () => {
-  it('limits creation to RH with the specific document permission', () => {
-    expect(() =>
-      assertCanManagePreAdmission({
-        departments: ['human-resources'],
-        permissions: ['documents:manage'],
-      }),
-    ).not.toThrow();
+  it('allows RH and Personnel Department with the specific document permission', () => {
+    for (const department of ['human-resources', 'personnel-department']) {
+      expect(() =>
+        assertCanManagePreAdmission({
+          departments: [department],
+          permissions: ['documents:manage'],
+        }),
+      ).not.toThrow();
+    }
+  });
 
+  it('rejects document readers and unrelated departments', () => {
     for (const authority of [
       {
         departments: ['human-resources'],
         permissions: ['documents:view'],
       },
       {
-        departments: ['personnel-department'],
+        departments: ['operations'],
         permissions: ['documents:manage'],
       },
     ]) {

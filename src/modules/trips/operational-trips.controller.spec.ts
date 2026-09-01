@@ -28,6 +28,31 @@ describe('OperationalTripsController permissions', () => {
       'routes:update',
       'routes:manage',
     ]);
+    expect(permissionsFor('selectRoutePlan')).toEqual([
+      'trips:update',
+      'trips:manage',
+      'routes:update',
+      'routes:manage',
+    ]);
+  });
+
+  it('delegates the approved route-plan selection without changing its versions', () => {
+    const selectRoutePlan = vi.fn();
+    const controller = new OperationalTripsController({
+      selectRoutePlan,
+    } as never);
+    const current = { id: 'actor-1', companyId: 'company-1' } as never;
+    const input = {
+      routeId: '00000000-0000-4000-8000-000000000001',
+      expectedRouteVersion: 8,
+      commandId: '00000000-0000-4000-8000-000000000002',
+      expectedVersion: 3,
+      reason: 'Nova versão aprovada.',
+    };
+
+    void controller.selectRoutePlan(current, 'trip-1', input);
+
+    expect(selectRoutePlan).toHaveBeenCalledWith(current, 'trip-1', input);
   });
 
   it('does not add random leg IDs before the idempotency fingerprint', () => {

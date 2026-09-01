@@ -16,6 +16,7 @@ import {
 
 import {
   OperationalTripsService,
+  type CreateOperationalTripInput,
   type OperationalTripActionInput,
 } from '../../application/use-cases/trips/operational-trips.service';
 import type { AuthenticatedPrincipal } from '../../application/presenters/user.presenter';
@@ -25,6 +26,7 @@ import {
   ApplyOperationalTripCommandDto,
   CreateOperationalTripDto,
   ListOperationalTripsQueryDto,
+  SelectOperationalTripRoutePlanDto,
 } from './operational-trips.dto';
 
 @ApiTags('Viagens operacionais')
@@ -43,7 +45,7 @@ export class OperationalTripsController {
   )
   @ApiCreatedResponse({
     description:
-      'Cria manualmente uma viagem em rascunho a partir de contrato ativo e vigente.',
+      'Cria manualmente uma viagem em rascunho a partir de contrato contínuo vigente ou Serviço Confirmado elegível.',
   })
   create(
     @CurrentUser() current: AuthenticatedPrincipal,
@@ -52,7 +54,7 @@ export class OperationalTripsController {
     return this.trips.create(current, {
       ...body,
       serviceDate: body.serviceDate ?? null,
-    });
+    } as CreateOperationalTripInput);
   }
 
   @Get()
@@ -78,6 +80,37 @@ export class OperationalTripsController {
     @Param('tripId', new ParseUUIDPipe()) tripId: string,
   ) {
     return this.trips.history(current, tripId);
+  }
+
+  @Get(':tripId/route-plans')
+  @ApiOkResponse({
+    description:
+      'Lista as seleções históricas do Plano de Rota, sem expor dados pessoais do snapshot legado.',
+  })
+  routePlans(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Param('tripId', new ParseUUIDPipe()) tripId: string,
+  ) {
+    return this.trips.routePlans(current, tripId);
+  }
+
+  @Post(':tripId/route-plan')
+  @RequireAnyPermission(
+    'trips:update',
+    'trips:manage',
+    'routes:update',
+    'routes:manage',
+  )
+  @ApiCreatedResponse({
+    description:
+      'Seleciona para uma viagem contínua uma versão aprovada do Plano de Rota e preserva as seleções anteriores.',
+  })
+  selectRoutePlan(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Param('tripId', new ParseUUIDPipe()) tripId: string,
+    @Body() body: SelectOperationalTripRoutePlanDto,
+  ) {
+    return this.trips.selectRoutePlan(current, tripId, body);
   }
 
   @Post(':tripId/commands')

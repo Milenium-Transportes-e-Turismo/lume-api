@@ -38,6 +38,9 @@ import {
   MessageDirection,
   MessageKind,
   Prisma,
+  RequestStatus,
+  RoutingRouteStatus,
+  RoutingRouteType,
   WhatsAppImportBatchStatus,
 } from '../src/infra/database/prisma/generated/client';
 import { WhatsAppImportService } from '../src/infra/imports/whatsapp-import.service';
@@ -548,7 +551,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         emailNormalized: 'atendente.comercial.e2e@example.test',
         passwordHash: 'hash-e2e-sem-uso',
         departments: ['commercial'],
-        permissionCodes: ['whatsapp-conversations:manage'],
+        permissionCodes: ['whatsapp-conversations:manage', 'commercial:manage'],
       },
       select: { id: true, name: true, tokenVersion: true },
     });
@@ -6734,7 +6737,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .expect(404);
   });
 
-  it('serializa criação concorrente, resolve e revoga acesso seguro de pré-admissão', async () => {
+  it('permite RH e DP, serializa criação concorrente, resolve e revoga acesso seguro de pré-admissão', async () => {
     const suffix = randomUUID().slice(0, 8);
     const humanResources = await prisma.user.create({
       data: {
@@ -6754,6 +6757,25 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       sub: humanResources.id,
       companyId: tenantId,
       tokenVersion: humanResources.tokenVersion,
+    });
+    const personnelDepartment = await prisma.user.create({
+      data: {
+        companyId: tenantId,
+        name: 'Departamento Pessoal Pré-admissão E2E',
+        username: `dp.preadm.${suffix}`,
+        usernameNormalized: `dp.preadm.${suffix}`,
+        email: `dp.preadm.${suffix}@example.test`,
+        emailNormalized: `dp.preadm.${suffix}@example.test`,
+        passwordHash: 'hash-e2e-sem-uso',
+        departments: ['personnel-department'],
+        permissionCodes: ['documents:manage'],
+      },
+      select: { id: true, tokenVersion: true },
+    });
+    const personnelDepartmentToken = await accessTokens.sign({
+      sub: personnelDepartment.id,
+      companyId: tenantId,
+      tokenVersion: personnelDepartment.tokenVersion,
     });
     const person = await prisma.routingCompany.create({
       data: {
@@ -6792,7 +6814,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       Array.from({ length: 2 }, () =>
         request(app.getHttpServer())
           .post('/api/v1/pre-admission/accesses')
-          .set('authorization', `Bearer ${humanResourcesToken}`)
+          .set('authorization', `Bearer ${personnelDepartmentToken}`)
           .send(createPayload),
       ),
     );
@@ -6825,18 +6847,6 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     });
     const token = created.body.token as string;
 
-    await request(app.getHttpServer())
-      .post('/api/v1/pre-admission/accesses')
-      .set('authorization', `Bearer ${humanResourcesToken}`)
-      .send(createPayload)
-      .expect(201)
-      .expect(({ body }) => {
-        expect(body).toMatchObject({
-          id: created.body.id,
-          token,
-          idempotent: true,
-        });
-      });
     await request(app.getHttpServer())
       .post('/api/v1/pre-admission/public/resolve')
       .send({ token })
@@ -6920,7 +6930,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       Array.from({ length: 2 }, () =>
         request(app.getHttpServer())
           .post('/api/v1/pre-admission/accesses')
-          .set('authorization', `Bearer ${humanResourcesToken}`)
+          .set('authorization', `Bearer ${personnelDepartmentToken}`)
           .send({ ...createPayload, commandId: randomUUID() }),
       ),
     );
@@ -6939,6 +6949,279 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         },
       }),
     ).resolves.toBe(1);
+  });
+
+  it('separa aceite, Serviço Confirmado e criação manual da Viagem eventual', async () => {
+    const numericSuffix = randomUUID()
+      .replace(/\D/g, '')
+      .padEnd(9, '0')
+      .slice(0, 9);
+    const contact = await prisma.whatsAppContact.create({
+      data: {
+        companyId: tenantId,
+        phoneNormalized: `5511${numericSuffix}`,
+        phoneDisplay: `+55 11 ${numericSuffix}`,
+        displayName: 'Cliente Eventual E2E',
+      },
+    });
+    const conversation = await prisma.whatsAppConversation.create({
+      data: {
+        companyId: tenantId,
+        channelId,
+        contactId: contact.id,
+        department: 'COMMERCIAL',
+        conversationState: 'HUMAN_ACTIVE',
+        flowStep: 'HUMAN_SERVICE',
+        requestStatus: 'APPROVED',
+        resumeState: 'BOT_ACTIVE',
+        resumeFlowStep: 'COMMERCIAL_FOLLOW_UP_MENU',
+        assignedToUserId: commercialAttendant.id,
+      },
+    });
+    const quoteActor = await prisma.user.findFirstOrThrow({
+      where: { companyId: tenantId, usernameNormalized: 'admin.e2e' },
+      select: { id: true },
+    });
+    const quote = await prisma.quoteRequest.create({
+      data: {
+        companyId: tenantId,
+        conversationId: conversation.id,
+        sequence: 1,
+        status: RequestStatus.APPROVED,
+        version: 4,
+        serviceType: 'Fretamento eventual',
+        origin: 'Uberlândia',
+        destination: 'Goiânia',
+        departureDate: new Date('2026-09-20T00:00:00.000Z'),
+        returnDate: new Date('2026-09-21T00:00:00.000Z'),
+        passengerCount: 30,
+        vehicleType: 'Ônibus executivo',
+        decidedAt: new Date('2026-09-01T12:00:00.000Z'),
+        decidedByUserId: quoteActor.id,
+      },
+    });
+
+    await expect(
+      prisma.confirmedService.count({
+        where: { companyId: tenantId, sourceQuoteRequestId: quote.id },
+      }),
+    ).resolves.toBe(0);
+    const [financialActor, operationalActor] = await Promise.all([
+      prisma.user.create({
+        data: {
+          companyId: tenantId,
+          name: 'Financeiro Confirmação E2E',
+          username: `financeiro.confirmacao.${numericSuffix}`,
+          usernameNormalized: `financeiro.confirmacao.${numericSuffix}`,
+          email: `financeiro.confirmacao.${numericSuffix}@example.test`,
+          emailNormalized: `financeiro.confirmacao.${numericSuffix}@example.test`,
+          passwordHash: 'hash-e2e-sem-uso',
+          departments: ['financial'],
+          permissionCodes: ['financial:approve'],
+        },
+        select: { id: true, tokenVersion: true },
+      }),
+      prisma.user.create({
+        data: {
+          companyId: tenantId,
+          name: 'Operacional Confirmação E2E',
+          username: `operacional.confirmacao.${numericSuffix}`,
+          usernameNormalized: `operacional.confirmacao.${numericSuffix}`,
+          email: `operacional.confirmacao.${numericSuffix}@example.test`,
+          emailNormalized: `operacional.confirmacao.${numericSuffix}@example.test`,
+          passwordHash: 'hash-e2e-sem-uso',
+          departments: ['operations'],
+          permissionCodes: ['operations:manage'],
+        },
+        select: { id: true, tokenVersion: true },
+      }),
+    ]);
+    const [financialToken, operationalToken] = await Promise.all([
+      accessTokens.sign({
+        sub: financialActor.id,
+        companyId: tenantId,
+        tokenVersion: financialActor.tokenVersion,
+      }),
+      accessTokens.sign({
+        sub: operationalActor.id,
+        companyId: tenantId,
+        tokenVersion: operationalActor.tokenVersion,
+      }),
+    ]);
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/commercial/quote-requests/${quote.id}/financial-attestation`,
+      )
+      .set('authorization', `Bearer ${commercialAccessToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: 4,
+        evidence: 'Tentativa indevida pelo Comercial.',
+      })
+      .expect(403);
+
+    const financialPayload = {
+      commandId: randomUUID(),
+      expectedVersion: 4,
+      evidence: 'Pagamento aplicável confirmado pelo Financeiro.',
+    };
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/commercial/quote-requests/${quote.id}/financial-attestation`,
+      )
+      .set('authorization', `Bearer ${financialToken}`)
+      .send(financialPayload)
+      .expect(201)
+      .expect(({ body }) => {
+        expect(body).toMatchObject({
+          attestation: {
+            sourceQuoteRequestId: quote.id,
+            sourceQuoteVersion: 4,
+            kind: 'financial',
+            actorUserId: financialActor.id,
+          },
+          idempotent: false,
+        });
+      });
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/commercial/quote-requests/${quote.id}/financial-attestation`,
+      )
+      .set('authorization', `Bearer ${financialToken}`)
+      .send(financialPayload)
+      .expect(201)
+      .expect(({ body }) => expect(body.idempotent).toBe(true));
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/commercial/quote-requests/${quote.id}/operational-attestation`,
+      )
+      .set('authorization', `Bearer ${operationalToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: 4,
+        evidence: 'Disponibilidade validada pelo Operacional.',
+      })
+      .expect(201);
+
+    const confirmationPayload = {
+      commandId: randomUUID(),
+      expectedVersion: 4,
+      confirmationBasis:
+        'Aceite e requisitos aplicáveis conferidos para operação eventual.',
+    };
+    await request(app.getHttpServer())
+      .post(`/api/v1/commercial/quote-requests/${quote.id}/confirmed-services`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .send(confirmationPayload)
+      .expect(403);
+    const confirmed = await request(app.getHttpServer())
+      .post(`/api/v1/commercial/quote-requests/${quote.id}/confirmed-services`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
+      .send(confirmationPayload)
+      .expect(201);
+    expect(confirmed.body).toMatchObject({
+      service: {
+        sourceQuoteRequestId: quote.id,
+        sourceQuoteVersion: 4,
+        sourceItemKey: 'legacy-primary',
+        version: 1,
+      },
+      idempotent: false,
+    });
+    await request(app.getHttpServer())
+      .post(`/api/v1/commercial/quote-requests/${quote.id}/confirmed-services`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
+      .send(confirmationPayload)
+      .expect(201)
+      .expect(({ body }) => expect(body.idempotent).toBe(true));
+
+    const confirmedServiceId = confirmed.body.service.id as string;
+    await request(app.getHttpServer())
+      .get(
+        `/api/v1/commercial/quote-requests/${quote.id}/confirmed-service-readiness`,
+      )
+      .set('authorization', `Bearer ${operationalToken}`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body).toMatchObject({
+          quote: { id: quote.id, status: 'approved', version: 4 },
+          confirmedService: { id: confirmedServiceId },
+        });
+        expect(body.attestations).toHaveLength(2);
+      });
+    await request(app.getHttpServer())
+      .patch(`/api/v1/whatsapp/quote-proposals/${quote.id}/status`)
+      .set('authorization', `Bearer ${commercialAccessToken}`)
+      .send({
+        status: 'cancelled',
+        closureClassification: 'acceptance-cancelled',
+        reason: 'Cliente solicitou cancelamento depois da confirmação.',
+        expectedVersion: conversation.version,
+        commandId: randomUUID(),
+      })
+      .expect(409)
+      .expect(({ body }) => expect(body.code).toBe('CONFLICT'));
+    await expect(
+      prisma.operationalTrip.count({
+        where: { companyId: tenantId, confirmedServiceId },
+      }),
+    ).resolves.toBe(0);
+    await request(app.getHttpServer())
+      .post('/api/v1/trips')
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({
+        sourceKind: 'confirmed-service',
+        confirmedServiceId,
+        expectedConfirmedServiceVersion: 1,
+        serviceDate: '2026-09-21',
+        code: `EVENT-DATE-CONFLICT-${numericSuffix}`,
+        legs: [{ sequence: 1, label: 'Uberlândia → Goiânia' }],
+        commandId: randomUUID(),
+      })
+      .expect(400)
+      .expect(({ body }) => expect(body.code).toBe('VALIDATION_ERROR'));
+    const eventTrip = await request(app.getHttpServer())
+      .post('/api/v1/trips')
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({
+        sourceKind: 'confirmed-service',
+        confirmedServiceId,
+        expectedConfirmedServiceVersion: 1,
+        code: `EVENT-${numericSuffix}`,
+        legs: [{ sequence: 1, label: 'Uberlândia → Goiânia' }],
+        commandId: randomUUID(),
+      })
+      .expect(201);
+    expect(eventTrip.body).toMatchObject({
+      trip: {
+        source: {
+          kind: 'confirmed-service',
+          confirmedServiceId,
+          sourceVersion: 1,
+        },
+        plan: { serviceDate: '2026-09-20' },
+        status: 'draft',
+        version: 1,
+      },
+      idempotent: false,
+    });
+    await request(app.getHttpServer())
+      .post(`/api/v1/trips/${eventTrip.body.trip.id as string}/commands`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({
+        type: 'schedule',
+        expectedVersion: 1,
+        commandId: randomUUID(),
+      })
+      .expect(201)
+      .expect(({ body }) => {
+        expect(body.trip).toMatchObject({
+          status: 'scheduled',
+          version: 2,
+        });
+      });
   });
 
   it('cria viagem manual de contrato contínuo e preserva os ciclos suspensão e interrupção', async () => {
@@ -7040,6 +7323,179 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     });
     const tripId = created.body.trip.id as string;
 
+    const routeId = randomUUID();
+    const routeActor = await prisma.user.findFirstOrThrow({
+      where: { companyId: tenantId, usernameNormalized: 'admin.e2e' },
+      select: { id: true },
+    });
+    const approvedRouteSnapshot = {
+      route: {
+        id: routeId,
+        companyId: tenantId,
+        contractId: contract.body.id,
+        routingCompanyId: customer.body.id,
+        code: `ROUTE-${suffix}`,
+        name: 'Plano aprovado E2E',
+        shift: 'Manhã',
+        type: 'municipal',
+        origin: { label: 'Garagem E2E' },
+        destination: { label: 'Unidade E2E' },
+        plannedOutboundKm: 10,
+        plannedReturnKm: 10,
+        plannedTotalKm: 20,
+        estimatedDurationMinutes: 45,
+      },
+      points: [{ sequence: 1, address: { label: 'Ponto E2E' } }],
+      assignments: [
+        {
+          passengerName: 'Nome pessoal que não pode sair no resumo',
+          accessibilityNotes: 'Dado sensível que não pode sair no resumo',
+        },
+      ],
+    };
+    await prisma.routingRoute.create({
+      data: {
+        id: routeId,
+        companyId: tenantId,
+        routingCompanyId: customer.body.id,
+        contractId: contract.body.id,
+        code: `ROUTE-${suffix}`,
+        name: 'Plano aprovado E2E',
+        shift: 'Manhã',
+        requiredArrivalTime: '08:00',
+        type: RoutingRouteType.MUNICIPAL,
+        requiresDocumentation: false,
+        requiredDocumentTypeCodes: [],
+        originLabel: 'Garagem E2E',
+        originStreet: 'Rua de Origem',
+        originNumber: '100',
+        originDistrict: 'Centro',
+        originPostalCode: '38400000',
+        originCity: 'Uberlândia',
+        originState: 'MG',
+        destinationLabel: 'Unidade E2E',
+        destinationStreet: 'Rua de Destino',
+        destinationNumber: '200',
+        destinationDistrict: 'Distrito Industrial',
+        destinationPostalCode: '38408000',
+        destinationCity: 'Uberlândia',
+        destinationState: 'MG',
+        predictedVehicleName: 'Ônibus E2E',
+        predictedVehicleCapacity: 46,
+        maxWalkingDistanceMeters: 500,
+        validFrom: new Date('2026-09-01T00:00:00.000Z'),
+        validUntil: new Date('2026-09-30T00:00:00.000Z'),
+        status: RoutingRouteStatus.APPROVED,
+        version: 2,
+        planVersion: 1,
+        approvedVersion: 2,
+        plannedOutboundKm: 10,
+        plannedReturnKm: 10,
+        plannedTotalKm: 20,
+        estimatedDurationMinutes: 45,
+        createdByUserId: routeActor.id,
+      },
+    });
+    await prisma.routingRouteVersion.create({
+      data: {
+        companyId: tenantId,
+        routeId,
+        version: 2,
+        planVersion: 1,
+        snapshot: approvedRouteSnapshot,
+      },
+    });
+    await prisma.routingRouteApproval.create({
+      data: {
+        companyId: tenantId,
+        routeId,
+        approvedVersion: 2,
+        approvedByUserId: routeActor.id,
+      },
+    });
+
+    const routeSelectionPayload = {
+      routeId,
+      expectedRouteVersion: 2,
+      commandId: randomUUID(),
+      expectedVersion: 1,
+    };
+    const selectedRoutePlan = await request(app.getHttpServer())
+      .post(`/api/v1/trips/${tripId}/route-plan`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .send(routeSelectionPayload)
+      .expect(201);
+    expect(selectedRoutePlan.body).toMatchObject({
+      trip: { id: tripId, version: 2 },
+      selection: {
+        sourceRouteId: routeId,
+        sourceRouteVersion: 2,
+        sourcePlanVersion: 1,
+        usedForExecutionAt: null,
+        planSummary: {
+          code: `ROUTE-${suffix}`,
+          name: 'Plano aprovado E2E',
+        },
+      },
+      idempotent: false,
+    });
+    expect(JSON.stringify(selectedRoutePlan.body)).not.toContain(
+      'Nome pessoal que não pode sair no resumo',
+    );
+    const persistedRoutePlan =
+      await prisma.operationalTripRoutePlanSelection.findUniqueOrThrow({
+        where: {
+          id_companyId: {
+            id: selectedRoutePlan.body.selection.id as string,
+            companyId: tenantId,
+          },
+        },
+        select: { sourceSnapshot: true },
+      });
+    expect(JSON.stringify(persistedRoutePlan.sourceSnapshot)).not.toContain(
+      'Nome pessoal que não pode sair no resumo',
+    );
+    expect(JSON.stringify(persistedRoutePlan.sourceSnapshot)).not.toContain(
+      'Dado sensível que não pode sair no resumo',
+    );
+
+    await prisma.routingRouteVersion.create({
+      data: {
+        companyId: tenantId,
+        routeId,
+        version: 3,
+        planVersion: 2,
+        snapshot: approvedRouteSnapshot,
+      },
+    });
+    const invalidSelectionAt = new Date('2026-09-01T12:30:00.000Z');
+    await expect(
+      prisma.operationalTripRoutePlanSelection.create({
+        data: {
+          id: randomUUID(),
+          companyId: tenantId,
+          tripId,
+          sourceRouteId: routeId,
+          sourceRouteVersion: 3,
+          sourcePlanVersion: 2,
+          routeAggregateVersionAtSelection: 3,
+          sourceSnapshot: { route: approvedRouteSnapshot.route, points: [] },
+          commandId: randomUUID(),
+          selectedByUserId: routeActor.id,
+          reason: 'Versão sem aprovação não pode orientar a Viagem.',
+          selectedAt: invalidSelectionAt,
+          supersededAt: invalidSelectionAt,
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'P2003' });
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/trips/${tripId}/route-plan`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .send(routeSelectionPayload)
+      .expect(201)
+      .expect(({ body }) => expect(body.idempotent).toBe(true));
+
     const apply = async (
       expectedVersion: number,
       body: Record<string, unknown>,
@@ -7058,20 +7514,37 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       return response.body;
     };
 
-    await apply(1, { type: 'schedule' }, 'scheduled');
-    await apply(2, { type: 'start' }, 'in-execution');
+    await apply(2, { type: 'schedule' }, 'scheduled');
+    await apply(3, { type: 'start' }, 'in-execution');
+    await request(app.getHttpServer())
+      .get(`/api/v1/trips/${tripId}/route-plans`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body).toMatchObject({
+          tripId,
+          currentSelectionId: selectedRoutePlan.body.selection.id,
+          executionSelectionId: selectedRoutePlan.body.selection.id,
+          items: [
+            expect.objectContaining({
+              id: selectedRoutePlan.body.selection.id,
+              usedForExecutionAt: expect.any(String),
+            }),
+          ],
+        });
+      });
     await apply(
-      3,
+      4,
       { type: 'suspend', reason: 'Bloqueio temporário da via.' },
       'suspended',
     );
     await apply(
-      4,
+      5,
       { type: 'resume', reason: 'Via liberada para circulação.' },
       'in-execution',
     );
     await apply(
-      5,
+      6,
       {
         type: 'interrupt',
         reason: 'Falha mecânica impediu a continuidade.',
@@ -7085,7 +7558,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       'interrupted',
     );
     await apply(
-      6,
+      7,
       { type: 'close-early', reason: 'Encerramento antecipado autorizado.' },
       'early-terminated',
     );
@@ -7095,9 +7568,10 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .set('authorization', `Bearer ${accessToken}`)
       .expect(200)
       .expect(({ body }) => {
-        expect(body).toHaveLength(7);
+        expect(body).toHaveLength(8);
         const history = body as Array<{ toStatus: string }>;
         expect(history.map((entry) => entry.toStatus)).toEqual([
+          'draft',
           'draft',
           'scheduled',
           'in-execution',

@@ -158,6 +158,11 @@ enum OperationalTripStatus {
   CANCELLED        @map("cancelled")
 }
 
+enum OperationalTripSourceKind {
+  CONTINUOUS_CONTRACT @map("continuous-contract")
+  CONFIRMED_SERVICE   @map("confirmed-service")
+}
+
 enum OutboxStatus {
   PENDING
   PROCESSING
@@ -216,6 +221,11 @@ enum CommercialClosureClassification {
   ACCEPTANCE_CANCELLED  @map("acceptance-cancelled")
   SUPERSEDED            @map("superseded")
   LEGACY_UNCLASSIFIED   @map("legacy-unclassified")
+}
+
+enum CommercialServiceRequirementKind {
+  FINANCIAL   @map("financial")
+  OPERATIONAL @map("operational")
 }
 
 enum MessageDirection {
@@ -417,86 +427,90 @@ model Company {
   createdAt DateTime      @default(now()) @map("created_at")
   updatedAt DateTime      @updatedAt @map("updated_at")
 
-  users                          User[]
-  auditLogs                      TenantAuditLog[]
-  departments                    TenantDepartment[]
-  whatsappProviders              WhatsAppProvider[]
-  whatsappChannels               WhatsAppChannel[]
-  whatsappContacts               WhatsAppContact[]
-  whatsappConversations          WhatsAppConversation[]
-  whatsappMessages               WhatsAppMessage[]
-  whatsappMessageAttempts        WhatsAppMessageAttempt[]
-  whatsappTransitions            WhatsAppConversationTransition[]
-  quoteRequests                  QuoteRequest[]
-  quoteProposalDocuments         QuoteProposalDocument[]
-  quoteNotificationReads         QuoteNotificationRead[]
-  integrationInbox               IntegrationInbox[]
-  integrationOutbox              IntegrationOutbox[]
-  whatsappAutomationExecutions   WhatsAppAutomationExecution[]
-  whatsappAutomationDecisions    WhatsAppAutomationDecision[]
-  whatsappAutomationCheckpoints  WhatsAppAutomationCheckpoint[]
-  serviceIdentities              ServiceIdentity[]
-  passwordChangeChallenges       PasswordChangeChallenge[]
-  passwordHistory                UserPasswordHistory[]
-  whatsappImportBatches          WhatsAppImportBatch[]
-  whatsappImportRecords          WhatsAppImportRecord[]
-  whatsappImportExternalRefs     WhatsAppImportExternalRef[]
-  dataExchangeArtifacts          DataExchangeArtifact[]
-  documentTypes                  DocumentType[]
-  documentChecklistTemplates     DocumentChecklistTemplate[]
-  documentChecklistItems         DocumentChecklistItem[]
-  documentRequests               DocumentRequest[]
-  documentRequestItems           DocumentRequestItem[]
-  documentSubmissions            DocumentSubmission[]
-  documentFiles                  DocumentFile[]
-  documentValidations            DocumentValidation[]
-  documentReviews                DocumentReview[]
-  documentStatusHistory          DocumentStatusHistory[]
-  apiRequestMetrics              ApiRequestMetric[]
-  routingCompanies               RoutingCompany[]
-  routingCompanyHistoryEntries   RoutingCompanyHistory[]
-  routingCompanyComments         RoutingCompanyComment[]
-  passengers                     Passenger[]
-  passengerHistoryEntries        PassengerHistory[]
-  passengerIssues                PassengerIssue[]
-  passengerDocumentData          PassengerDocumentData[]
-  passengerImportBatches         PassengerImportBatch[]
-  passengerImportRecords         PassengerImportRecord[]
-  routingRoutes                  RoutingRoute[]
-  routingRoutePoints             RoutingRoutePoint[]
-  routingRouteAssignments        RoutingRoutePassenger[]
-  routingRouteHistoryEntries     RoutingRouteHistory[]
-  routingRouteVersions           RoutingRouteVersion[]
-  routingRouteApprovals          RoutingRouteApproval[]
-  routingNavigationLinks         RoutingNavigationLink[]
-  routingExecutions              RoutingRouteExecution[]
-  routingContracts               RoutingContract[]
-  routingContractCostCenters     RoutingContractCostCenter[]
-  routingContractShifts          RoutingContractShift[]
-  routingContractHistoryEntries  RoutingContractHistory[]
-  routingFixedPoints             RoutingFixedPoint[]
-  registrationRoles              RegistrationRole[]
-  registrationRoleAssignments    RegistrationRoleAssignment[]
-  registrationTags               RegistrationTag[]
-  registrationTagAssignments     RegistrationTagAssignment[]
-  registrationPhones             RegistrationPhone[]
-  registrationEmails             RegistrationEmail[]
-  registrationRelationships      RegistrationRelationship[]
-  registrationExternalReferences RegistrationExternalReference[]
-  registrationImportBatches      RegistrationImportBatch[]
-  registrationExternalRecords    RegistrationExternalRecord[]
-  registrationCandidates         RegistrationCandidate[]
-  registrationCandidateSources   RegistrationCandidateSource[]
-  registrationReviewDecisions    RegistrationReviewDecision[]
-  operationalTrips               OperationalTrip[]
-  operationalTripLegs            OperationalTripLeg[]
-  operationalTripVersions        OperationalTripVersion[]
-  operationalTripOccurrences     OperationalTripOccurrence[]
-  operationalTripHistory         OperationalTripHistory[]
-  userPersonAssociationHistory   UserPersonAssociationHistory[]
-  preAdmissionAccesses           PreAdmissionAccess[]
-  preAdmissionAccessItems        PreAdmissionAccessItem[]
-  preAdmissionAccessHistory      PreAdmissionAccessHistory[]
+  users                                    User[]
+  auditLogs                                TenantAuditLog[]
+  departments                              TenantDepartment[]
+  whatsappProviders                        WhatsAppProvider[]
+  whatsappChannels                         WhatsAppChannel[]
+  whatsappContacts                         WhatsAppContact[]
+  whatsappConversations                    WhatsAppConversation[]
+  whatsappMessages                         WhatsAppMessage[]
+  whatsappMessageAttempts                  WhatsAppMessageAttempt[]
+  whatsappTransitions                      WhatsAppConversationTransition[]
+  quoteRequests                            QuoteRequest[]
+  quoteProposalDocuments                   QuoteProposalDocument[]
+  quoteNotificationReads                   QuoteNotificationRead[]
+  confirmedServices                        ConfirmedService[]
+  confirmedServiceHistory                  ConfirmedServiceHistory[]
+  commercialServiceRequirementAttestations CommercialServiceRequirementAttestation[]
+  integrationInbox                         IntegrationInbox[]
+  integrationOutbox                        IntegrationOutbox[]
+  whatsappAutomationExecutions             WhatsAppAutomationExecution[]
+  whatsappAutomationDecisions              WhatsAppAutomationDecision[]
+  whatsappAutomationCheckpoints            WhatsAppAutomationCheckpoint[]
+  serviceIdentities                        ServiceIdentity[]
+  passwordChangeChallenges                 PasswordChangeChallenge[]
+  passwordHistory                          UserPasswordHistory[]
+  whatsappImportBatches                    WhatsAppImportBatch[]
+  whatsappImportRecords                    WhatsAppImportRecord[]
+  whatsappImportExternalRefs               WhatsAppImportExternalRef[]
+  dataExchangeArtifacts                    DataExchangeArtifact[]
+  documentTypes                            DocumentType[]
+  documentChecklistTemplates               DocumentChecklistTemplate[]
+  documentChecklistItems                   DocumentChecklistItem[]
+  documentRequests                         DocumentRequest[]
+  documentRequestItems                     DocumentRequestItem[]
+  documentSubmissions                      DocumentSubmission[]
+  documentFiles                            DocumentFile[]
+  documentValidations                      DocumentValidation[]
+  documentReviews                          DocumentReview[]
+  documentStatusHistory                    DocumentStatusHistory[]
+  apiRequestMetrics                        ApiRequestMetric[]
+  routingCompanies                         RoutingCompany[]
+  routingCompanyHistoryEntries             RoutingCompanyHistory[]
+  routingCompanyComments                   RoutingCompanyComment[]
+  passengers                               Passenger[]
+  passengerHistoryEntries                  PassengerHistory[]
+  passengerIssues                          PassengerIssue[]
+  passengerDocumentData                    PassengerDocumentData[]
+  passengerImportBatches                   PassengerImportBatch[]
+  passengerImportRecords                   PassengerImportRecord[]
+  routingRoutes                            RoutingRoute[]
+  routingRoutePoints                       RoutingRoutePoint[]
+  routingRouteAssignments                  RoutingRoutePassenger[]
+  routingRouteHistoryEntries               RoutingRouteHistory[]
+  routingRouteVersions                     RoutingRouteVersion[]
+  routingRouteApprovals                    RoutingRouteApproval[]
+  routingNavigationLinks                   RoutingNavigationLink[]
+  routingExecutions                        RoutingRouteExecution[]
+  routingContracts                         RoutingContract[]
+  routingContractCostCenters               RoutingContractCostCenter[]
+  routingContractShifts                    RoutingContractShift[]
+  routingContractHistoryEntries            RoutingContractHistory[]
+  routingFixedPoints                       RoutingFixedPoint[]
+  registrationRoles                        RegistrationRole[]
+  registrationRoleAssignments              RegistrationRoleAssignment[]
+  registrationTags                         RegistrationTag[]
+  registrationTagAssignments               RegistrationTagAssignment[]
+  registrationPhones                       RegistrationPhone[]
+  registrationEmails                       RegistrationEmail[]
+  registrationRelationships                RegistrationRelationship[]
+  registrationExternalReferences           RegistrationExternalReference[]
+  registrationImportBatches                RegistrationImportBatch[]
+  registrationExternalRecords              RegistrationExternalRecord[]
+  registrationCandidates                   RegistrationCandidate[]
+  registrationCandidateSources             RegistrationCandidateSource[]
+  registrationReviewDecisions              RegistrationReviewDecision[]
+  operationalTrips                         OperationalTrip[]
+  operationalTripLegs                      OperationalTripLeg[]
+  operationalTripVersions                  OperationalTripVersion[]
+  operationalTripOccurrences               OperationalTripOccurrence[]
+  operationalTripHistory                   OperationalTripHistory[]
+  operationalTripRoutePlans                OperationalTripRoutePlanSelection[]
+  userPersonAssociationHistory             UserPersonAssociationHistory[]
+  preAdmissionAccesses                     PreAdmissionAccess[]
+  preAdmissionAccessItems                  PreAdmissionAccessItem[]
+  preAdmissionAccessHistory                PreAdmissionAccessHistory[]
 
   @@map("companies")
 }
@@ -536,58 +550,62 @@ model User {
   createdAt                DateTime            @default(now()) @map("created_at")
   updatedAt                DateTime            @updatedAt @map("updated_at")
 
-  company                                Company                          @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  routingCompany                         RoutingCompany?                  @relation("RoutingCompanyUsers", fields: [routingCompanyId, companyId], references: [id, companyId], onDelete: NoAction)
-  personRegistration                     RoutingCompany?                  @relation("UserPersonRegistration", fields: [personRegistrationId, companyId], references: [id, companyId], onDelete: NoAction)
-  createdRoutingCompanies                RoutingCompany[]                 @relation("RoutingCompanyCreator")
-  responsibleTemporaryRegistrations      RoutingCompany[]                 @relation("TemporaryRegistrationResponsible")
-  routingCompanyHistoryEntries           RoutingCompanyHistory[]          @relation("RoutingCompanyHistoryActor")
-  createdRoutingCompanyComments          RoutingCompanyComment[]          @relation("RoutingCompanyCommentCreator")
-  updatedRoutingCompanyComments          RoutingCompanyComment[]          @relation("RoutingCompanyCommentUpdater")
-  createdPassengers                      Passenger[]                      @relation("PassengerCreator")
-  passengerHistoryEntries                PassengerHistory[]               @relation("PassengerHistoryActor")
-  passengerImportBatches                 PassengerImportBatch[]           @relation("PassengerImportActor")
-  createdRoutingRoutes                   RoutingRoute[]                   @relation("RoutingRouteCreator")
-  routingRouteHistoryEntries             RoutingRouteHistory[]            @relation("RoutingRouteHistoryActor")
-  routingRouteApprovals                  RoutingRouteApproval[]           @relation("RoutingRouteApprover")
-  publishedRoutingRoutes                 RoutingRoute[]                   @relation("RoutingRoutePublisher")
-  createdRoutingContracts                RoutingContract[]                @relation("RoutingContractCreator")
-  routingContractHistoryEntries          RoutingContractHistory[]         @relation("RoutingContractHistoryActor")
-  createdOperationalTrips                OperationalTrip[]                @relation("OperationalTripCreator")
-  createdOperationalTripVersions         OperationalTripVersion[]         @relation("OperationalTripVersionCreator")
-  operationalTripOccurrences             OperationalTripOccurrence[]      @relation("OperationalTripOccurrenceActor")
-  operationalTripHistoryEntries          OperationalTripHistory[]         @relation("OperationalTripHistoryActor")
-  createdRoutingFixedPoints              RoutingFixedPoint[]              @relation("RoutingFixedPointCreator")
-  refreshTokens                          RefreshToken[]
-  auditLogs                              TenantAuditLog[]
-  assignedWhatsappConversations          WhatsAppConversation[]           @relation("ConversationAssignee")
-  requestedWhatsappConversationTransfers WhatsAppConversation[]           @relation("ConversationPendingTransferRequester")
-  uploadedQuoteProposals                 QuoteProposalDocument[]          @relation("QuoteProposalUploader")
-  requestedQuoteProposals                QuoteRequest[]                   @relation("QuoteProposalRequester")
-  decidedQuoteProposals                  QuoteRequest[]                   @relation("QuoteProposalDecider")
-  sentQuoteProposals                     QuoteProposalDocument[]          @relation("QuoteProposalSender")
-  sentWhatsappMessages                   WhatsAppMessage[]                @relation("WhatsAppMessageActor")
-  quoteNotificationReads                 QuoteNotificationRead[]
-  whatsappTransitions                    WhatsAppConversationTransition[] @relation("TransitionActorUser")
-  passwordChangeChallenges               PasswordChangeChallenge[]
-  passwordHistory                        UserPasswordHistory[]
-  whatsappImportBatches                  WhatsAppImportBatch[]            @relation("WhatsAppImportActor")
-  dataExchangeArtifacts                  DataExchangeArtifact[]           @relation("DataExchangeArtifactUploader")
-  subjectDocumentRequests                DocumentRequest[]                @relation("DocumentRequestSubject")
-  createdDocumentRequests                DocumentRequest[]                @relation("DocumentRequestCreator")
-  createdChecklistTemplates              DocumentChecklistTemplate[]      @relation("DocumentChecklistCreator")
-  submittedDocuments                     DocumentSubmission[]             @relation("DocumentSubmissionAuthor")
-  uploadedDocumentFiles                  DocumentFile[]                   @relation("DocumentFileUploader")
-  documentReviews                        DocumentReview[]                 @relation("DocumentReviewer")
-  documentStatusChanges                  DocumentStatusHistory[]          @relation("DocumentStatusActor")
-  apiRequestMetrics                      ApiRequestMetric[]
-  registrationImportBatches              RegistrationImportBatch[]        @relation("RegistrationImportActor")
-  reviewedRegistrationCandidates         RegistrationCandidate[]          @relation("RegistrationCandidateReviewer")
-  registrationReviewDecisions            RegistrationReviewDecision[]     @relation("RegistrationDecisionActor")
-  personAssociationHistory               UserPersonAssociationHistory[]   @relation("UserPersonAssociationSubject")
-  actedPersonAssociationHistory          UserPersonAssociationHistory[]   @relation("UserPersonAssociationActor")
-  createdPreAdmissionAccesses            PreAdmissionAccess[]             @relation("PreAdmissionAccessCreator")
-  preAdmissionAccessHistory              PreAdmissionAccessHistory[]      @relation("PreAdmissionAccessHistoryActor")
+  company                                  Company                                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  routingCompany                           RoutingCompany?                           @relation("RoutingCompanyUsers", fields: [routingCompanyId, companyId], references: [id, companyId], onDelete: NoAction)
+  personRegistration                       RoutingCompany?                           @relation("UserPersonRegistration", fields: [personRegistrationId, companyId], references: [id, companyId], onDelete: NoAction)
+  createdRoutingCompanies                  RoutingCompany[]                          @relation("RoutingCompanyCreator")
+  responsibleTemporaryRegistrations        RoutingCompany[]                          @relation("TemporaryRegistrationResponsible")
+  routingCompanyHistoryEntries             RoutingCompanyHistory[]                   @relation("RoutingCompanyHistoryActor")
+  createdRoutingCompanyComments            RoutingCompanyComment[]                   @relation("RoutingCompanyCommentCreator")
+  updatedRoutingCompanyComments            RoutingCompanyComment[]                   @relation("RoutingCompanyCommentUpdater")
+  createdPassengers                        Passenger[]                               @relation("PassengerCreator")
+  passengerHistoryEntries                  PassengerHistory[]                        @relation("PassengerHistoryActor")
+  passengerImportBatches                   PassengerImportBatch[]                    @relation("PassengerImportActor")
+  createdRoutingRoutes                     RoutingRoute[]                            @relation("RoutingRouteCreator")
+  routingRouteHistoryEntries               RoutingRouteHistory[]                     @relation("RoutingRouteHistoryActor")
+  routingRouteApprovals                    RoutingRouteApproval[]                    @relation("RoutingRouteApprover")
+  publishedRoutingRoutes                   RoutingRoute[]                            @relation("RoutingRoutePublisher")
+  createdRoutingContracts                  RoutingContract[]                         @relation("RoutingContractCreator")
+  routingContractHistoryEntries            RoutingContractHistory[]                  @relation("RoutingContractHistoryActor")
+  createdOperationalTrips                  OperationalTrip[]                         @relation("OperationalTripCreator")
+  createdOperationalTripVersions           OperationalTripVersion[]                  @relation("OperationalTripVersionCreator")
+  operationalTripOccurrences               OperationalTripOccurrence[]               @relation("OperationalTripOccurrenceActor")
+  operationalTripHistoryEntries            OperationalTripHistory[]                  @relation("OperationalTripHistoryActor")
+  selectedOperationalTripRoutePlans        OperationalTripRoutePlanSelection[]       @relation("OperationalTripRoutePlanSelector")
+  createdRoutingFixedPoints                RoutingFixedPoint[]                       @relation("RoutingFixedPointCreator")
+  refreshTokens                            RefreshToken[]
+  auditLogs                                TenantAuditLog[]
+  assignedWhatsappConversations            WhatsAppConversation[]                    @relation("ConversationAssignee")
+  requestedWhatsappConversationTransfers   WhatsAppConversation[]                    @relation("ConversationPendingTransferRequester")
+  uploadedQuoteProposals                   QuoteProposalDocument[]                   @relation("QuoteProposalUploader")
+  requestedQuoteProposals                  QuoteRequest[]                            @relation("QuoteProposalRequester")
+  decidedQuoteProposals                    QuoteRequest[]                            @relation("QuoteProposalDecider")
+  sentQuoteProposals                       QuoteProposalDocument[]                   @relation("QuoteProposalSender")
+  sentWhatsappMessages                     WhatsAppMessage[]                         @relation("WhatsAppMessageActor")
+  quoteNotificationReads                   QuoteNotificationRead[]
+  whatsappTransitions                      WhatsAppConversationTransition[]          @relation("TransitionActorUser")
+  passwordChangeChallenges                 PasswordChangeChallenge[]
+  passwordHistory                          UserPasswordHistory[]
+  whatsappImportBatches                    WhatsAppImportBatch[]                     @relation("WhatsAppImportActor")
+  dataExchangeArtifacts                    DataExchangeArtifact[]                    @relation("DataExchangeArtifactUploader")
+  subjectDocumentRequests                  DocumentRequest[]                         @relation("DocumentRequestSubject")
+  createdDocumentRequests                  DocumentRequest[]                         @relation("DocumentRequestCreator")
+  createdChecklistTemplates                DocumentChecklistTemplate[]               @relation("DocumentChecklistCreator")
+  submittedDocuments                       DocumentSubmission[]                      @relation("DocumentSubmissionAuthor")
+  uploadedDocumentFiles                    DocumentFile[]                            @relation("DocumentFileUploader")
+  documentReviews                          DocumentReview[]                          @relation("DocumentReviewer")
+  documentStatusChanges                    DocumentStatusHistory[]                   @relation("DocumentStatusActor")
+  apiRequestMetrics                        ApiRequestMetric[]
+  registrationImportBatches                RegistrationImportBatch[]                 @relation("RegistrationImportActor")
+  reviewedRegistrationCandidates           RegistrationCandidate[]                   @relation("RegistrationCandidateReviewer")
+  registrationReviewDecisions              RegistrationReviewDecision[]              @relation("RegistrationDecisionActor")
+  personAssociationHistory                 UserPersonAssociationHistory[]            @relation("UserPersonAssociationSubject")
+  actedPersonAssociationHistory            UserPersonAssociationHistory[]            @relation("UserPersonAssociationActor")
+  createdPreAdmissionAccesses              PreAdmissionAccess[]                      @relation("PreAdmissionAccessCreator")
+  preAdmissionAccessHistory                PreAdmissionAccessHistory[]               @relation("PreAdmissionAccessHistoryActor")
+  confirmedServices                        ConfirmedService[]                        @relation("ConfirmedServiceConfirmer")
+  confirmedServiceHistory                  ConfirmedServiceHistory[]                 @relation("ConfirmedServiceHistoryActor")
+  commercialServiceRequirementAttestations CommercialServiceRequirementAttestation[] @relation("CommercialServiceRequirementAttestor")
 
   @@unique([id, companyId])
   @@index([companyId])
@@ -1382,34 +1400,39 @@ model RoutingContractHistory {
 }
 
 model OperationalTrip {
-  id              String                @id @default(uuid()) @db.Uuid
-  companyId       String                @map("company_id") @db.Uuid
-  contractId      String                @map("contract_id") @db.Uuid
-  code            String                @db.VarChar(80)
-  sourceVersion   Int                   @map("source_version")
-  status          OperationalTripStatus @default(DRAFT)
-  serviceDate     DateTime?             @map("service_date") @db.Date
-  planVersion     Int                   @default(0) @map("plan_version")
-  scheduledAt     DateTime?             @map("scheduled_at") @db.Timestamptz(3)
-  startedAt       DateTime?             @map("started_at") @db.Timestamptz(3)
-  endedAt         DateTime?             @map("ended_at") @db.Timestamptz(3)
-  version         Int                   @default(1)
-  createdByUserId String                @map("created_by_user_id") @db.Uuid
-  createdAt       DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt       DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
+  id                 String                    @id @default(uuid()) @db.Uuid
+  companyId          String                    @map("company_id") @db.Uuid
+  sourceKind         OperationalTripSourceKind @default(CONTINUOUS_CONTRACT) @map("source_kind")
+  contractId         String?                   @map("contract_id") @db.Uuid
+  confirmedServiceId String?                   @map("confirmed_service_id") @db.Uuid
+  code               String                    @db.VarChar(80)
+  sourceVersion      Int                       @map("source_version")
+  status             OperationalTripStatus     @default(DRAFT)
+  serviceDate        DateTime?                 @map("service_date") @db.Date
+  planVersion        Int                       @default(0) @map("plan_version")
+  scheduledAt        DateTime?                 @map("scheduled_at") @db.Timestamptz(3)
+  startedAt          DateTime?                 @map("started_at") @db.Timestamptz(3)
+  endedAt            DateTime?                 @map("ended_at") @db.Timestamptz(3)
+  version            Int                       @default(1)
+  createdByUserId    String                    @map("created_by_user_id") @db.Uuid
+  createdAt          DateTime                  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime                  @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  company     Company                     @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  contract    RoutingContract             @relation(fields: [contractId, companyId], references: [id, companyId], onDelete: NoAction)
-  createdBy   User                        @relation("OperationalTripCreator", fields: [createdByUserId, companyId], references: [id, companyId], onDelete: NoAction)
-  legs        OperationalTripLeg[]
-  versions    OperationalTripVersion[]
-  occurrences OperationalTripOccurrence[]
-  history     OperationalTripHistory[]
+  company             Company                             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  contract            RoutingContract?                    @relation(fields: [contractId, companyId], references: [id, companyId], onDelete: NoAction)
+  confirmedService    ConfirmedService?                   @relation(fields: [confirmedServiceId, companyId], references: [id, companyId], onDelete: NoAction)
+  createdBy           User                                @relation("OperationalTripCreator", fields: [createdByUserId, companyId], references: [id, companyId], onDelete: NoAction)
+  legs                OperationalTripLeg[]
+  versions            OperationalTripVersion[]
+  occurrences         OperationalTripOccurrence[]
+  history             OperationalTripHistory[]
+  routePlanSelections OperationalTripRoutePlanSelection[]
 
   @@unique([id, companyId])
   @@unique([companyId, code])
   @@index([companyId, status, serviceDate])
   @@index([companyId, contractId, serviceDate])
+  @@index([companyId, confirmedServiceId, serviceDate])
   @@map("operational_trips")
 }
 
@@ -1500,6 +1523,35 @@ model OperationalTripHistory {
   @@unique([companyId, commandId])
   @@index([companyId, tripId, resultingVersion])
   @@map("operational_trip_history")
+}
+
+model OperationalTripRoutePlanSelection {
+  id                               String    @id @default(uuid()) @db.Uuid
+  companyId                        String    @map("company_id") @db.Uuid
+  tripId                           String    @map("trip_id") @db.Uuid
+  sourceRouteId                    String    @map("source_route_id") @db.Uuid
+  sourceRouteVersion               Int       @map("source_route_version")
+  sourcePlanVersion                Int       @map("source_plan_version")
+  routeAggregateVersionAtSelection Int       @map("route_aggregate_version_at_selection")
+  sourceSnapshot                   Json      @map("source_snapshot") @db.JsonB
+  commandId                        String    @map("command_id") @db.Uuid
+  selectedByUserId                 String    @map("selected_by_user_id") @db.Uuid
+  reason                           String?   @db.VarChar(1000)
+  selectedAt                       DateTime  @map("selected_at") @db.Timestamptz(3)
+  supersededAt                     DateTime? @map("superseded_at") @db.Timestamptz(3)
+  usedForExecutionAt               DateTime? @map("used_for_execution_at") @db.Timestamptz(3)
+
+  company        Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  trip           OperationalTrip      @relation(fields: [tripId, companyId], references: [id, companyId], onDelete: Cascade)
+  selectedBy     User                 @relation("OperationalTripRoutePlanSelector", fields: [selectedByUserId, companyId], references: [id, companyId], onDelete: NoAction)
+  sourceVersion  RoutingRouteVersion  @relation("OperationalTripRouteSourceVersion", fields: [companyId, sourceRouteId, sourceRouteVersion], references: [companyId, routeId, version], onDelete: NoAction, map: "operational_trip_route_plan_selections_source_version_fkey")
+  sourceApproval RoutingRouteApproval @relation("OperationalTripRouteSourceApproval", fields: [companyId, sourceRouteId, sourceRouteVersion], references: [companyId, routeId, approvedVersion], onDelete: NoAction, map: "operational_trip_route_plan_selections_source_approval_fkey")
+
+  @@unique([id, companyId])
+  @@unique([companyId, commandId])
+  @@index([companyId, tripId, selectedAt])
+  @@index([companyId, sourceRouteId, sourceRouteVersion])
+  @@map("operational_trip_route_plan_selections")
 }
 
 model RoutingRoute {
@@ -1668,8 +1720,9 @@ model RoutingRouteVersion {
   snapshot    Json     @db.JsonB
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  company Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  route   RoutingRoute @relation(fields: [routeId, companyId], references: [id, companyId], onDelete: Cascade)
+  company                 Company                             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  route                   RoutingRoute                        @relation(fields: [routeId, companyId], references: [id, companyId], onDelete: Cascade)
+  tripRoutePlanSelections OperationalTripRoutePlanSelection[] @relation("OperationalTripRouteSourceVersion")
 
   @@unique([companyId, routeId, version])
   @@index([companyId, routeId, createdAt])
@@ -1685,9 +1738,10 @@ model RoutingRouteApproval {
   notes            String?  @db.VarChar(1000)
   createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  company    Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  route      RoutingRoute @relation(fields: [routeId, companyId], references: [id, companyId], onDelete: Cascade)
-  approvedBy User         @relation("RoutingRouteApprover", fields: [approvedByUserId, companyId], references: [id, companyId], onDelete: NoAction)
+  company                 Company                             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  route                   RoutingRoute                        @relation(fields: [routeId, companyId], references: [id, companyId], onDelete: Cascade)
+  approvedBy              User                                @relation("RoutingRouteApprover", fields: [approvedByUserId, companyId], references: [id, companyId], onDelete: NoAction)
+  tripRoutePlanSelections OperationalTripRoutePlanSelection[] @relation("OperationalTripRouteSourceApproval")
 
   @@unique([companyId, routeId, approvedVersion])
   @@index([companyId, approvedByUserId, createdAt])
@@ -2108,12 +2162,14 @@ model QuoteRequest {
   createdAt             DateTime                         @default(now()) @map("created_at")
   updatedAt             DateTime                         @updatedAt @map("updated_at")
 
-  company           Company                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  conversation      WhatsAppConversation    @relation(fields: [conversationId, companyId], references: [id, companyId], onDelete: Cascade)
-  requestedByUser   User?                   @relation("QuoteProposalRequester", fields: [requestedByUserId, companyId], references: [id, companyId], onDelete: Restrict)
-  decidedByUser     User?                   @relation("QuoteProposalDecider", fields: [decidedByUserId, companyId], references: [id, companyId], onDelete: Restrict)
-  proposalDocuments QuoteProposalDocument[]
-  notificationReads QuoteNotificationRead[]
+  company                                  Company                                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  conversation                             WhatsAppConversation                      @relation(fields: [conversationId, companyId], references: [id, companyId], onDelete: Cascade)
+  requestedByUser                          User?                                     @relation("QuoteProposalRequester", fields: [requestedByUserId, companyId], references: [id, companyId], onDelete: Restrict)
+  decidedByUser                            User?                                     @relation("QuoteProposalDecider", fields: [decidedByUserId, companyId], references: [id, companyId], onDelete: Restrict)
+  proposalDocuments                        QuoteProposalDocument[]
+  notificationReads                        QuoteNotificationRead[]
+  confirmedServices                        ConfirmedService[]
+  commercialServiceRequirementAttestations CommercialServiceRequirementAttestation[]
 
   @@unique([companyId, conversationId, sequence])
   @@unique([id, companyId])
@@ -2124,6 +2180,89 @@ model QuoteRequest {
   @@index([requestedByUserId, companyId, createdAt])
   @@index([decidedByUserId, companyId, decidedAt])
   @@map("quote_requests")
+}
+
+model CommercialServiceRequirementAttestation {
+  id                   String                           @id @default(uuid()) @db.Uuid
+  companyId            String                           @map("company_id") @db.Uuid
+  sourceQuoteRequestId String                           @map("source_quote_request_id") @db.Uuid
+  sourceQuoteVersion   Int                              @map("source_quote_version")
+  sourceItemKey        String                           @map("source_item_key") @db.VarChar(80)
+  kind                 CommercialServiceRequirementKind
+  evidence             String                           @db.VarChar(500)
+  actorUserId          String                           @map("actor_user_id") @db.Uuid
+  commandId            String                           @map("command_id") @db.Uuid
+  commandFingerprint   String                           @map("command_fingerprint") @db.Char(64)
+  attestedAt           DateTime                         @map("attested_at") @db.Timestamptz(3)
+  createdAt            DateTime                         @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  company             Company            @relation(fields: [companyId], references: [id], onDelete: Cascade, map: "commercial_service_attestations_company_fkey")
+  sourceQuoteRequest  QuoteRequest       @relation(fields: [sourceQuoteRequestId, companyId], references: [id, companyId], onDelete: Restrict, map: "commercial_service_attestations_quote_company_fkey")
+  actor               User               @relation("CommercialServiceRequirementAttestor", fields: [actorUserId, companyId], references: [id, companyId], onDelete: Restrict, map: "commercial_service_attestations_actor_company_fkey")
+  financialServices   ConfirmedService[] @relation("ConfirmedServiceFinancialAttestation")
+  operationalServices ConfirmedService[] @relation("ConfirmedServiceOperationalAttestation")
+
+  @@unique([id, companyId], map: "commercial_service_attestations_id_company_key")
+  @@unique([id, companyId, sourceQuoteRequestId, sourceQuoteVersion, sourceItemKey], map: "commercial_service_attestations_service_source_key")
+  @@unique([companyId, commandId], map: "commercial_service_attestations_company_command_key")
+  @@unique([companyId, sourceQuoteRequestId, sourceQuoteVersion, sourceItemKey, kind], map: "commercial_service_attestations_quote_requirement_key")
+  @@index([actorUserId, companyId, attestedAt], map: "commercial_service_attestations_actor_created_idx")
+  @@map("commercial_service_requirement_attestations")
+}
+
+model ConfirmedService {
+  id                       String   @id @default(uuid()) @db.Uuid
+  companyId                String   @map("company_id") @db.Uuid
+  sourceQuoteRequestId     String   @map("source_quote_request_id") @db.Uuid
+  sourceQuoteVersion       Int      @map("source_quote_version")
+  sourceItemKey            String   @map("source_item_key") @db.VarChar(80)
+  serviceSnapshot          Json     @map("service_snapshot") @db.JsonB
+  requirementsSnapshot     Json     @map("requirements_snapshot") @db.JsonB
+  confirmationBasis        String   @map("confirmation_basis") @db.VarChar(500)
+  financialAttestationId   String   @map("financial_attestation_id") @db.Uuid
+  operationalAttestationId String   @map("operational_attestation_id") @db.Uuid
+  version                  Int      @default(1)
+  confirmedByUserId        String   @map("confirmed_by_user_id") @db.Uuid
+  confirmedAt              DateTime @map("confirmed_at") @db.Timestamptz(3)
+  createdAt                DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt                DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  company                Company                                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  sourceQuoteRequest     QuoteRequest                            @relation(fields: [sourceQuoteRequestId, companyId], references: [id, companyId], onDelete: Restrict, map: "confirmed_services_source_quote_company_fkey")
+  confirmedBy            User                                    @relation("ConfirmedServiceConfirmer", fields: [confirmedByUserId, companyId], references: [id, companyId], onDelete: Restrict, map: "confirmed_services_confirmer_company_fkey")
+  financialAttestation   CommercialServiceRequirementAttestation @relation("ConfirmedServiceFinancialAttestation", fields: [financialAttestationId, companyId, sourceQuoteRequestId, sourceQuoteVersion, sourceItemKey], references: [id, companyId, sourceQuoteRequestId, sourceQuoteVersion, sourceItemKey], onDelete: Restrict, map: "confirmed_services_financial_attestation_fkey")
+  operationalAttestation CommercialServiceRequirementAttestation @relation("ConfirmedServiceOperationalAttestation", fields: [operationalAttestationId, companyId, sourceQuoteRequestId, sourceQuoteVersion, sourceItemKey], references: [id, companyId, sourceQuoteRequestId, sourceQuoteVersion, sourceItemKey], onDelete: Restrict, map: "confirmed_services_operational_attestation_fkey")
+  history                ConfirmedServiceHistory[]
+  trips                  OperationalTrip[]
+
+  @@unique([id, companyId])
+  @@unique([companyId, sourceQuoteRequestId, sourceItemKey], map: "confirmed_services_company_source_quote_item_key")
+  @@index([companyId, confirmedAt], map: "confirmed_services_company_confirmed_at_idx")
+  @@index([companyId, sourceQuoteRequestId, sourceQuoteVersion], map: "confirmed_services_company_quote_version_idx")
+  @@map("confirmed_services")
+}
+
+model ConfirmedServiceHistory {
+  id                 String   @id @default(uuid()) @db.Uuid
+  companyId          String   @map("company_id") @db.Uuid
+  confirmedServiceId String   @map("confirmed_service_id") @db.Uuid
+  actorUserId        String   @map("actor_user_id") @db.Uuid
+  commandId          String   @map("command_id") @db.Uuid
+  commandFingerprint String   @map("command_fingerprint") @db.Char(64)
+  action             String   @db.VarChar(40)
+  expectedVersion    Int      @map("expected_version")
+  resultingVersion   Int      @map("resulting_version")
+  resultSnapshot     Json     @map("result_snapshot") @db.JsonB
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  company          Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  confirmedService ConfirmedService @relation(fields: [confirmedServiceId, companyId], references: [id, companyId], onDelete: Cascade, map: "confirmed_service_history_service_company_fkey")
+  actor            User             @relation("ConfirmedServiceHistoryActor", fields: [actorUserId, companyId], references: [id, companyId], onDelete: Restrict, map: "confirmed_service_history_actor_company_fkey")
+
+  @@unique([companyId, commandId], map: "confirmed_service_history_company_command_key")
+  @@index([companyId, confirmedServiceId, resultingVersion], map: "confirmed_service_history_company_service_version_idx")
+  @@index([actorUserId, companyId, createdAt], map: "confirmed_service_history_actor_company_created_idx")
+  @@map("confirmed_service_history")
 }
 
 model QuoteNotificationRead {

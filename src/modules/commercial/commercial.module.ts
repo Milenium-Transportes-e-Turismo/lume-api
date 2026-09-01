@@ -5,8 +5,12 @@ import {
   PatchQuoteRequestUseCase,
   QuoteProposalUseCase,
 } from '../../application/use-cases/commercial/commercial-quotes.use-case';
+import { ConfirmedServiceRepository } from '../../application/contracts/confirmed-service.repository';
+import { ConfirmedServicesService } from '../../application/use-cases/commercial/confirmed-services.service';
+import { ConfirmedServicesController } from './confirmed-services.controller';
 
 @Module({
+  controllers: [ConfirmedServicesController],
   providers: [
     {
       provide: PatchQuoteRequestUseCase,
@@ -20,7 +24,17 @@ import {
         new QuoteProposalUseCase(repository),
       inject: [CommercialQuoteRepository],
     },
+    {
+      provide: ConfirmedServicesService,
+      useFactory: (repository: ConfirmedServiceRepository) =>
+        new ConfirmedServicesService(repository),
+      inject: [ConfirmedServiceRepository],
+    },
   ],
-  exports: [PatchQuoteRequestUseCase, QuoteProposalUseCase],
+  exports: [
+    PatchQuoteRequestUseCase,
+    QuoteProposalUseCase,
+    ConfirmedServicesService,
+  ],
 })
 export class CommercialModule {}

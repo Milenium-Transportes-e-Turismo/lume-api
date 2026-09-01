@@ -12,6 +12,7 @@ import {
   notFound,
   validationError,
 } from '../../../core/errors/app-error';
+import { canManagePreAdmission } from '../../../domain/identity/pre-admission-access';
 import {
   CompanyStatus,
   Prisma,
@@ -202,11 +203,13 @@ export class PrismaPreAdmissionAccessRepository extends PreAdmissionAccessReposi
       !actor?.isActive ||
       actor.status !== UserAccountStatus.ACTIVE ||
       actor.deletedAt ||
-      !actor.departments.includes('human-resources') ||
-      !actor.permissionCodes.includes('documents:manage')
+      !canManagePreAdmission({
+        departments: actor.departments,
+        permissions: actor.permissionCodes,
+      })
     ) {
       throw forbidden(
-        'Somente o RH com permissão específica de gestão documental pode administrar acessos de pré-admissão.',
+        'Somente RH ou Departamento Pessoal com permissão específica de gestão documental pode administrar acessos de pré-admissão.',
       );
     }
   }

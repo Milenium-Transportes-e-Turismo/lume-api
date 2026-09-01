@@ -83,18 +83,60 @@ export class OperationalTripPlanDto {
 }
 
 export class CreateOperationalTripDto extends OperationalTripPlanDto {
-  @ApiProperty({ format: 'uuid' })
-  @IsUUID()
-  contractId!: string;
+  @ApiPropertyOptional({
+    enum: ['continuous-contract', 'confirmed-service'],
+    default: 'continuous-contract',
+  })
+  @IsOptional()
+  @IsIn(['continuous-contract', 'confirmed-service'])
+  sourceKind?: 'continuous-contract' | 'confirmed-service';
 
-  @ApiProperty({
+  @ApiPropertyOptional({ format: 'uuid' })
+  @ValidateIf(
+    (object: CreateOperationalTripDto) =>
+      object.sourceKind !== 'confirmed-service',
+  )
+  @IsDefined()
+  @IsUUID()
+  contractId?: string;
+
+  @ApiPropertyOptional({
     minimum: 1,
     description: 'Versão do contrato que o usuário consultou antes de criar.',
   })
+  @ValidateIf(
+    (object: CreateOperationalTripDto) =>
+      object.sourceKind !== 'confirmed-service',
+  )
+  @IsDefined()
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  expectedContractVersion!: number;
+  expectedContractVersion?: number;
+
+  @ApiPropertyOptional({ format: 'uuid' })
+  @ValidateIf(
+    (object: CreateOperationalTripDto) =>
+      object.sourceKind === 'confirmed-service',
+  )
+  @IsDefined()
+  @IsUUID()
+  confirmedServiceId?: string;
+
+  @ApiPropertyOptional({
+    minimum: 1,
+    description:
+      'Versão do Serviço Confirmado consultada antes de criar a Viagem eventual.',
+  })
+  @ValidateIf(
+    (object: CreateOperationalTripDto) =>
+      object.sourceKind === 'confirmed-service',
+  )
+  @IsDefined()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  expectedConfirmedServiceVersion?: number;
 
   @ApiProperty({ maxLength: 80 })
   @IsString()
@@ -142,6 +184,44 @@ export class ListOperationalTripsQueryDto {
   @IsOptional()
   @Matches(DATE_ONLY_PATTERN)
   serviceTo?: string;
+}
+
+export class SelectOperationalTripRoutePlanDto {
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID()
+  routeId!: string;
+
+  @ApiProperty({
+    minimum: 1,
+    description: 'Versão agregada da Rota consultada pelo usuário.',
+  })
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  expectedRouteVersion!: number;
+
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID()
+  commandId!: string;
+
+  @ApiProperty({
+    minimum: 1,
+    description: 'Versão atual da Viagem consultada pelo usuário.',
+  })
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  expectedVersion!: number;
+
+  @ApiPropertyOptional({
+    maxLength: 1000,
+    description: 'Obrigatório ao substituir uma seleção vigente.',
+  })
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(1000)
+  reason?: string;
 }
 
 export class OperationalTripEvidenceDto {

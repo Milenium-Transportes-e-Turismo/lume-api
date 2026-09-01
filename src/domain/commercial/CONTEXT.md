@@ -37,6 +37,12 @@ Conclusão dos requisitos comerciais, financeiros e operacionais aplicáveis ao
 serviço aceito.
 _Evite_: Aceite
 
+**Serviço Confirmado**:
+Retrato do Serviço Proposto aceito cujos requisitos aplicáveis tiveram sua
+conclusão registrada de forma explícita. Pode originar uma ou mais viagens, mas
+não é uma Viagem.
+_Evite_: Aceite, viagem confirmada
+
 **Recusa**:
 Decisão do cliente de não aceitar um orçamento, preservada nos indicadores
 comerciais e no histórico de versões.

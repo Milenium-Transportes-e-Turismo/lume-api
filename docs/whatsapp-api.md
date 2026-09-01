@@ -139,10 +139,14 @@ conversa exige pertencer ao departamento responsável. Um perfil sem departament
 só recebe visão total quando possui explicitamente
 `whatsapp-conversations:manage`.
 
-O aceite continua exigindo `whatsapp-conversations:manage`. Esse código pode ser
-atribuído individualmente a usuários dos departamentos participantes, mas não é
-concedido automaticamente a todos os departamentos enquanto a matriz definitiva
-de transferência e supervisão não for aprovada.
+O aceite continua exigindo `whatsapp-conversations:manage`. No catálogo atual,
+somente o teto do Comercial admite esse código. Por isso, um usuário apenas do
+Operacional ou do Financeiro pode receber a pendência em seu departamento, mas
+não consegue abrir a caixa, aceitá-la e conduzir a conversa. Ampliar `manage`
+resolveria o bloqueio, porém também concederia ações administrativas como
+importar históricos e gerenciar contatos. A decisão segura pendente é criar uma
+capacidade menor de atendimento departamental para abrir a própria fila, aceitar
+a transferência e responder, sem essas ações administrativas.
 
 O envio humano de uma proposta em PDF assume o usuário remetente como atendente
 ativo antes de enfileirar o documento e registra a transição no histórico.

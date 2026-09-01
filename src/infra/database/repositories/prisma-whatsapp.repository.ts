@@ -5512,6 +5512,25 @@ export class PrismaWhatsAppRepository
           );
         }
         if (cancellation) {
+          const confirmedService = await transaction.confirmedService.findFirst(
+            {
+              where: {
+                companyId: input.companyId,
+                sourceQuoteRequestId: quote.id,
+              },
+              select: { id: true },
+            },
+          );
+          if (confirmedService) {
+            throw new AppError(
+              'CONFLICT',
+              'Este orçamento já originou um Serviço Confirmado e não pode ser reclassificado como cancelamento de aceite.',
+              {
+                confirmedServiceId: confirmedService.id,
+                requiredFlow: 'confirmed-service-cancellation',
+              },
+            );
+          }
           assertManualQuoteCancellationTransition(
             requestFromPrisma[quote.status],
             cancellation.classification,

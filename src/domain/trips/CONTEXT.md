@@ -30,6 +30,11 @@ _Evite_: Execução da rota, orçamento
 Retrato imutável de uma programação autorizada em um momento específico.
 _Evite_: Rascunho editável
 
+**Plano de Rota Selecionado**:
+Versão aprovada de um Plano de Rota escolhida para orientar uma Viagem. A
+seleção é congelada no início e não representa, por si só, o trajeto realizado.
+_Evite_: Programação da Viagem, rota executada
+
 **Execução da Viagem**:
 Período iniciado em que fatos operacionais passam a representar o que ocorreu,
 e não alterações comuns da programação.

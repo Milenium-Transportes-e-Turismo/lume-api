@@ -64,9 +64,10 @@ produção.
 **Estado**: gestão segura do link implementada; recebimento dos arquivos ainda
 bloqueado pelo titular documental legado.
 
-RH com `documents:manage` pode criar um Acesso de Pré-admissão ligado a uma
-Pessoa, com validade padrão de 30 dias, escopo de tipos documentais, revogação e
-renovação por rotação de token. Somente o hash do token é persistido. As
+RH ou Departamento Pessoal com `documents:manage` pode criar um Acesso de
+Pré-admissão ligado a uma Pessoa, com validade padrão de 30 dias, escopo de
+tipos documentais, revogação e renovação por rotação de token. Somente o hash
+do token é persistido. As
 mutações usam `companyId`, `commandId`, `expectedVersion`, idempotência,
 concorrência otimista, histórico e auditoria na mesma transação.
 
@@ -77,13 +78,12 @@ etapa deve conectar o Titular Principal genérico ao fluxo e ao armazenamento
 documental existentes, sem criar `User` temporário e sem persistir bytes em uma
 esteira paralela.
 
-**Decisão operacional pendente**: a regra aprovada nomeia RH, porém
-`human-resources` é um valor legado e não aparece no catálogo atribuível dos
-novos tenants; o catálogo atual oferece Departamento Pessoal. A autorização foi
-mantida em modo seguro, exigindo literalmente `human-resources` e
-`documents:manage`. É necessário decidir se a responsabilidade passa para
-Departamento Pessoal, se RH volta ao catálogo ou se será criada uma capacidade
-organizacional própria antes de liberar o uso em novos tenants.
+**Decisão organizacional concluída**: RH e Departamento Pessoal possuem o mesmo
+teto de capacidades documentais e ambos podem administrar a pré-admissão quando
+recebem individualmente `documents:manage`. `human-resources` continua
+suportado para contas legadas; Departamento Pessoal continua sendo a opção
+atribuível no catálogo atual. Esta decisão documental não cria, por si só, um
+segundo departamento ou fila de WhatsApp.
 
 ## Titulares documentais
 
@@ -114,8 +114,8 @@ administrador ativo e um caminho de reversão.
 
 ## Operação de viagens
 
-**Estado**: primeira fatia para contratos contínuos implementada sem promover
-rotas legadas automaticamente.
+**Estado**: origens contínua e eventual implementadas, com seleção versionada
+do Plano de Rota recorrente para viagens de contrato contínuo.
 
 Cada serviço confirmado pode originar uma ou mais viagens criadas manualmente
 pelo Operacional, sempre com referência ao serviço ou contrato de origem.
@@ -123,11 +123,29 @@ Rascunhos são editáveis; mudança relevante depois da programação gera vers�
 auditoria; depois do início, mudanças são ocorrências ou desvios. Contratos
 contínuos não criam viagens automaticamente nesta fase.
 
-A criação exige a versão esperada do contrato, e cada comando da viagem exige
-`commandId` e `expectedVersion`. O histórico expõe o resultado persistido, com
-versões do plano, ocorrências e evidências. A origem por serviço eventual,
-quilometragem, custos e efeitos financeiros/documentais continuam fora desta
-primeira fatia.
+Antes da confirmação eventual, o Financeiro registra o ateste com
+`financial:approve`, o Operacional registra o seu com `operations:manage` e o
+Comercial finaliza com `commercial:manage`. Os três atores são revalidados
+dentro das transações; a Administradora não substitui essas responsabilidades.
+Dispensas `not-applicable` permanecem bloqueadas até existir uma capacidade
+estreita de Gerência/Diretoria aprovada.
+
+A criação exige a versão esperada do contrato ou do Serviço Confirmado, e cada
+comando da viagem exige `commandId` e `expectedVersion`. Aceite e confirmação
+permanecem eventos distintos; nenhuma aprovação de orçamento cria viagem
+automaticamente. O histórico expõe o resultado persistido, com versões da
+programação, ocorrências e evidências.
+
+Na origem eventual, a API bloqueia a linha do Serviço Confirmado, verifica que
+o orçamento de origem continua aprovado na mesma versão e exige a data de saída
+confirmada. Ator ativo e permissão também são recarregados antes da escrita.
+
+Uma viagem contínua pode selecionar uma versão aprovada da Rota. A seleção é
+histórica, substituições exigem motivo e o comando `start` congela a versão que
+orientou a execução. O snapshot público é sanitizado. A estrutura legada de
+Rota ainda exige contrato; por isso, Plano de Rota eventual, rota efetivamente
+executada, quilometragem, custos e efeitos financeiros/documentais continuam
+fora desta fatia.
 
 As permissões canônicas de viagem já são aceitas pelos endpoints. Os códigos
 legados de rotas permanecem como ponte de compatibilidade enquanto o cadastro de
@@ -167,11 +185,12 @@ inferência.
 constraint final adiada para uma etapa segura de rollout.
 
 Nesta primeira fatia, `acceptance-cancelled` é uma declaração humana auditada
-válida somente depois da aprovação e antes de pagamento ou confirmação
-operacional. Como esses marcos ainda não possuem contrato transacional completo,
-a API não anuncia essa classificação como prova automática do estágio. Quando já
-existir Viagem confirmada, o caso pertence ao cancelamento da Viagem, e não ao
-encerramento comercial.
+válida somente depois da aprovação e antes de existir Serviço Confirmado. A API
+consulta esse marco na mesma transação e recusa a reclassificação quando a
+confirmação já ocorreu. Nesse caso, o histórico de aceite e confirmação fica
+preservado e deve ser usado o futuro fluxo próprio de cancelamento do serviço e
+de seus efeitos. A ausência desse fluxo permanece fechada: não se apaga a etapa
+alcançada nem se transforma o caso em simples cancelamento de aceite.
 
 Registros existentes sem evidência recebem `cancelamento legado não
 classificado` e aparecem separadamente nos indicadores até revisão manual.
