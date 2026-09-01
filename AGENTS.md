@@ -85,3 +85,17 @@ git diff --check
   confirmação explícita do host e do banco; produção exige janela autorizada.
 - Diferencie teste local, E2E descartável e prova real de produção. Não declare
   entrega pelo WhatsApp sem evidência do provedor.
+
+## Agent skills
+
+### Issue tracker
+
+As issues são rastreadas no GitHub Issues deste repositório. Consulte `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+São usadas as cinco etiquetas canônicas de triagem, sem renomeações. Consulte `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Este é um repositório single-context. Consulte `docs/agents/domain.md`.
