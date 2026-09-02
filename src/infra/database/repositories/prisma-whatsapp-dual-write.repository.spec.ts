@@ -147,6 +147,7 @@ describe('PrismaWhatsAppRepository dual-write', () => {
       },
       quoteRequest: { updateMany: vi.fn(async () => ({ count: 0 })) },
       quoteProposalDocument: {
+        count: vi.fn(async () => 0),
         updateMany: vi.fn(async () => ({ count: 0 })),
       },
       registrationPhone: {
@@ -202,6 +203,279 @@ describe('PrismaWhatsAppRepository dual-write', () => {
     );
   });
 
+  it('routes inbound to humans while a proposal PDF remains queued', async () => {
+    const queuedConversation = {
+      ...legacyConversation(),
+      flowStep: FlowStep.COMMERCIAL_FOLLOW_UP_MENU,
+      requestStatus: RequestStatus.UNDER_REVIEW,
+      contextualFollowUpAt: new Date(0),
+    };
+    const transitionCreate = vi.fn(async () => ({}));
+    const conversationUpdateMany = vi.fn(async () => ({ count: 1 }));
+    const outboxCreate = vi.fn(async () => ({}));
+    const proposalCount = vi.fn(async () => 1);
+    const transaction = {
+      $executeRaw: vi.fn(async () => 1),
+      integrationInbox: {
+        findUnique: vi.fn(async () => null),
+        create: vi.fn(async () => ({ id: 'inbox-queued-proposal' })),
+        update: vi.fn(async () => ({})),
+      },
+      whatsAppMessage: {
+        findUnique: vi.fn(async () => null),
+        create: vi.fn(async ({ data }) => ({ id: messageId, ...data })),
+      },
+      whatsAppContact: {
+        upsert: vi.fn(async () => ({
+          id: contactId,
+          phoneNormalized: '5534999999999',
+          displayName: 'Contato',
+        })),
+        updateMany: vi.fn(async () => ({ count: 0 })),
+      },
+      whatsAppConversation: {
+        findFirst: vi.fn(async () => queuedConversation),
+        findUniqueOrThrow: vi.fn(async () => queuedConversation),
+        updateMany: conversationUpdateMany,
+        update: vi.fn(async () => ({})),
+      },
+      whatsAppConversationTransition: { create: transitionCreate },
+      whatsAppThread: {
+        upsert: vi.fn(async () => ({ id: threadId })),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+      },
+      serviceSession: {
+        findFirst: vi.fn(async () => serviceSession()),
+      },
+      quoteRequest: { updateMany: vi.fn(async () => ({ count: 0 })) },
+      quoteProposalDocument: {
+        count: proposalCount,
+        updateMany: vi.fn(async () => ({ count: 0 })),
+      },
+      registrationPhone: { findMany: vi.fn(async () => []) },
+      conversationParticipant: {
+        findMany: vi.fn(async () => []),
+        create: vi.fn(async () => ({})),
+        createMany: vi.fn(async () => ({ count: 0 })),
+      },
+      tenantDepartment: { findUnique: vi.fn(async () => null) },
+      integrationOutbox: {
+        aggregate: vi.fn(async () => ({ _max: { aggregateSequence: null } })),
+        create: outboxCreate,
+      },
+    };
+    const repository = repositoryWithTransaction(transaction);
+
+    await expect(
+      repository.persistWebhookMessage(directInput('inbound')),
+    ).resolves.toMatchObject({
+      conversationId,
+      automationAllowed: false,
+      canGenerateReply: false,
+      canSendReply: false,
+    });
+    expect(proposalCount).toHaveBeenCalledWith({
+      where: {
+        companyId,
+        conversationId,
+        status: 'QUEUED',
+      },
+    });
+    expect(conversationUpdateMany).not.toHaveBeenCalled();
+    expect(transitionCreate).not.toHaveBeenCalled();
+    expect(outboxCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          topic: 'whatsapp.inbound.human-notification',
+        }),
+      }),
+    );
+  });
+
+  it('clears contextual follow-up when queueing a proposal and preserves the commercial resume menu', async () => {
+    const quoteRequestId = '00000000-0000-4000-8000-000000000020';
+    const documentId = '00000000-0000-4000-8000-000000000021';
+    const batchId = '00000000-0000-4000-8000-000000000022';
+    const actorId = '00000000-0000-4000-8000-000000000023';
+    const initialConversation = {
+      ...legacyConversation(),
+      contextualFollowUpAt: new Date(0),
+      contact: {
+        id: contactId,
+        phoneNormalized: '5534999999999',
+        displayName: 'Contato',
+      },
+      channel: { id: channelId, name: 'Canal', phoneNumber: '5534111111111' },
+      assignedTo: null,
+      quoteRequests: [{ id: quoteRequestId }],
+    };
+    const updatedConversation = {
+      ...initialConversation,
+      conversationState: ConversationState.HUMAN_ACTIVE,
+      flowStep: FlowStep.QUOTE_SEND_PENDING,
+      requestStatus: RequestStatus.UNDER_REVIEW,
+      resumeState: null,
+      resumeFlowStep: FlowStep.COMMERCIAL_FOLLOW_UP_MENU,
+      contextualFollowUpAt: null,
+      assignedToUserId: actorId,
+      assignedTo: { id: actorId, name: 'Atendente' },
+      contact: {
+        ...initialConversation.contact,
+        phoneDisplay: '+55 34 99999-9999',
+        profilePictureUrl: null,
+      },
+      pendingTransferDepartment: null,
+      pendingTransferReason: null,
+      pendingTransferRequestedAt: null,
+      pendingTransferRequestedBy: null,
+      unreadCount: 0,
+      mainMenuPresentedAt: null,
+      followUpMenuPresentedAt: null,
+      departmentContactOption: null,
+      lastInboundAt: null,
+      lastOutboundAt: null,
+      lastMessagePreview: 'Orçamento em PDF aguardando envio.',
+      archivedAt: null,
+      archiveReason: null,
+      createdAt: occurredAt,
+      updatedAt: occurredAt,
+      quoteRequests: [],
+      _count: { quoteRequests: 0 },
+      version: 2,
+    };
+    const document = {
+      id: documentId,
+      quoteRequestId,
+      conversationId,
+      messageId: null,
+      sequence: 1,
+      status: 'UPLOADED',
+      fileName: 'proposta.pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: 128,
+      sha256: 'd'.repeat(64),
+      content: Buffer.from('pdf'),
+      providerMessageId: null,
+      deliveryBatchId: null,
+      queuedAt: null,
+      sentAt: null,
+      createdAt: occurredAt,
+      updatedAt: occurredAt,
+    };
+    const queuedDocument = {
+      ...document,
+      status: 'QUEUED',
+      messageId,
+      deliveryBatchId: batchId,
+      queuedAt: occurredAt,
+      uploadedByUser: null,
+      sentByUser: { id: actorId, name: 'Atendente' },
+    };
+    const conversationUpdateMany = vi.fn(async () => ({ count: 1 }));
+    const transaction = {
+      $executeRaw: vi.fn(async () => 1),
+      integrationInbox: {
+        findUnique: vi.fn(async () => null),
+        create: vi.fn(async () => ({})),
+        update: vi.fn(async () => ({})),
+      },
+      quoteRequest: {
+        findUnique: vi
+          .fn()
+          .mockResolvedValueOnce({ conversationId })
+          .mockResolvedValueOnce({
+            id: quoteRequestId,
+            status: RequestStatus.UNDER_REVIEW,
+            confirmedAt: occurredAt,
+            version: 1,
+            conversation: initialConversation,
+          }),
+      },
+      user: {
+        findUnique: vi.fn(async () => ({
+          id: actorId,
+          name: 'Atendente',
+          isActive: true,
+        })),
+      },
+      quoteProposalDocument: {
+        findUnique: vi.fn(async () => document),
+        findMany: vi
+          .fn()
+          .mockResolvedValueOnce([
+            {
+              id: documentId,
+              deliveryBatchId: null,
+              status: 'UPLOADED',
+            },
+          ])
+          .mockResolvedValueOnce([]),
+        findFirst: vi.fn(async () => null),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+        update: vi.fn(async () => queuedDocument),
+      },
+      tenantDepartment: { findUnique: vi.fn(async () => null) },
+      whatsAppMessage: {
+        create: vi.fn(async ({ data }) => ({
+          id: messageId,
+          occurredAt,
+          ...data,
+        })),
+      },
+      whatsAppMessageAttempt: {
+        create: vi.fn(async () => ({ id: 'attempt-1' })),
+      },
+      whatsAppConversation: { updateMany: conversationUpdateMany },
+      whatsAppConversationTransition: { create: vi.fn(async () => ({})) },
+      tenantAuditLog: { create: vi.fn(async () => ({})) },
+    };
+    const repository = repositoryWithTransaction(transaction);
+    const internals = repository as unknown as {
+      assertCurrentCommercialOperator: () => Promise<void>;
+      ensureFoundationForConversation: () => Promise<{
+        threadId: string;
+        session: ReturnType<typeof serviceSession>;
+      }>;
+      updateFoundationSession: () => Promise<ReturnType<typeof serviceSession>>;
+      findConversationOrThrow: () => Promise<typeof updatedConversation>;
+      createOrderedOutbox: () => Promise<void>;
+      presentMessage: () => { id: string };
+    };
+    internals.assertCurrentCommercialOperator = vi.fn(async () => undefined);
+    internals.ensureFoundationForConversation = vi.fn(async () => ({
+      threadId,
+      session: serviceSession(),
+    }));
+    internals.updateFoundationSession = vi.fn(async () =>
+      serviceSession(ServiceSessionControlMode.HUMAN),
+    );
+    internals.findConversationOrThrow = vi.fn(async () => updatedConversation);
+    internals.createOrderedOutbox = vi.fn(async () => undefined);
+    internals.presentMessage = vi.fn(() => ({ id: messageId }));
+
+    await repository.sendQuoteProposal({
+      companyId,
+      quoteRequestId,
+      proposalDocumentId: documentId,
+      batchId,
+      batchDocumentIds: [documentId],
+      actorUserId: actorId,
+      commandId: '00000000-0000-4000-8000-000000000024',
+      expectedVersion: 1,
+    });
+
+    expect(conversationUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          flowStep: FlowStep.QUOTE_SEND_PENDING,
+          resumeState: null,
+          resumeFlowStep: FlowStep.COMMERCIAL_FOLLOW_UP_MENU,
+          contextualFollowUpAt: null,
+        }),
+      }),
+    );
+  });
+
   it('classifies an unknown fromMe echo as external human and blocks AI with an optimistic session event', async () => {
     const messageCreate = vi.fn(async ({ data }) => ({
       id: messageId,
@@ -254,6 +528,7 @@ describe('PrismaWhatsAppRepository dual-write', () => {
       serviceSessionEvent: { create: sessionEventCreate },
       quoteRequest: { updateMany: vi.fn(async () => ({ count: 0 })) },
       quoteProposalDocument: {
+        count: vi.fn(async () => 0),
         updateMany: vi.fn(async () => ({ count: 0 })),
       },
       whatsAppConversationTransition: { create: transitionCreate },
@@ -458,19 +733,20 @@ describe('PrismaWhatsAppRepository dual-write', () => {
     });
   });
 
-  it('returns the session to AI only after the complete quote batch is delivered', async () => {
+  it('normalizes the legacy commercial follow-up tuple when the complete quote batch is delivered', async () => {
     const quoteRequestId = '00000000-0000-4000-8000-000000000020';
     const documentId = '00000000-0000-4000-8000-000000000021';
     const batchId = '00000000-0000-4000-8000-000000000022';
     const actorId = '00000000-0000-4000-8000-000000000023';
     const departmentId = '00000000-0000-4000-8000-000000000024';
     const deliveredConversation = {
-      ...legacyConversation(ConversationState.HUMAN_ACTIVE),
-      flowStep: FlowStep.QUOTE_SEND_PENDING,
+      ...legacyConversation(ConversationState.BOT_ACTIVE),
+      flowStep: FlowStep.COMMERCIAL_FOLLOW_UP_MENU,
       requestStatus: RequestStatus.UNDER_REVIEW,
       assignedToUserId: actorId,
       version: 7,
     };
+    const conversationUpdateMany = vi.fn(async () => ({ count: 1 }));
     const sessionUpdateMany = vi.fn(async () => ({ count: 1 }));
     const sessionEventCreate = vi.fn(async () => ({}));
     const transitionCreate = vi.fn(async () => ({}));
@@ -478,7 +754,7 @@ describe('PrismaWhatsAppRepository dual-write', () => {
       $executeRaw: vi.fn(async () => 1),
       whatsAppConversation: {
         findUniqueOrThrow: vi.fn(async () => deliveredConversation),
-        updateMany: vi.fn(async () => ({ count: 1 })),
+        updateMany: conversationUpdateMany,
       },
       quoteRequest: {
         findUniqueOrThrow: vi.fn(async () => ({
@@ -570,12 +846,28 @@ describe('PrismaWhatsAppRepository dual-write', () => {
         }),
       }),
     );
+    expect(conversationUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          companyId,
+          flowStep: {
+            in: [
+              FlowStep.QUOTE_SEND_PENDING,
+              FlowStep.COMMERCIAL_FOLLOW_UP_MENU,
+            ],
+          },
+          requestStatus: RequestStatus.UNDER_REVIEW,
+        }),
+      }),
+    );
     expect(transitionCreate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           threadId,
           serviceSessionId: sessionId,
           name: 'proposal-delivery-confirmed',
+          fromFlowStep: FlowStep.COMMERCIAL_FOLLOW_UP_MENU,
+          toFlowStep: FlowStep.QUOTE_SEND_PENDING,
         }),
       }),
     );

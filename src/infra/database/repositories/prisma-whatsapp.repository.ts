@@ -1150,6 +1150,26 @@ function snapshot(row: {
   };
 }
 
+function snapshotForProposalDelivery(row: {
+  department: DepartmentCode;
+  conversationState: ConversationState;
+  flowStep: FlowStep;
+  requestStatus: RequestStatus;
+  resumeState: ConversationState | null;
+  resumeFlowStep: FlowStep | null;
+}): ConversationSnapshot {
+  const current = snapshot(row);
+  if (
+    current.department === 'commercial' &&
+    current.conversationState === 'bot-active' &&
+    current.flowStep === 'commercial-follow-up-menu' &&
+    current.requestStatus === 'under-review'
+  ) {
+    return { ...current, flowStep: 'quote-send-pending' };
+  }
+  return current;
+}
+
 function presentQuote(row: {
   id: string;
   sequence: number;
@@ -4897,6 +4917,15 @@ export class PrismaWhatsAppRepository
           },
         );
 
+        const hasQueuedProposalDocument =
+          (await transaction.quoteProposalDocument.count({
+            where: {
+              companyId: input.channel.companyId,
+              conversationId: conversation.id,
+              status: QuoteProposalDocumentStatus.QUEUED,
+            },
+          })) > 0;
+
         let contextualTransition = false;
         let automaticResumeName:
           | 'resume-awaited-reply'
@@ -4922,6 +4951,7 @@ export class PrismaWhatsAppRepository
         ) {
           automaticResumeName = 'proposal-response-received';
         } else if (
+          !hasQueuedProposalDocument &&
           input.kind === 'text' &&
           conversation.contextualFollowUpAt !== null &&
           input.occurredAt >= conversation.contextualFollowUpAt &&
@@ -5117,6 +5147,7 @@ export class PrismaWhatsAppRepository
         });
 
         const humanRouted =
+          hasQueuedProposalDocument ||
           foundation.session.controlMode === ServiceSessionControlMode.HUMAN ||
           conversation.conversationState === ConversationState.HUMAN_ACTIVE ||
           conversation.conversationState === ConversationState.SENT_TO_HUMAN ||
@@ -7983,7 +8014,7 @@ export class PrismaWhatsAppRepository
             );
           }
           resolveConversationTransition({
-            current: snapshot(conversation),
+            current: snapshotForProposalDelivery(conversation),
             name: 'proposal-delivery-confirmed',
           });
         }
@@ -11042,6 +11073,7 @@ export class PrismaWhatsAppRepository
             assignedToUserId: input.actorUserId,
             resumeState: null,
             resumeFlowStep: FlowStep.COMMERCIAL_FOLLOW_UP_MENU,
+            contextualFollowUpAt: null,
             lastMessagePreview: 'Orçamento em PDF aguardando envio.',
             version: { increment: 1 },
           },
@@ -11800,7 +11832,7 @@ export class PrismaWhatsAppRepository
     if (sentDocuments.length === 0) return;
 
     const next = resolveConversationTransition({
-      current: snapshot(conversation),
+      current: snapshotForProposalDelivery(conversation),
       name: 'proposal-delivery-confirmed',
     });
     const completedAt = sentDocuments[0].sentAt ?? new Date();
@@ -11882,7 +11914,9 @@ export class PrismaWhatsAppRepository
             ConversationState.HUMAN_ACTIVE,
           ],
         },
-        flowStep: FlowStep.QUOTE_SEND_PENDING,
+        flowStep: {
+          in: [FlowStep.QUOTE_SEND_PENDING, FlowStep.COMMERCIAL_FOLLOW_UP_MENU],
+        },
         requestStatus: RequestStatus.UNDER_REVIEW,
       },
       data: {
