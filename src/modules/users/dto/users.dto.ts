@@ -184,6 +184,16 @@ export class CreateUserDto {
 }
 
 export class UpdateUserDto {
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID('4')
+  commandId!: string;
+
+  @ApiProperty({ minimum: 1 })
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  expectedVersion!: number;
+
   @ApiPropertyOptional({
     format: 'uuid',
     nullable: true,

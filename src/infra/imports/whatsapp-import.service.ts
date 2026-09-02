@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 import { formatWhatsAppPhone } from '../../shared/utils/normalization';
+import { hasTenantWideAuthority } from '../../domain/access/tenant-authority';
 
 import {
   CommercialClosureClassification,
@@ -37,6 +38,7 @@ import {
   IMPORT_DEPARTMENT_CODES,
   type ConversationImportRow,
   type DocumentImportRow,
+  type ImportDepartmentCode,
   type ImportIssue,
   type MessageImportRow,
   type ParsedWhatsAppImportPackage,
@@ -63,17 +65,31 @@ const IMPORT_TRANSACTION_RETRY_BASE_DELAY_MS = 50;
 const IMPORT_CREATE_MANY_CHUNK_SIZE = 1_000;
 const IMPORT_LOOKUP_CHUNK_SIZE = 1_000;
 
-const DEPARTMENT_TO_PRISMA: Record<string, DepartmentCode> = {
+interface ImportUserLookup {
+  id: string;
+  departments: string[];
+  permissionCodes: string[];
+  isAdministrator: boolean;
+  documentAccessMode: string;
+  status: UserAccountStatus;
+  isActive: boolean;
+}
+
+const DEPARTMENT_TO_PRISMA: Readonly<Record<string, DepartmentCode>> = {
+  'human-resources': DepartmentCode.HUMAN_RESOURCES,
+  'personnel-department': DepartmentCode.PERSONNEL_DEPARTMENT,
   commercial: DepartmentCode.COMMERCIAL,
   purchasing: DepartmentCode.PURCHASING,
   controlling: DepartmentCode.CONTROLLING,
-  'personnel-department': DepartmentCode.PERSONNEL_DEPARTMENT,
-  financial: DepartmentCode.FINANCIAL,
-  management: DepartmentCode.MANAGEMENT,
   maintenance: DepartmentCode.MAINTENANCE,
   monitoring: DepartmentCode.MONITORING,
+  management: DepartmentCode.MANAGEMENT,
+  directorate: DepartmentCode.DIRECTORATE,
   operations: DepartmentCode.OPERATIONS,
-};
+  cleaning: DepartmentCode.CLEANING,
+  financial: DepartmentCode.FINANCIAL,
+  'information-technology': DepartmentCode.INFORMATION_TECHNOLOGY,
+} satisfies Readonly<Record<ImportDepartmentCode, DepartmentCode>>;
 
 const STATE_TO_PRISMA: Record<string, ConversationState> = {
   'bot-active': ConversationState.BOT_ACTIVE,
@@ -856,6 +872,9 @@ export class WhatsAppImportService {
             id: true,
             usernameNormalized: true,
             departments: true,
+            permissionCodes: true,
+            isAdministrator: true,
+            documentAccessMode: true,
             status: true,
             isActive: true,
           },
@@ -1568,15 +1587,7 @@ export class WhatsAppImportService {
     issues: ImportIssue[],
     channelPhone: string | undefined,
     departments: Set<DepartmentCode>,
-    users: Map<
-      string,
-      {
-        id: string;
-        departments: string[];
-        status: UserAccountStatus;
-        isActive: boolean;
-      }
-    >,
+    users: Map<string, ImportUserLookup>,
     cutoffAt: Date | undefined,
   ): void {
     const required: Array<[string, string]> = [
@@ -1650,7 +1661,7 @@ export class WhatsAppImportService {
     }
     if (
       !IMPORT_DEPARTMENT_CODES.includes(
-        row.departmentCode as (typeof IMPORT_DEPARTMENT_CODES)[number],
+        row.departmentCode as ImportDepartmentCode,
       ) ||
       !departments.has(DEPARTMENT_TO_PRISMA[row.departmentCode])
     ) {
@@ -1658,7 +1669,7 @@ export class WhatsAppImportService {
         issues,
         'Atendimentos',
         'INVALID_DEPARTMENT',
-        'department_code não é um dos nove departamentos publicados no tenant.',
+        'department_code não corresponde a um departamento interno publicado no tenant.',
         row.rowNumber,
       );
     }
@@ -1780,7 +1791,10 @@ export class WhatsAppImportService {
           'owner_username não corresponde a um usuário ativo do tenant.',
           row.rowNumber,
         );
-      } else if (!owner.departments.includes(row.departmentCode)) {
+      } else if (
+        !owner.departments.includes(row.departmentCode) &&
+        !hasTenantWideAuthority(owner)
+      ) {
         issue(
           issues,
           'Atendimentos',
@@ -1892,15 +1906,7 @@ export class WhatsAppImportService {
     row: MessageImportRow,
     conversation: ConversationImportRow | undefined,
     issues: ImportIssue[],
-    users: Map<
-      string,
-      {
-        id: string;
-        departments: string[];
-        status: UserAccountStatus;
-        isActive: boolean;
-      }
-    >,
+    users: Map<string, ImportUserLookup>,
     cutoffAt: Date | undefined,
   ): void {
     for (const [field, value, maxLength] of [

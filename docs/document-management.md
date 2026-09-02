@@ -19,6 +19,13 @@ permanecem não classificados e disponíveis para revisão humana.
   validados antes da persistência;
 - logs guardam metadados mínimos e hashes, nunca os bytes integrais.
 
+RH e Departamento Pessoal são departamentos separados com o mesmo teto
+documental. Essa equivalência de acesso não define a responsabilidade: o
+responsável deve ser escolhido pela regra de cada tipo documental. O runtime
+ainda grava um único departamento na solicitação, com padrão de Departamento
+Pessoal, e não publica uma matriz de responsabilidade por tipo; essa continua
+sendo uma lacuna autoritativa.
+
 ### Pré-admissão sem conta de usuário
 
 A primeira fatia do Acesso de Pré-admissão é ligada diretamente a uma Pessoa
@@ -58,6 +65,11 @@ RH e DP podem manter o perfil documental (classificação Administrativo, Geral 
 Motorista, estado civil, decisão sobre documento militar e dependentes), mas essa
 autorização não permite alterar os
 demais acessos.
+
+O recálculo documental disparado por `PATCH /users/:id` usa o mesmo `commandId`
+da atualização. O recibo fica em `UserUpdateHistory`; por isso, repetir o PATCH
+após uma falha intermediária conclui ou reapresenta a mesma sincronização sem
+duplicar solicitação, incremento de versão ou auditoria.
 
 ## Fluxo
 
@@ -177,7 +189,11 @@ JPEG e PNG são transmitidos sem duplicação pelo Tenant Web; a quantidade e a
 estrutura exigidas para cada tipo documental continuam validadas.
 
 Criação, envio e revisão recebem `commandId`. Atualizações concorrentes de itens
-usam a versão persistida.
+usam a versão persistida. Mutações de um dossiê bloqueiam, em ordem estável,
+itens, envios e solicitação; depois do bloqueio, o estado é relido antes de
+validar, remover, revisar ou alterar dados extraídos. A sincronização acionada
+pelo cadastro usa transação serializável com retentativa limitada apenas para
+conflitos transitórios do PostgreSQL e reapresenta o recibo do mesmo comando.
 
 ## Operação
 

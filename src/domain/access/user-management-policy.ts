@@ -1,9 +1,43 @@
+import { createHash } from 'node:crypto';
+
 import { forbidden } from '../../core/errors/app-error';
+import { hasTenantWideAuthority } from './tenant-authority';
 export interface UserManagementIdentity {
   readonly id: string;
   readonly isAdministrator: boolean;
   readonly departments: readonly string[];
   readonly permissionCodes?: readonly string[];
+  readonly documentAccessMode?: string;
+}
+
+export interface UserMutationAuthorizationIdentity extends UserManagementIdentity {
+  readonly permissionCodes: readonly string[];
+  readonly documentAccessMode: string;
+  readonly status: string;
+  readonly isActive: boolean;
+  readonly companyIsActive: boolean;
+}
+
+function normalizeAccessValue(value: string): string {
+  return value.toLowerCase().replaceAll('_', '-');
+}
+
+export function userMutationAuthorizationFingerprint(
+  actor: UserMutationAuthorizationIdentity,
+): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        isAdministrator: actor.isAdministrator,
+        documentAccessMode: normalizeAccessValue(actor.documentAccessMode),
+        departments: [...new Set(actor.departments)].sort(),
+        permissionCodes: [...new Set(actor.permissionCodes)].sort(),
+        status: normalizeAccessValue(actor.status),
+        isActive: actor.isActive,
+        companyIsActive: actor.companyIsActive,
+      }),
+    )
+    .digest('hex');
 }
 
 export type UserManagementRole =
@@ -13,10 +47,27 @@ export type UserManagementRole =
   | 'delegated'
   | 'none';
 
+export function isPrivilegedUserManagementTarget(
+  target: UserManagementIdentity,
+): boolean {
+  return hasTenantWideAuthority({
+    isAdministrator: target.isAdministrator,
+    departments: target.departments,
+    permissionCodes: target.permissionCodes,
+    documentAccessMode: target.documentAccessMode,
+  });
+}
+
 export function resolveUserManagementRole(
   actor: UserManagementIdentity,
 ): UserManagementRole {
   if (actor.isAdministrator) return 'administrator';
+  if (
+    actor.documentAccessMode?.toLowerCase().replaceAll('_', '-') ===
+    'document-portal'
+  ) {
+    return 'none';
+  }
   if (actor.departments.includes('information-technology')) {
     return 'information-technology';
   }
@@ -56,14 +107,17 @@ export function assertCanAccessUserTarget(
   target: UserManagementIdentity,
 ): UserManagementRole {
   const role = assertCanAccessUserCatalog(actor);
+  if (role !== 'administrator' && isPrivilegedUserManagementTarget(target)) {
+    throw forbidden(
+      'Somente administradores podem gerenciar uma conta com autoridade ampla no tenant.',
+    );
+  }
   if (
     ['information-technology', 'delegated'].includes(role) &&
-    (target.id === actor.id || target.isAdministrator)
+    target.id === actor.id
   ) {
     throw forbidden(
-      target.id === actor.id
-        ? 'A equipe de TI não pode alterar a própria conta pela administração de usuários. Use Meu perfil para seus dados pessoais.'
-        : 'Somente administradores podem gerenciar uma conta administradora.',
+      'A equipe de TI não pode alterar a própria conta pela administração de usuários. Use Meu perfil para seus dados pessoais.',
     );
   }
   return role;

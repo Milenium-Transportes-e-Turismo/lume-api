@@ -17,6 +17,7 @@ function setup(required?: PermissionCode[]) {
 function contextWith(
   user?: Readonly<{
     isAdministrator: boolean;
+    departments?: readonly string[];
     permissions: readonly PermissionCode[];
   }>,
 ): ExecutionContext {
@@ -89,5 +90,33 @@ describe('PermissionsGuard', () => {
         contextWith({ isAdministrator: true, permissions: [] }),
       ),
     ).toBe(true);
+  });
+
+  it('allows tenant-wide authority to exercise a tenant business permission', () => {
+    const { guard } = setup(['commercial:manage']);
+
+    expect(
+      guard.canActivate(
+        contextWith({
+          isAdministrator: false,
+          departments: ['directorate'],
+          permissions: ['tenant:manage'],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('does not let tenant-wide authority cross into platform administration', () => {
+    const { guard } = setup(['users:manage']);
+
+    expect(() =>
+      guard.canActivate(
+        contextWith({
+          isAdministrator: false,
+          departments: ['directorate'],
+          permissions: ['tenant:manage'],
+        }),
+      ),
+    ).toThrow(ForbiddenException);
   });
 });

@@ -32,8 +32,13 @@ const activeActor = {
   status: 'ACTIVE',
   deletedAt: null,
   isAdministrator: true,
+  departments: [],
   permissionCodes: [],
 };
+
+function actorRowLock() {
+  return vi.fn().mockResolvedValue([{ id: current.id }]);
+}
 
 function continuousTripRow(
   overrides: Record<string, unknown> = {},
@@ -118,6 +123,7 @@ describe('OperationalTripsService', () => {
     const prisma = {
       $transaction: vi.fn((operation: (tx: unknown) => unknown) =>
         operation({
+          $queryRaw: actorRowLock(),
           user: { findUnique: vi.fn().mockResolvedValue(activeActor) },
           operationalTripHistory: {
             findUnique: vi.fn().mockResolvedValue(repeated),
@@ -131,6 +137,81 @@ describe('OperationalTripsService', () => {
       trip: { id: tripId },
       idempotent: true,
     });
+  });
+
+  it('revalidates trip mutations for Admin without departments and tenant-wide Directorate', async () => {
+    const tripId = 'trip-1';
+    const input = {
+      type: 'start' as const,
+      commandId: '00000000-0000-4000-8000-000000000021',
+      expectedVersion: 1,
+    };
+    const repeated = {
+      tripId,
+      commandFingerprint: fingerprint({
+        companyId: 'company-1',
+        tripId,
+        actorUserId: 'actor-1',
+        ...input,
+      }),
+      resultSnapshot: { trip: { id: tripId, status: 'in-execution' } },
+    };
+
+    for (const actor of [
+      { ...activeActor, isAdministrator: true, departments: [] },
+      {
+        ...activeActor,
+        isAdministrator: false,
+        departments: ['DIRECTORATE'],
+        permissionCodes: ['tenant:manage'],
+      },
+    ]) {
+      const service = new OperationalTripsService({
+        $transaction: vi.fn((operation: (tx: unknown) => unknown) =>
+          operation({
+            $queryRaw: actorRowLock(),
+            user: { findUnique: vi.fn().mockResolvedValue(actor) },
+            operationalTripHistory: {
+              findUnique: vi.fn().mockResolvedValue(repeated),
+            },
+          }),
+        ),
+      } as never);
+
+      await expect(service.apply(current, tripId, input)).resolves.toEqual({
+        trip: { id: tripId, status: 'in-execution' },
+        idempotent: true,
+      });
+    }
+  });
+
+  it('rejects trip mutations from Directorate without tenant authority', async () => {
+    const historyLookup = vi.fn();
+    const service = new OperationalTripsService({
+      $transaction: vi.fn((operation: (tx: unknown) => unknown) =>
+        operation({
+          $queryRaw: actorRowLock(),
+          user: {
+            findUnique: vi.fn().mockResolvedValue({
+              ...activeActor,
+              isAdministrator: false,
+              departments: ['DIRECTORATE'],
+              permissionCodes: [],
+            }),
+          },
+          operationalTripHistory: { findUnique: historyLookup },
+        }),
+      ),
+    } as never);
+
+    await expect(
+      service.apply(current, 'trip-1', {
+        type: 'start',
+        commandId: '00000000-0000-4000-8000-000000000022',
+        expectedVersion: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(historyLookup).not.toHaveBeenCalled();
   });
 
   it('rejects an invalid expected contract version before opening a transaction', async () => {
@@ -153,12 +234,20 @@ describe('OperationalTripsService', () => {
   });
 
   it('revalidates the actor before a trip mutation', async () => {
+    const callOrder: string[] = [];
     const historyLookup = vi.fn();
     const transaction = {
+      $queryRaw: vi.fn().mockImplementation(async () => {
+        callOrder.push('lock');
+        return [{ id: current.id }];
+      }),
       user: {
-        findUnique: vi.fn().mockResolvedValue({
-          ...activeActor,
-          isActive: false,
+        findUnique: vi.fn().mockImplementation(async () => {
+          callOrder.push('read');
+          return {
+            ...activeActor,
+            isActive: false,
+          };
         }),
       },
       operationalTripHistory: { findUnique: historyLookup },
@@ -179,11 +268,13 @@ describe('OperationalTripsService', () => {
         commandId: '00000000-0000-4000-8000-000000000002',
       }),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(callOrder).toEqual(['lock', 'read']);
     expect(historyLookup).not.toHaveBeenCalled();
   });
 
   it('detects a contract changed since the operator loaded it', async () => {
     const transaction = {
+      $queryRaw: actorRowLock(),
       user: { findUnique: vi.fn().mockResolvedValue(activeActor) },
       operationalTripHistory: {
         findUnique: vi.fn().mockResolvedValue(null),
@@ -231,10 +322,13 @@ describe('OperationalTripsService', () => {
     };
     const transaction = {
       user: { findUnique: vi.fn().mockResolvedValue(activeActor) },
-      $queryRaw: vi.fn().mockImplementation(() => {
-        route = { ...route, version: 9 };
-        return Promise.resolve([{ id: route.id }]);
-      }),
+      $queryRaw: vi
+        .fn()
+        .mockResolvedValueOnce([{ id: current.id }])
+        .mockImplementationOnce(() => {
+          route = { ...route, version: 9 };
+          return Promise.resolve([{ id: route.id }]);
+        }),
       operationalTripHistory: {
         findUnique: vi.fn().mockResolvedValue(null),
         create: vi.fn().mockResolvedValue({}),
@@ -293,6 +387,7 @@ describe('OperationalTripsService', () => {
         version: 3,
       });
       const transaction = {
+        $queryRaw: actorRowLock(),
         user: { findUnique: vi.fn().mockResolvedValue(activeActor) },
         operationalTripHistory: {
           findUnique: vi.fn().mockResolvedValue(null),

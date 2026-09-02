@@ -20,6 +20,7 @@ import { RequireAnyPermission } from '../../shared/http/decorators/require-permi
 import {
   AttestCommercialServiceRequirementDto,
   ConfirmServiceDto,
+  MarkCommercialServiceRequirementNotApplicableDto,
 } from './confirmed-services.dto';
 
 @ApiTags('Serviços comerciais confirmados')
@@ -66,6 +67,26 @@ export class ConfirmedServicesController {
     );
   }
 
+  @Post(':quoteRequestId/requirements/:requirement/not-applicable')
+  @RequireAnyPermission('service-confirmations:approve')
+  @ApiCreatedResponse({
+    description:
+      'Registra, com motivo e evidência, que o requisito financeiro ou operacional não se aplica ao orçamento aceito.',
+  })
+  markRequirementNotApplicable(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Param('quoteRequestId', new ParseUUIDPipe()) quoteRequestId: string,
+    @Param('requirement') requirement: string,
+    @Body() body: MarkCommercialServiceRequirementNotApplicableDto,
+  ) {
+    return this.confirmedServices.markRequirementNotApplicable(
+      current,
+      quoteRequestId,
+      requirement,
+      body,
+    );
+  }
+
   @Get(':quoteRequestId/confirmed-service-readiness')
   @RequireAnyPermission(
     'commercial:view',
@@ -74,6 +95,7 @@ export class ConfirmedServicesController {
     'financial:approve',
     'operations:view',
     'operations:manage',
+    'service-confirmations:approve',
   )
   @ApiOkResponse({
     description:

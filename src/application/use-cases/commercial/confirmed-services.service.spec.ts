@@ -29,10 +29,43 @@ class RecordingConfirmedServiceRepository extends ConfirmedServiceRepository {
         sourceQuoteVersion: input.expectedVersion,
         sourceItemKey: input.sourceItemKey,
         kind: input.kind,
+        outcome: 'SATISFIED' as const,
+        reason: null,
         evidence: input.evidence,
         actorUserId: input.actorUserId,
         commandId: input.commandId,
         attestedAt: new Date('2026-09-01T11:00:00.000Z'),
+      },
+      idempotent: false,
+    }),
+  );
+
+  readonly markRequirementNotApplicable = vi.fn(
+    async (input: {
+      companyId: string;
+      actorUserId: string;
+      quoteRequestId: string;
+      sourceItemKey: 'legacy-primary';
+      kind: 'financial' | 'operational';
+      commandId: string;
+      expectedVersion: number;
+      reason: string;
+      evidence: string;
+      requestFingerprint: string;
+    }) => ({
+      attestation: {
+        id: '11111111-1111-4111-8111-111111111111',
+        companyId: input.companyId,
+        sourceQuoteRequestId: input.quoteRequestId,
+        sourceQuoteVersion: input.expectedVersion,
+        sourceItemKey: input.sourceItemKey,
+        kind: input.kind,
+        outcome: 'NOT_APPLICABLE' as const,
+        reason: input.reason,
+        evidence: input.evidence,
+        actorUserId: input.actorUserId,
+        commandId: input.commandId,
+        attestedAt: new Date('2026-09-01T11:30:00.000Z'),
       },
       idempotent: false,
     }),
@@ -122,8 +155,69 @@ describe('ConfirmedServicesService', () => {
         kind: 'financial',
         evidence: 'Pagamento confirmado no comprovante 123.',
         expectedVersion: 4,
-        requestFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        requestFingerprint:
+          '002ad1d7e8c1b598206fb312ddae41c45d20540ba1bfc353ecdc8e6f5cdff0c0',
       }),
     );
+  });
+
+  it('marca um requisito como não aplicável com autoridade, motivo e evidência explícitos', async () => {
+    const repository = new RecordingConfirmedServiceRepository();
+    const service = new ConfirmedServicesService(repository);
+    const management = {
+      ...principal,
+      departments: ['management'],
+      permissions: ['service-confirmations:approve'],
+    } as AuthenticatedPrincipal;
+
+    await service.markRequirementNotApplicable(
+      management,
+      'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      'financial',
+      {
+        commandId: '11111111-1111-4111-8111-111111111111',
+        expectedVersion: 4,
+        reason: '  Serviço sem cobrança antecipada.  ',
+        evidence: '  Condição registrada na proposta aceita.  ',
+      },
+    );
+
+    expect(repository.markRequirementNotApplicable).toHaveBeenCalledWith({
+      companyId: principal.companyId,
+      actorUserId: principal.id,
+      quoteRequestId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      sourceItemKey: 'legacy-primary',
+      kind: 'financial',
+      commandId: '11111111-1111-4111-8111-111111111111',
+      expectedVersion: 4,
+      reason: 'Serviço sem cobrança antecipada.',
+      evidence: 'Condição registrada na proposta aceita.',
+      requestFingerprint:
+        '66f753e0a0531bb2b3be947c8f02e114914dce322029d01d0dc9c3f443954898',
+    });
+  });
+
+  it('não permite ao Comercial dispensar requisito mesmo com a capacidade individual', () => {
+    const repository = new RecordingConfirmedServiceRepository();
+    const service = new ConfirmedServicesService(repository);
+    const commercial = {
+      ...principal,
+      permissions: ['commercial:manage', 'service-confirmations:approve'],
+    } as AuthenticatedPrincipal;
+
+    expect(() =>
+      service.markRequirementNotApplicable(
+        commercial,
+        'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        'operational',
+        {
+          commandId: '11111111-1111-4111-8111-111111111111',
+          expectedVersion: 4,
+          reason: 'Operação não exigida.',
+          evidence: 'Escopo da proposta aceita.',
+        },
+      ),
+    ).toThrowError(expect.objectContaining({ code: 'FORBIDDEN' }));
+    expect(repository.markRequirementNotApplicable).not.toHaveBeenCalled();
   });
 });

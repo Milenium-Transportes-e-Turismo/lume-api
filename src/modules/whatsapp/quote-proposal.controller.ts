@@ -28,6 +28,7 @@ import type { AuthenticatedPrincipal } from '../../application/presenters/user.p
 import { QuoteProposalUseCase } from '../../application/use-cases/commercial/commercial-quotes.use-case';
 import { forbidden, notFound } from '../../core/errors/app-error';
 import { QUOTE_PROPOSAL_MAX_PDF_BYTES } from '../../domain/commercial/commercial.constants';
+import { hasTenantWideAuthority } from '../../domain/access/tenant-authority';
 import {
   dateOnlyFromDateTime,
   parseBusinessDateTime,
@@ -78,9 +79,12 @@ export function normalizeUploadedFileName(fileName: string): string {
 }
 
 function assertCommercialDepartment(current: AuthenticatedPrincipal): void {
-  if (!current.departments.includes('commercial')) {
+  if (
+    !current.departments.includes('commercial') &&
+    !hasTenantWideAuthority(current)
+  ) {
     throw forbidden(
-      'O acesso aos orçamentos é restrito a usuários vinculados ao departamento Comercial.',
+      'O acesso aos orçamentos exige vínculo com o Comercial ou autoridade ampla no tenant.',
     );
   }
 }

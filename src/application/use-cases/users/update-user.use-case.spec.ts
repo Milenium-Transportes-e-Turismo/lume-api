@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
@@ -12,12 +14,18 @@ import { User } from '../../../domain/entities/user';
 import { BootstrapTenantUseCase } from '../tenant/bootstrap-tenant.use-case';
 import { CreateUserUseCase } from './create-user.use-case';
 import { UpdateUserStatusUseCase } from './update-user-status.use-case';
-import { UpdateUserUseCase } from './update-user.use-case';
+import {
+  type UpdateUserInput,
+  UpdateUserUseCase,
+} from './update-user.use-case';
 
 describe('UpdateUserUseCase', () => {
   let store: InMemoryStore;
   let users: InMemoryUsersRepository;
   let useCase: UpdateUserUseCase;
+  let updateUser: (
+    input: Omit<UpdateUserInput, 'commandId' | 'expectedVersion'>,
+  ) => ReturnType<UpdateUserUseCase['execute']>;
   let create: CreateUserUseCase;
 
   beforeEach(async () => {
@@ -30,6 +38,20 @@ describe('UpdateUserUseCase', () => {
       new FakeOfflineLicenseVerifier(),
     ).execute(companyFixture);
     useCase = new UpdateUserUseCase(users);
+    updateUser = (input) => {
+      const target = store.users.find(
+        (user) =>
+          user.companyId === input.companyId && user.id === input.userId,
+      );
+      if (!target) throw new Error('Missing update target in test.');
+      return useCase.execute({
+        ...input,
+        actorUserId:
+          input.actorUserId ?? input.currentUserId ?? store.users[0].id,
+        commandId: randomUUID(),
+        expectedVersion: target.props.version,
+      });
+    };
     create = new CreateUserUseCase(users, passwordHasher);
   });
 
@@ -44,7 +66,7 @@ describe('UpdateUserUseCase', () => {
       permissionCodes: ['operations:view'],
     });
 
-    const updated = await useCase.execute({
+    const updated = await updateUser({
       companyId: store.companies[0].id,
       userId: created.id,
       name: 'Bruno Atualizado',
@@ -71,7 +93,7 @@ describe('UpdateUserUseCase', () => {
       permissionCodes: [],
     });
 
-    const updated = await useCase.execute({
+    const updated = await updateUser({
       companyId: store.companies[0].id,
       userId: created.id,
       permissionCodes: ['clients:view', 'clients:create', 'clients:update'],
@@ -104,7 +126,7 @@ describe('UpdateUserUseCase', () => {
     });
 
     await expect(
-      useCase.execute({
+      updateUser({
         companyId: store.companies[0].id,
         userId: candidate.id,
         name: 'Jean Atualizado',
@@ -115,7 +137,7 @@ describe('UpdateUserUseCase', () => {
     });
 
     await expect(
-      useCase.execute({
+      updateUser({
         companyId: store.companies[0].id,
         userId: candidate.id,
         documentAccessMode: 'standard',
@@ -141,7 +163,7 @@ describe('UpdateUserUseCase', () => {
     });
 
     await expect(
-      useCase.execute({
+      updateUser({
         companyId: store.companies[0].id,
         userId: created.id,
         departments: ['commercial'],
@@ -197,7 +219,7 @@ describe('UpdateUserUseCase', () => {
     const administrator = store.users[0];
 
     await expect(
-      useCase.execute({
+      updateUser({
         companyId: administrator.companyId,
         actorUserId: administrator.id,
         currentUserId: administrator.id,
@@ -222,7 +244,7 @@ describe('UpdateUserUseCase', () => {
     });
 
     await expect(
-      useCase.execute({
+      updateUser({
         companyId: administrator.companyId,
         actorUserId: manager.id,
         currentUserId: manager.id,
@@ -263,7 +285,7 @@ describe('UpdateUserUseCase', () => {
     });
 
     await expect(
-      useCase.execute({
+      updateUser({
         companyId: administrator.companyId,
         actorUserId: informationTechnology.id,
         currentUserId: informationTechnology.id,
@@ -274,7 +296,7 @@ describe('UpdateUserUseCase', () => {
     ).resolves.toMatchObject({ departments: ['operations'] });
 
     await expect(
-      useCase.execute({
+      updateUser({
         companyId: administrator.companyId,
         actorUserId: informationTechnology.id,
         currentUserId: informationTechnology.id,
@@ -284,7 +306,7 @@ describe('UpdateUserUseCase', () => {
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
 
     await expect(
-      useCase.execute({
+      updateUser({
         companyId: administrator.companyId,
         actorUserId: informationTechnology.id,
         currentUserId: informationTechnology.id,
@@ -381,12 +403,163 @@ describe('UpdateUserUseCase', () => {
     });
 
     await expect(
-      useCase.execute({
+      updateUser({
         companyId: administrator.companyId,
         actorUserId: informationTechnology.id,
         currentUserId: informationTechnology.id,
         userId: common.id,
         permissionCodes: ['license:view'],
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('allows only an administrator to grant or remove tenant-wide Directorate authority', async () => {
+    const administrator = store.users[0];
+    const informationTechnology = await create.execute({
+      companyId: administrator.companyId,
+      name: 'TI de acessos',
+      username: 'ti.acessos',
+      email: 'ti.acessos@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['information-technology'],
+      permissionCodes: [],
+    });
+    const director = await create.execute({
+      companyId: administrator.companyId,
+      actorUserId: administrator.id,
+      name: 'Diretora',
+      username: 'diretora',
+      email: 'diretora@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['directorate'],
+      permissionCodes: ['tenant:manage'],
+    });
+
+    await expect(
+      updateUser({
+        companyId: administrator.companyId,
+        actorUserId: informationTechnology.id,
+        currentUserId: informationTechnology.id,
+        userId: director.id,
+        permissionCodes: [],
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    await expect(
+      updateUser({
+        companyId: administrator.companyId,
+        actorUserId: administrator.id,
+        currentUserId: administrator.id,
+        userId: director.id,
+        permissionCodes: [],
+      }),
+    ).resolves.toMatchObject({ permissionCodes: [] });
+  });
+
+  it('clears business authority when an administrator moves a Director to the document portal', async () => {
+    const administrator = store.users[0];
+    const director = await create.execute({
+      companyId: administrator.companyId,
+      actorUserId: administrator.id,
+      name: 'Diretora documental',
+      username: 'diretora.documental',
+      email: 'diretora.documental@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['directorate'],
+      permissionCodes: ['tenant:manage'],
+    });
+
+    const updated = await updateUser({
+      companyId: administrator.companyId,
+      actorUserId: administrator.id,
+      userId: director.id,
+      documentAccessMode: 'document-portal',
+    });
+
+    expect(updated).toMatchObject({
+      documentAccessMode: 'document-portal',
+      departments: [],
+      permissionCodes: [],
+    });
+    expect(updated.permissions).not.toContain('operations:manage');
+    const persisted = store.users.find((user) => user.id === director.id);
+    expect(persisted?.props.departments).toEqual([]);
+    expect(persisted?.props.permissionCodes).toEqual([]);
+    expect(store.userUpdateHistory.at(-1)?.changedFields).toEqual([
+      'documentAccessMode',
+      'departments',
+      'permissionCodes',
+    ]);
+    expect(store.tenantAuditLogs.at(-1)?.metadata).toMatchObject({
+      changedFields: ['documentAccessMode', 'departments', 'permissionCodes'],
+      requestedFields: ['documentAccessMode'],
+    });
+  });
+
+  it('rejects explicit business grants on a document-portal account', async () => {
+    const administrator = store.users[0];
+    const candidate = await create.execute({
+      companyId: administrator.companyId,
+      actorUserId: administrator.id,
+      name: 'Candidata documental',
+      username: 'candidata.documental',
+      email: 'candidata.documental@empresa.test',
+      password: 'OutraSenha@2026',
+      documentAccessMode: 'document-portal',
+      departments: [],
+      permissionCodes: [],
+    });
+
+    await expect(
+      updateUser({
+        companyId: administrator.companyId,
+        actorUserId: administrator.id,
+        userId: candidate.id,
+        departments: ['directorate'],
+        permissionCodes: ['tenant:manage'],
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+  });
+
+  it('does not reactivate legacy Directorate grants when leaving the document portal', async () => {
+    const administrator = store.users[0];
+    const informationTechnology = await create.execute({
+      companyId: administrator.companyId,
+      actorUserId: administrator.id,
+      name: 'TI sem autoridade global',
+      username: 'ti.sem.autoridade.global',
+      email: 'ti.sem.autoridade.global@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['information-technology'],
+      permissionCodes: ['users:update'],
+    });
+    const director = await create.execute({
+      companyId: administrator.companyId,
+      actorUserId: administrator.id,
+      name: 'Diretora legada no portal',
+      username: 'diretora.legada.portal',
+      email: 'diretora.legada.portal@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['directorate'],
+      permissionCodes: ['tenant:manage'],
+    });
+    const directorIndex = store.users.findIndex(
+      (user) => user.id === director.id,
+    );
+    store.users[directorIndex] = User.restore({
+      ...store.users[directorIndex].props,
+      documentAccessMode: 'document-portal',
+    });
+
+    await expect(
+      updateUser({
+        companyId: administrator.companyId,
+        actorUserId: informationTechnology.id,
+        currentUserId: informationTechnology.id,
+        userId: director.id,
+        documentAccessMode: 'standard',
+        departments: ['directorate'],
+        permissionCodes: ['tenant:manage'],
       }),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
@@ -412,7 +585,7 @@ describe('UpdateUserUseCase', () => {
     store.users.push(inactiveAdministrator);
 
     await expect(
-      useCase.execute({
+      updateUser({
         companyId: administrator.companyId,
         actorUserId: inactiveAdministrator.id,
         currentUserId: inactiveAdministrator.id,
@@ -421,7 +594,7 @@ describe('UpdateUserUseCase', () => {
         departments: ['management'],
         permissionCodes: [],
       }),
-    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
 
     await expect(
       new UpdateUserStatusUseCase(users).execute({
@@ -479,6 +652,93 @@ describe('UpdateUserUseCase', () => {
     expect(result.total).toBe(1);
   });
 
+  it('filters Directorate tenant authority as effective business access without inventing departments for administrators', async () => {
+    const administrator = store.users[0];
+    const director = await create.execute({
+      companyId: administrator.companyId,
+      actorUserId: administrator.id,
+      name: 'Diretora de Operações',
+      username: 'diretora.operacoes',
+      email: 'diretora.operacoes@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['directorate'],
+      permissionCodes: ['tenant:manage'],
+    });
+
+    const byPermission = await users.list(administrator.companyId, {
+      page: 1,
+      pageSize: 20,
+      permission: 'operations:manage',
+    });
+    expect(byPermission.items.map((item) => item.user.id)).toContain(
+      director.id,
+    );
+
+    const byDepartment = await users.list(administrator.companyId, {
+      page: 1,
+      pageSize: 20,
+      department: 'directorate',
+    });
+    expect(byDepartment.items.map((item) => item.user.id)).toEqual([
+      director.id,
+    ]);
+    expect(byDepartment.items.map((item) => item.user.id)).not.toContain(
+      administrator.id,
+    );
+  });
+
+  it('allows only an administrator to edit or suspend a tenant-wide Director', async () => {
+    const administrator = store.users[0];
+    const director = await create.execute({
+      companyId: administrator.companyId,
+      actorUserId: administrator.id,
+      name: 'Diretora Protegida',
+      username: 'diretora.protegida',
+      email: 'diretora.protegida@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['directorate'],
+      permissionCodes: ['tenant:manage'],
+    });
+    const informationTechnology = await create.execute({
+      companyId: administrator.companyId,
+      actorUserId: administrator.id,
+      name: 'Analista TI',
+      username: 'analista.ti.protecao',
+      email: 'analista.ti.protecao@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['information-technology'],
+      permissionCodes: ['users:update', 'users:manage'],
+    });
+
+    await expect(
+      updateUser({
+        companyId: administrator.companyId,
+        actorUserId: informationTechnology.id,
+        userId: director.id,
+        email: 'diretoria.tomada@empresa.test',
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    await expect(
+      new UpdateUserStatusUseCase(users).execute({
+        companyId: administrator.companyId,
+        actorUserId: informationTechnology.id,
+        currentUserId: informationTechnology.id,
+        userId: director.id,
+        status: 'inactive',
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    await expect(
+      updateUser({
+        companyId: administrator.companyId,
+        actorUserId: administrator.id,
+        userId: director.id,
+        email: 'diretora.atualizada@empresa.test',
+      }),
+    ).resolves.toMatchObject({ email: 'diretora.atualizada@empresa.test' });
+  });
+
   it('does not filter in a direct permission stored outside the department ceiling', async () => {
     const created = await create.execute({
       companyId: store.companies[0].id,
@@ -503,5 +763,168 @@ describe('UpdateUserUseCase', () => {
     });
 
     expect(result.total).toBe(0);
+  });
+
+  it('requires an identified active actor for user updates', async () => {
+    const created = await create.execute({
+      companyId: store.companies[0].id,
+      name: 'Alvo com ator obrigatório',
+      username: 'alvo.ator.obrigatorio',
+      email: 'alvo.ator@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['operations'],
+      permissionCodes: ['operations:view'],
+    });
+
+    await expect(
+      useCase.execute({
+        companyId: store.companies[0].id,
+        userId: created.id,
+        commandId: randomUUID(),
+        expectedVersion: created.version,
+        name: 'Alteração sem responsável',
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('increments the user version and replays the same command without a second write or audit', async () => {
+    const created = await create.execute({
+      companyId: store.companies[0].id,
+      name: 'Versão Controlada',
+      username: 'versao.controlada',
+      email: 'versao@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['operations'],
+      permissionCodes: ['operations:view'],
+    });
+    const commandId = randomUUID();
+    const input = {
+      companyId: store.companies[0].id,
+      actorUserId: store.users[0].id,
+      userId: created.id,
+      commandId,
+      expectedVersion: created.version,
+      name: 'Versão Atualizada',
+    };
+
+    const first = await useCase.execute(input);
+    const replay = await useCase.execute(input);
+
+    expect(first).toMatchObject({ version: 2, idempotent: false });
+    expect(replay).toMatchObject({ version: 2, idempotent: true });
+    expect(store.userUpdateHistory).toHaveLength(1);
+    expect(store.tenantAuditLogs).toHaveLength(1);
+  });
+
+  it('rejects a stale version and a reused commandId with different data', async () => {
+    const created = await create.execute({
+      companyId: store.companies[0].id,
+      name: 'Concorrência Segura',
+      username: 'concorrencia.segura',
+      email: 'concorrencia@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['operations'],
+      permissionCodes: ['operations:view'],
+    });
+    const commandId = randomUUID();
+    await useCase.execute({
+      companyId: store.companies[0].id,
+      actorUserId: store.users[0].id,
+      userId: created.id,
+      commandId,
+      expectedVersion: created.version,
+      name: 'Primeiro Resultado',
+    });
+
+    await expect(
+      useCase.execute({
+        companyId: store.companies[0].id,
+        actorUserId: store.users[0].id,
+        userId: created.id,
+        commandId,
+        expectedVersion: created.version,
+        name: 'Payload Divergente',
+      }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(
+      useCase.execute({
+        companyId: store.companies[0].id,
+        actorUserId: store.users[0].id,
+        userId: created.id,
+        commandId: randomUUID(),
+        expectedVersion: created.version,
+        email: 'stale@empresa.test',
+      }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(store.userUpdateHistory).toHaveLength(1);
+    expect(store.tenantAuditLogs).toHaveLength(1);
+  });
+
+  it('treats an omitted job title and an explicit empty job title as different commands', async () => {
+    const created = await create.execute({
+      companyId: store.companies[0].id,
+      name: 'Cargo Idempotente',
+      username: 'cargo.idempotente',
+      email: 'cargo.idempotente@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['operations'],
+      permissionCodes: ['operations:view'],
+    });
+    const command = {
+      companyId: store.companies[0].id,
+      actorUserId: store.users[0].id,
+      userId: created.id,
+      commandId: randomUUID(),
+      expectedVersion: created.version,
+      name: 'Cargo Idempotente Atualizado',
+    };
+
+    await useCase.execute(command);
+
+    await expect(
+      useCase.execute({ ...command, jobTitle: '   ' }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(store.userUpdateHistory).toHaveLength(1);
+    expect(store.tenantAuditLogs).toHaveLength(1);
+  });
+
+  it('does not overwrite an intermediate change when an old command is replayed later', async () => {
+    const created = await create.execute({
+      companyId: store.companies[0].id,
+      name: 'Replay Tardio',
+      username: 'replay.tardio',
+      email: 'replay@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['operations'],
+      permissionCodes: ['operations:view'],
+    });
+    const firstCommand = {
+      companyId: store.companies[0].id,
+      actorUserId: store.users[0].id,
+      userId: created.id,
+      commandId: randomUUID(),
+      expectedVersion: created.version,
+      name: 'Nome Confirmado',
+    };
+    const first = await useCase.execute(firstCommand);
+    await useCase.execute({
+      companyId: store.companies[0].id,
+      actorUserId: store.users[0].id,
+      userId: created.id,
+      commandId: randomUUID(),
+      expectedVersion: first.version,
+      email: 'intermediaria@empresa.test',
+    });
+
+    const replay = await useCase.execute(firstCommand);
+
+    expect(replay).toMatchObject({
+      name: 'Nome Confirmado',
+      email: 'intermediaria@empresa.test',
+      version: 3,
+      idempotent: true,
+    });
+    expect(store.userUpdateHistory).toHaveLength(2);
+    expect(store.tenantAuditLogs).toHaveLength(2);
   });
 });

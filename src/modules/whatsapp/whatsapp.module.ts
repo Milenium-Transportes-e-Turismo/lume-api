@@ -4,8 +4,8 @@ import { WhatsAppMediaStorage } from '../../application/contracts/whatsapp-media
 import { WhatsAppRepository } from '../../application/contracts/whatsapp.repository';
 import {
   CreateHumanOutboundWhatsAppUseCase,
-  EnsureWhatsAppConversationUseCase,
   QueryWhatsAppUseCase,
+  StartHumanWhatsAppConversationUseCase,
   TransitionWhatsAppConversationUseCase,
 } from '../../application/use-cases/whatsapp/whatsapp.use-cases';
 import { EvolutionWebhookService } from '../../infra/integrations/evolution/evolution-webhook.service';
@@ -62,9 +62,9 @@ import { CommercialModule } from '../commercial/commercial.module';
     WhatsAppHistoryImportService,
     WhatsAppContactsService,
     {
-      provide: EnsureWhatsAppConversationUseCase,
+      provide: StartHumanWhatsAppConversationUseCase,
       useFactory: (repository: WhatsAppRepository) =>
-        new EnsureWhatsAppConversationUseCase(repository),
+        new StartHumanWhatsAppConversationUseCase(repository),
       inject: [WhatsAppRepository],
     },
     {

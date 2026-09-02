@@ -1,4 +1,8 @@
 import { forbidden } from '../../core/errors/app-error';
+import {
+  canExercisePermission,
+  hasTenantWideAuthority,
+} from '../access/tenant-authority';
 
 export const PRE_ADMISSION_DEFAULT_VALIDITY_DAYS = 30;
 
@@ -10,17 +14,27 @@ export const PRE_ADMISSION_MANAGEMENT_DEPARTMENTS = [
 ] as const;
 
 type PreAdmissionManagementAuthority = {
+  readonly isAdministrator: boolean;
   readonly departments: readonly string[];
+  readonly permissionCodes?: readonly string[];
   readonly permissions: readonly string[];
+  readonly documentAccessMode?: string;
 };
 
 export function canManagePreAdmission(
   authority: PreAdmissionManagementAuthority,
 ): boolean {
+  if (
+    hasTenantWideAuthority(authority) &&
+    canExercisePermission(authority, 'documents:manage') &&
+    (authority.isAdministrator || authority.departments.includes('directorate'))
+  ) {
+    return true;
+  }
   return (
     PRE_ADMISSION_MANAGEMENT_DEPARTMENTS.some((department) =>
       authority.departments.includes(department),
-    ) && authority.permissions.includes('documents:manage')
+    ) && canExercisePermission(authority, 'documents:manage')
   );
 }
 
@@ -29,7 +43,7 @@ export function assertCanManagePreAdmission(
 ): void {
   if (!canManagePreAdmission(authority)) {
     throw forbidden(
-      'Somente RH ou Departamento Pessoal com permissão específica de gestão documental pode administrar acessos de pré-admissão.',
+      'A pré-admissão exige RH ou Departamento Pessoal com gestão documental, ou autoridade ampla no tenant.',
     );
   }
 }

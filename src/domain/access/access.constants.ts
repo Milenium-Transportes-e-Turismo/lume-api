@@ -1,11 +1,13 @@
 export const ASSIGNABLE_DEPARTMENTS = [
   'client-company',
+  'human-resources',
   'commercial',
   'purchasing',
   'controllership',
   'personnel-department',
   'financial',
   'management',
+  'directorate',
   'maintenance',
   'monitoring',
   'operations',
@@ -18,23 +20,21 @@ export const ASSIGNABLE_DEPARTMENT_LABELS: Readonly<
   Record<AssignableDepartment, string>
 > = {
   'client-company': 'Empresa cliente',
+  'human-resources': 'Recursos Humanos',
   commercial: 'Comercial',
   purchasing: 'Compras',
   controllership: 'Controladoria',
   'personnel-department': 'Departamento Pessoal',
   financial: 'Financeiro',
   management: 'Gerência',
+  directorate: 'Diretoria',
   maintenance: 'Manutenção',
   monitoring: 'Monitoramento',
   operations: 'Operacional',
   'information-technology': 'Tecnologia da Informação (TI)',
 };
 
-export const LEGACY_DEPARTMENTS = [
-  'human-resources',
-  'controlling',
-  'cleaning',
-] as const;
+export const LEGACY_DEPARTMENTS = ['controlling', 'cleaning'] as const;
 
 export const DEPARTMENTS = [
   'client-company',
@@ -46,6 +46,7 @@ export const DEPARTMENTS = [
   'maintenance',
   'monitoring',
   'management',
+  'directorate',
   'operations',
   'cleaning',
   'financial',
@@ -53,6 +54,14 @@ export const DEPARTMENTS = [
 ] as const;
 
 export type Department = (typeof DEPARTMENTS)[number];
+
+export type InternalDepartment = Exclude<Department, 'client-company'>;
+
+export const INTERNAL_DEPARTMENTS: readonly InternalDepartment[] =
+  DEPARTMENTS.filter(
+    (department): department is InternalDepartment =>
+      department !== 'client-company',
+  );
 
 export const SUPPORTED_USER_DEPARTMENTS = [
   ...ASSIGNABLE_DEPARTMENTS,
@@ -84,6 +93,7 @@ export function presentUserDepartment(
 }
 
 export const PERMISSION_RESOURCES = [
+  'tenant',
   'dashboard',
   'users',
   'human-resources',
@@ -110,6 +120,7 @@ export const PERMISSION_RESOURCES = [
   'documents',
   'invoices',
   'service-requests',
+  'service-confirmations',
   'routing-companies',
   'routing-contracts',
   'passengers',
@@ -123,6 +134,7 @@ export const PERMISSION_ACTIONS = [
   'update',
   'delete',
   'manage',
+  'attend',
   'use',
   'approve',
   'export',
@@ -135,6 +147,7 @@ export type PermissionResource = (typeof PERMISSION_RESOURCES)[number];
 export type PermissionAction = (typeof PERMISSION_ACTIONS)[number];
 
 export const PERMISSION_ACTIONS_BY_RESOURCE = {
+  tenant: ['manage'],
   dashboard: ['view'],
   users: ['view', 'create', 'update', 'manage'],
   'human-resources': ['view', 'create', 'update', 'delete', 'manage'],
@@ -157,7 +170,7 @@ export const PERMISSION_ACTIONS_BY_RESOURCE = {
   ],
   clients: ['view', 'create', 'update', 'manage', 'history'],
   'ai-agents': ['view', 'create', 'update', 'delete', 'manage', 'use'],
-  'whatsapp-conversations': ['view', 'manage'],
+  'whatsapp-conversations': ['view', 'attend', 'manage'],
   manuals: ['view', 'create', 'update', 'delete', 'manage'],
   reports: ['view', 'create', 'update', 'delete', 'manage', 'export'],
   settings: ['view', 'update', 'manage'],
@@ -177,6 +190,7 @@ export const PERMISSION_ACTIONS_BY_RESOURCE = {
   ],
   invoices: ['view', 'create', 'update', 'delete', 'manage'],
   'service-requests': ['view', 'create', 'update', 'manage'],
+  'service-confirmations': ['approve'],
   'routing-companies': ['view', 'create', 'update', 'manage'],
   'routing-contracts': [
     'view',
@@ -218,12 +232,23 @@ export const EMPLOYEE_SELF_SERVICE_PERMISSIONS = [
   'documents:update',
 ] as const satisfies readonly PermissionCode[];
 
+export const DOCUMENT_PORTAL_PERMISSIONS = [
+  'documents:view',
+  'documents:create',
+  'documents:update',
+  'profile:view',
+  'profile:update',
+  'support:view',
+  'support:create',
+] as const satisfies readonly PermissionCode[];
+
 export const MANAGEMENT_DEPARTMENT_PERMISSIONS = [
   'dashboard:view',
   'ai-agents:use',
   'clients:view',
   'clients:create',
   'clients:update',
+  'service-confirmations:approve',
   'manuals:view',
   'manuals:create',
   'manuals:update',
@@ -271,6 +296,35 @@ export const ALL_PERMISSION_CODES: readonly PermissionCode[] =
       (action) => `${resource}:${action}` as PermissionCode,
     ),
   );
+
+export const TENANT_WIDE_PERMISSION =
+  'tenant:manage' as const satisfies PermissionCode;
+
+export const CROSS_DEPARTMENT_INTERNAL_PERMISSIONS = [
+  'whatsapp-conversations:view',
+  'whatsapp-conversations:attend',
+] as const satisfies readonly PermissionCode[];
+
+const PLATFORM_ADMINISTRATION_RESOURCES = new Set<PermissionResource>([
+  'tenant',
+  'users',
+  'settings',
+  'license',
+]);
+
+export const TENANT_BUSINESS_PERMISSION_CODES: readonly PermissionCode[] =
+  ALL_PERMISSION_CODES.filter((permission) => {
+    const resource = permission.slice(
+      0,
+      permission.indexOf(':'),
+    ) as PermissionResource;
+    return !PLATFORM_ADMINISTRATION_RESOURCES.has(resource);
+  });
+
+export const DIRECTORATE_DEPARTMENT_PERMISSIONS: readonly PermissionCode[] = [
+  TENANT_WIDE_PERMISSION,
+  ...TENANT_BUSINESS_PERMISSION_CODES,
+];
 
 const permissionCodeSet = new Set<string>(ALL_PERMISSION_CODES);
 
@@ -443,6 +497,7 @@ export const DEFAULT_DEPARTMENT_PERMISSIONS: Readonly<
     'reports:export',
   ],
   management: MANAGEMENT_DEPARTMENT_PERMISSIONS,
+  directorate: DIRECTORATE_DEPARTMENT_PERMISSIONS,
   operations: [
     'dashboard:view',
     'operations:view',
@@ -562,6 +617,11 @@ export function allowedPermissionsForDepartments(
     for (const permission of DEFAULT_DEPARTMENT_PERMISSIONS[department]) {
       allowed.add(permission);
     }
+    if (department !== 'client-company') {
+      for (const permission of CROSS_DEPARTMENT_INTERNAL_PERMISSIONS) {
+        allowed.add(permission);
+      }
+    }
   }
 
   return Array.from(allowed).sort();
@@ -580,6 +640,14 @@ export function departmentsAllowingPermission(
 ): UserDepartment[] {
   if (isImplicitPermissionCode(permission)) {
     return [...DEPARTMENTS];
+  }
+
+  if (
+    CROSS_DEPARTMENT_INTERNAL_PERMISSIONS.includes(
+      permission as (typeof CROSS_DEPARTMENT_INTERNAL_PERMISSIONS)[number],
+    )
+  ) {
+    return DEPARTMENTS.filter((department) => department !== 'client-company');
   }
 
   return DEPARTMENTS.filter((department) =>

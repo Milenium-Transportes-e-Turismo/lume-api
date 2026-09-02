@@ -28,6 +28,7 @@ import {
   type TransitionCommand,
   WhatsAppRepository,
 } from '../src/application/contracts/whatsapp.repository';
+import { userMutationAuthorizationFingerprint } from '../src/domain/access/user-management-policy';
 import {
   dateOnlyFromDateTime,
   parseBusinessDateTime,
@@ -190,13 +191,19 @@ async function createLegacyImportPackage(options: {
 }
 
 function configureEnvironment(mediaStoragePath: string): string {
-  const databaseUrl = process.env.TEST_DATABASE_URL;
-  if (!databaseUrl) {
+  const configuredDatabaseUrl = process.env.TEST_DATABASE_URL?.trim();
+  if (!configuredDatabaseUrl) {
     throw new Error(
       'TEST_DATABASE_URL é obrigatório para o E2E e deve apontar para um banco descartável.',
     );
   }
-  const databaseName = new URL(databaseUrl).pathname.toLowerCase();
+  const parsedDatabaseUrl = new URL(configuredDatabaseUrl);
+  const configuredSchema = parsedDatabaseUrl.searchParams.get('schema');
+  if (configuredSchema) {
+    parsedDatabaseUrl.searchParams.set('schema', configuredSchema.trim());
+  }
+  const databaseUrl = parsedDatabaseUrl.toString();
+  const databaseName = parsedDatabaseUrl.pathname.toLowerCase();
   if (!databaseName.includes('test')) {
     throw new Error('TEST_DATABASE_URL deve conter "test" no nome do banco.');
   }
@@ -587,6 +594,154 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         remember: false,
       })
       .expect(413);
+  });
+
+  it('atualiza usuário com versão, comando idempotente e auditoria atômica', async () => {
+    const targetKey = randomUUID();
+    const target = await prisma.user.create({
+      data: {
+        companyId: tenantId,
+        name: 'Usuário Versionado E2E',
+        username: `usuario.versionado.${targetKey.slice(0, 8)}`,
+        usernameNormalized: `usuario.versionado.${targetKey.slice(0, 8)}`,
+        email: `usuario.versionado.${targetKey}@example.test`,
+        emailNormalized: `usuario.versionado.${targetKey}@example.test`,
+        passwordHash: 'hash-e2e-sem-uso',
+        departments: ['operations'],
+        permissionCodes: ['operations:view'],
+      },
+    });
+    const commandId = randomUUID();
+    const payload = {
+      commandId,
+      expectedVersion: target.version,
+      name: 'Usuário Atualizado E2E',
+    };
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/users/${target.id}`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({ name: 'Sem controle concorrente' })
+      .expect(400);
+
+    const [first, concurrentReplay] = await Promise.all([
+      request(app.getHttpServer())
+        .patch(`/api/v1/users/${target.id}`)
+        .set('authorization', `Bearer ${accessToken}`)
+        .send(payload)
+        .expect(200),
+      request(app.getHttpServer())
+        .patch(`/api/v1/users/${target.id}`)
+        .set('authorization', `Bearer ${accessToken}`)
+        .send(payload)
+        .expect(200),
+    ]);
+    expect([first.body, concurrentReplay.body]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'Usuário Atualizado E2E',
+          version: target.version + 1,
+          idempotent: false,
+        }),
+        expect.objectContaining({
+          name: 'Usuário Atualizado E2E',
+          version: target.version + 1,
+          idempotent: true,
+        }),
+      ]),
+    );
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/users/${target.id}`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: target.version,
+        email: 'stale.user@example.test',
+      })
+      .expect(409);
+
+    await expect(
+      Promise.all([
+        prisma.userUpdateHistory.count({
+          where: { companyId: tenantId, commandId },
+        }),
+        prisma.tenantAuditLog.count({
+          where: {
+            companyId: tenantId,
+            targetType: 'user',
+            targetId: target.id,
+            action: 'USER_UPDATED',
+          },
+        }),
+      ]),
+    ).resolves.toEqual([1, 1]);
+
+    const documentCommandId = randomUUID();
+    const documentPayload = {
+      commandId: documentCommandId,
+      expectedVersion: target.version + 1,
+      jobTitle: 'Motorista',
+    };
+    const synchronizedReplays = await Promise.all([
+      request(app.getHttpServer())
+        .patch(`/api/v1/users/${target.id}`)
+        .set('authorization', `Bearer ${accessToken}`)
+        .send(documentPayload),
+      request(app.getHttpServer())
+        .patch(`/api/v1/users/${target.id}`)
+        .set('authorization', `Bearer ${accessToken}`)
+        .send(documentPayload),
+    ]);
+    expect(
+      synchronizedReplays.map(({ status }) => status),
+      JSON.stringify(synchronizedReplays.map(({ body }) => body)),
+    ).toEqual([200, 200]);
+
+    const [documentHistory, documentRequest, synchronizationAuditCount] =
+      await Promise.all([
+        prisma.userUpdateHistory.findUniqueOrThrow({
+          where: {
+            companyId_commandId: {
+              companyId: tenantId,
+              commandId: documentCommandId,
+            },
+          },
+          select: {
+            documentSyncFingerprint: true,
+            documentSynchronizedAt: true,
+            documentRequestId: true,
+            documentSyncResult: true,
+          },
+        }),
+        prisma.documentRequest.findUniqueOrThrow({
+          where: {
+            companyId_commandId: {
+              companyId: tenantId,
+              commandId: documentCommandId,
+            },
+          },
+          select: { id: true, version: true },
+        }),
+        prisma.tenantAuditLog.count({
+          where: {
+            companyId: tenantId,
+            action: 'document.request.synchronize-profile',
+            targetType: 'document-request',
+          },
+        }),
+      ]);
+    expect(documentHistory).toMatchObject({
+      documentSyncFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      documentSynchronizedAt: expect.any(Date),
+      documentRequestId: documentRequest.id,
+      documentSyncResult: expect.objectContaining({
+        requestId: documentRequest.id,
+        createdRequest: true,
+      }),
+    });
+    expect(documentRequest.version).toBe(1);
+    expect(synchronizationAuditCount).toBe(1);
   });
 
   it('persiste inbound antes da outbox e trata webhook duplicado', async () => {
@@ -1680,7 +1835,9 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         'CLIENT_COMPANY',
         'COMMERCIAL',
         'CONTROLLING',
+        'DIRECTORATE',
         'FINANCIAL',
+        'HUMAN_RESOURCES',
         'INFORMATION_TECHNOLOGY',
         'MAINTENANCE',
         'MANAGEMENT',
@@ -2473,7 +2630,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     ).toBe(2);
   });
 
-  it('impede que um token de outro atendente devolva a conversa ao bot', async () => {
+  it('permite que um token autorizado devolva a conversa ao bot e preserva o responsável anterior', async () => {
     const otherAttendantSuffix = randomUUID().slice(0, 8);
     const otherAttendant = await prisma.user.create({
       data: {
@@ -2517,10 +2674,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       )
       .set('authorization', `Bearer ${accessToken}`)
       .send({ commandId, expectedVersion: conversation.version })
-      .expect(403)
-      .expect(({ body }) => {
-        expect(body.code).toBe('FORBIDDEN');
-      });
+      .expect(201);
 
     await expect(
       prisma.whatsAppConversation.findUniqueOrThrow({
@@ -2529,16 +2683,28 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         },
       }),
     ).resolves.toMatchObject({
-      conversationState: 'HUMAN_ACTIVE',
-      flowStep: 'HUMAN_SERVICE',
-      assignedToUserId: otherAttendant.id,
-      version: conversation.version,
+      conversationState: 'BOT_ACTIVE',
+      assignedToUserId: null,
+      version: conversation.version + 1,
     });
     await expect(
-      prisma.whatsAppConversationTransition.count({
-        where: { companyId: tenantId, commandId },
+      prisma.whatsAppConversationTransition.findUniqueOrThrow({
+        where: {
+          companyId_commandId: { companyId: tenantId, commandId },
+        },
       }),
-    ).resolves.toBe(0);
+    ).resolves.toMatchObject({
+      actorUserId: expect.any(String),
+      metadata: {
+        assignment: {
+          previousAssignedToUserId: otherAttendant.id,
+          resultingAssignedToUserId: null,
+          changedByUserId: expect.any(String),
+          cause: 'return-to-bot',
+        },
+        quoteRequestId: null,
+      },
+    });
   });
 
   it('não expõe conversa, mensagens, transições, orçamento ou mídia fora do departamento', async () => {
@@ -2607,7 +2773,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     }
   });
 
-  it('impede encerramento por outro atendente ou departamento sem produzir efeitos', async () => {
+  it('permite substituição entre atendentes autorizados e mantém o isolamento departamental', async () => {
     const suffix = randomUUID().slice(0, 8);
     const [otherCommercialOwner, operationsOwner] = await Promise.all([
       prisma.user.create({
@@ -2678,82 +2844,114 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
           },
         }),
       ]);
-    const attempts = [
-      {
-        conversation: assignedConversation,
-        expectedMessage:
-          'Somente o atendente responsável pode executar esta ação na conversa atribuída.',
+    const replyCommandId = randomUUID();
+    const reply = await request(app.getHttpServer())
+      .post(
+        `/api/v1/whatsapp/conversations/${assignedConversation.id}/messages`,
+      )
+      .set('authorization', `Bearer ${commercialAccessToken}`)
+      .send({
+        commandId: replyCommandId,
+        idempotencyKey: randomUUID(),
+        expectedVersion: assignedConversation.version,
+        text: 'Outro atendente autorizado deu continuidade ao atendimento.',
+      })
+      .expect(201);
+    expect(reply.body).toMatchObject({
+      message: {
+        sentBy: {
+          id: commercialAttendant.id,
+          name: commercialAttendant.name,
+        },
       },
-      {
-        conversation: otherDepartmentConversation,
-        expectedMessage:
-          'Somente um usuário do departamento responsável pode executar esta ação.',
+      conversation: {
+        assignedTo: {
+          id: otherCommercialOwner.id,
+          name: otherCommercialOwner.name,
+        },
+        version: assignedConversation.version + 1,
       },
-    ];
+    });
+    const authorizedCommandId = randomUUID();
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/whatsapp/conversations/${assignedConversation.id}/actions/close`,
+      )
+      .set('authorization', `Bearer ${commercialAccessToken}`)
+      .send({
+        commandId: authorizedCommandId,
+        expectedVersion: reply.body.conversation.version,
+        reason: 'Atendimento concluído por outro atendente autorizado.',
+      })
+      .expect(201);
+    await expect(
+      prisma.whatsAppConversation.findUniqueOrThrow({
+        where: {
+          id_companyId: {
+            id: assignedConversation.id,
+            companyId: tenantId,
+          },
+        },
+      }),
+    ).resolves.toMatchObject({
+      conversationState: 'CLOSED',
+      assignedToUserId: null,
+      version: assignedConversation.version + 2,
+    });
+    await expect(
+      prisma.whatsAppConversationTransition.findUniqueOrThrow({
+        where: {
+          companyId_commandId: {
+            companyId: tenantId,
+            commandId: authorizedCommandId,
+          },
+        },
+      }),
+    ).resolves.toMatchObject({
+      actorUserId: commercialAttendant.id,
+      metadata: {
+        assignment: {
+          previousAssignedToUserId: otherCommercialOwner.id,
+          resultingAssignedToUserId: null,
+          changedByUserId: commercialAttendant.id,
+          cause: 'close',
+        },
+        quoteRequestId: null,
+        reason: 'Atendimento concluído por outro atendente autorizado.',
+      },
+    });
 
-    for (const { conversation, expectedMessage } of attempts) {
-      const commandId = randomUUID();
-      await request(app.getHttpServer())
-        .post(`/api/v1/whatsapp/conversations/${conversation.id}/actions/close`)
-        .set('authorization', `Bearer ${commercialAccessToken}`)
-        .send({
-          commandId,
-          expectedVersion: conversation.version,
-          reason: 'Tentativa de encerramento não autorizada.',
-        })
-        .expect(403)
-        .expect(({ body }) =>
-          expect(body).toMatchObject({
-            code: 'FORBIDDEN',
-            message: expectedMessage,
-          }),
-        );
-
-      await expect(
-        prisma.whatsAppConversation.findUniqueOrThrow({
-          where: {
-            id_companyId: { id: conversation.id, companyId: tenantId },
-          },
-        }),
-      ).resolves.toMatchObject({
-        conversationState: 'HUMAN_ACTIVE',
-        assignedToUserId: conversation.assignedToUserId,
-        closedAt: null,
-        version: conversation.version,
-      });
-      await expect(
-        prisma.whatsAppConversationTransition.count({
-          where: { companyId: tenantId, commandId },
-        }),
-      ).resolves.toBe(0);
-      await expect(
-        prisma.integrationOutbox.count({
-          where: {
+    const deniedCommandId = randomUUID();
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/whatsapp/conversations/${otherDepartmentConversation.id}/actions/close`,
+      )
+      .set('authorization', `Bearer ${commercialAccessToken}`)
+      .send({
+        commandId: deniedCommandId,
+        expectedVersion: otherDepartmentConversation.version,
+        reason: 'Tentativa fora do departamento responsável.',
+      })
+      .expect(403);
+    await expect(
+      prisma.whatsAppConversation.findUniqueOrThrow({
+        where: {
+          id_companyId: {
+            id: otherDepartmentConversation.id,
             companyId: tenantId,
-            aggregateId: conversation.id,
-            topic: 'whatsapp.outbound.requested',
           },
-        }),
-      ).resolves.toBe(0);
-      await expect(
-        prisma.whatsAppMessage.count({
-          where: {
-            companyId: tenantId,
-            conversationId: conversation.id,
-            direction: 'OUTBOUND',
-          },
-        }),
-      ).resolves.toBe(0);
-      await expect(
-        prisma.tenantAuditLog.count({
-          where: {
-            companyId: tenantId,
-            targetId: conversation.id,
-            action: 'whatsapp.conversation.close',
-          },
-        }),
-      ).resolves.toBe(0);
-    }
+        },
+      }),
+    ).resolves.toMatchObject({
+      conversationState: 'HUMAN_ACTIVE',
+      assignedToUserId: operationsOwner.id,
+      version: otherDepartmentConversation.version,
+    });
+    await expect(
+      prisma.whatsAppConversationTransition.count({
+        where: { companyId: tenantId, commandId: deniedCommandId },
+      }),
+    ).resolves.toBe(0);
   });
 
   it('solicita e aceita transferência somente pelo departamento de destino', async () => {
@@ -2772,7 +2970,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
           emailNormalized: outsiderEmail,
           passwordHash: 'hash-e2e-sem-uso',
           departments: ['commercial'],
-          permissionCodes: ['whatsapp-conversations:manage'],
+          permissionCodes: ['whatsapp-conversations:attend'],
         },
       }),
       prisma.user.create({
@@ -2784,10 +2982,8 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
           email: destinationEmail,
           emailNormalized: destinationEmail,
           passwordHash: 'hash-e2e-sem-uso',
-          // Prova técnica do aceite no backend. O rollout para um usuário
-          // exclusivamente Operacional aguarda a decisão da matriz de acesso.
-          departments: ['commercial', 'operations'],
-          permissionCodes: ['whatsapp-conversations:manage'],
+          departments: ['operations'],
+          permissionCodes: ['whatsapp-conversations:attend'],
         },
       }),
     ]);
@@ -3743,7 +3939,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       });
   });
 
-  it('altera o status comercial somente pelo atendente responsável e registra auditoria', async () => {
+  it('altera o status comercial por operador autorizado e registra auditoria', async () => {
     const actor = await prisma.user.findFirstOrThrow({
       where: { companyId: tenantId, usernameNormalized: 'admin.e2e' },
     });
@@ -4129,6 +4325,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       where: { id: outbound.id },
       data: {
         status: 'PROCESSING',
+        processingProvider: null,
         executionId: outboundExecutionId,
         acceptedAt: new Date(),
         executionLeaseUntil: new Date(Date.now() + 60_000),
@@ -4653,7 +4850,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       },
       data: { assignedToUserId: otherAttendant.id },
     });
-    await request(app.getHttpServer())
+    const replacedAssignment = await request(app.getHttpServer())
       .post('/api/v1/whatsapp/quote-proposals')
       .set('authorization', `Bearer ${accessToken}`)
       .send({
@@ -4669,7 +4866,22 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         vehicleAtDisposal: false,
         localTransfers: false,
       })
-      .expect(403);
+      .expect(201);
+    expect(replacedAssignment.body).toMatchObject({
+      id: newProposal.body.id,
+      stage: 'pending',
+      idempotent: false,
+      quoteRequest: {
+        sequence: 2,
+        status: 'under-review',
+        passengerCount: 24,
+      },
+      conversation: {
+        id: proposalConversation.id,
+        assignedTo: { id: actor.id, name: actor.name },
+        version: 8,
+      },
+    });
     expect(
       await prisma.whatsAppConversation.findUniqueOrThrow({
         where: {
@@ -4680,8 +4892,8 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         },
       }),
     ).toMatchObject({
-      assignedToUserId: otherAttendant.id,
-      version: 7,
+      assignedToUserId: actor.id,
+      version: 8,
     });
     expect(
       await prisma.quoteRequest.count({
@@ -4691,6 +4903,28 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         },
       }),
     ).toBe(2);
+    await expect(
+      prisma.whatsAppConversationTransition.findFirstOrThrow({
+        where: {
+          companyId: tenantId,
+          conversationId: proposalConversation.id,
+          actorUserId: actor.id,
+          name: 'take-over',
+          resultingVersion: 8,
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ).resolves.toMatchObject({
+      metadata: expect.objectContaining({
+        source: 'quote-proposal-create',
+        assignment: {
+          previousAssignedToUserId: otherAttendant.id,
+          resultingAssignedToUserId: actor.id,
+          changedByUserId: actor.id,
+          cause: 'quote-proposal-create',
+        },
+      }),
+    });
     expect(actor.isActive).toBe(true);
   });
 
@@ -5679,6 +5913,23 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         isAdministrator: false,
         departments: ['management'],
         permissionCodes: ['users:manage'],
+        command: {
+          commandId: randomUUID(),
+          expectedVersion: first.version,
+          requestFingerprint: 'administrator-concurrency'.padEnd(64, '0'),
+          actorUserId: first.id,
+          changedFields: ['isAdministrator', 'departments', 'permissionCodes'],
+        },
+        mutationSnapshot: {
+          actorUserId: first.id,
+          actorUpdatedAt: first.updatedAt,
+          actorVersion: first.version,
+          actorAuthorizationFingerprint: userMutationAuthorizationFingerprint({
+            ...first,
+            companyIsActive: true,
+          }),
+          targetUpdatedAt: first.updatedAt,
+        },
       }),
       users.updateStatusWithAdministratorInvariant(
         isolatedCompanyId,
@@ -7113,7 +7364,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     };
     await request(app.getHttpServer())
       .post(`/api/v1/commercial/quote-requests/${quote.id}/confirmed-services`)
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', `Bearer ${operationalToken}`)
       .send(confirmationPayload)
       .expect(403);
     const confirmed = await request(app.getHttpServer())

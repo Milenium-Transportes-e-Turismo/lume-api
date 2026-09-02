@@ -184,6 +184,14 @@ export interface EnsureWhatsAppConversationResult {
   readonly assignedTo: { readonly id: string; readonly name: string } | null;
 }
 
+export interface StartHumanWhatsAppConversationInput {
+  readonly companyId: string;
+  readonly phoneNormalized: string;
+  readonly commandId: string;
+  readonly actorUserId: string;
+  readonly targetDepartment?: Department;
+}
+
 export interface MessageListQuery {
   page: number;
   pageSize: number;
@@ -203,11 +211,15 @@ export abstract class WhatsAppRepository {
     input: PersistWebhookMessageInput,
   ): Promise<PersistWebhookMessageResult>;
   abstract transition(input: TransitionCommand): Promise<unknown>;
-  abstract ensureConversationForPhone(
-    companyId: string,
-    phoneNormalized: string,
-  ): Promise<EnsureWhatsAppConversationResult>;
+  abstract startHumanConversation(
+    input: StartHumanWhatsAppConversationInput,
+  ): Promise<
+    EnsureWhatsAppConversationResult & { readonly idempotent: boolean }
+  >;
   abstract createOutbound(input: CreateOutboundInput): Promise<unknown>;
+  abstract authorizeHumanOutbound(
+    input: CreateHumanOutboundInput,
+  ): Promise<void>;
   abstract createHumanOutbound(
     input: CreateHumanOutboundInput,
   ): Promise<unknown>;

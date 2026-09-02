@@ -6,6 +6,7 @@ import { LicenseController } from './license.controller';
 
 function principal(
   departments: AuthenticatedPrincipal['departments'],
+  isAdministrator = false,
 ): AuthenticatedPrincipal {
   return {
     companyId: '00000000-0000-4000-8000-000000000010',
@@ -16,6 +17,7 @@ function principal(
     email: 'usuario@example.test',
     cpf: null,
     type: 'employee',
+    isAdministrator,
     departments,
     permissionCodes: ['license:view'],
     permissions: ['dashboard:view', 'license:view'],
@@ -43,6 +45,18 @@ describe('LicenseController', () => {
 
   it('bloqueia Comercial mesmo quando a permissão foi injetada diretamente', () => {
     expect(() => controller.status(principal(['commercial']))).toThrow(
+      expect.objectContaining({ code: 'FORBIDDEN' }),
+    );
+  });
+
+  it('permite que Administrador consulte sem fingir vínculo com Gerência', () => {
+    expect(controller.status(principal([], true))).toMatchObject({
+      state: 'active',
+    });
+  });
+
+  it('bloqueia Diretoria porque licença pertence à administração da plataforma', () => {
+    expect(() => controller.status(principal(['directorate']))).toThrow(
       expect.objectContaining({ code: 'FORBIDDEN' }),
     );
   });

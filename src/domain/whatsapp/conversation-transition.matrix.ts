@@ -67,6 +67,14 @@ function assertOpen(current: ConversationSnapshot): void {
   }
 }
 
+function assertInternalServiceDepartment(department: Department): void {
+  if (department === 'client-company') {
+    throw validationError(
+      'Empresa cliente não pode ser o departamento responsável por um atendimento interno.',
+    );
+  }
+}
+
 function assertState(
   current: ConversationSnapshot,
   allowedStates: readonly ConversationSnapshot['conversationState'][],
@@ -156,6 +164,7 @@ export function resolveConversationTransition(
           'Informe o departamento de destino antes de coletar os dados.',
         );
       }
+      assertInternalServiceDepartment(input.targetDepartment);
       if (
         !input.departmentOption ||
         (!/^[2-9]$/.test(input.departmentOption) &&
@@ -344,6 +353,7 @@ export function resolveConversationTransition(
           'Informe o departamento de destino da transferência.',
         );
       }
+      assertInternalServiceDepartment(input.targetDepartment);
       if (input.targetDepartment === current.department) {
         throw validationError(
           'O destino da transferência deve ser diferente do departamento atual.',
@@ -358,6 +368,7 @@ export function resolveConversationTransition(
           'A transferência pendente não possui departamento de destino.',
         );
       }
+      assertInternalServiceDepartment(input.targetDepartment);
       return {
         ...current,
         department: input.targetDepartment,
@@ -388,6 +399,7 @@ export function resolveConversationTransition(
           'Informe o departamento de destino do encaminhamento.',
         );
       }
+      assertInternalServiceDepartment(input.targetDepartment);
       return {
         ...current,
         department: input.targetDepartment,
@@ -402,6 +414,7 @@ export function resolveConversationTransition(
       if (!input.targetDepartment) {
         throw validationError('Informe o novo departamento da conversa.');
       }
+      assertInternalServiceDepartment(input.targetDepartment);
       return {
         ...current,
         department: input.targetDepartment,

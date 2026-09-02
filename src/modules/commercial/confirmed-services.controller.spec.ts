@@ -34,6 +34,28 @@ describe('ConfirmedServicesController', () => {
     ]);
   });
 
+  it('exige a capacidade estreita para marcar requisito não aplicável', () => {
+    const handler = Object.getOwnPropertyDescriptor(
+      ConfirmedServicesController.prototype,
+      'markRequirementNotApplicable',
+    )?.value as object;
+
+    expect(Reflect.getMetadata(REQUIRED_PERMISSIONS, handler)).toEqual([
+      'service-confirmations:approve',
+    ]);
+  });
+
+  it('permite à autoridade da exceção consultar a prontidão', () => {
+    const handler = Object.getOwnPropertyDescriptor(
+      ConfirmedServicesController.prototype,
+      'readiness',
+    )?.value as object;
+
+    expect(Reflect.getMetadata(REQUIRED_PERMISSIONS, handler)).toContain(
+      'service-confirmations:approve',
+    );
+  });
+
   it('deriva tenant e ator do token autenticado', async () => {
     const confirmedServices = { confirm: vi.fn().mockResolvedValue({}) };
     const controller = new ConfirmedServicesController(
@@ -58,6 +80,39 @@ describe('ConfirmedServicesController', () => {
     expect(confirmedServices.confirm).toHaveBeenCalledWith(
       current,
       'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      body,
+    );
+  });
+
+  it('delega a exceção com requisito, ator e tenant derivados da requisição', async () => {
+    const confirmedServices = {
+      markRequirementNotApplicable: vi.fn().mockResolvedValue({}),
+    };
+    const controller = new ConfirmedServicesController(
+      confirmedServices as never,
+    );
+    const current = {
+      id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      companyId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    } as AuthenticatedPrincipal;
+    const body = {
+      commandId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      expectedVersion: 4,
+      reason: 'Serviço sem cobrança antecipada.',
+      evidence: 'Condição registrada na proposta aceita.',
+    };
+
+    await controller.markRequirementNotApplicable(
+      current,
+      'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      'financial',
+      body,
+    );
+
+    expect(confirmedServices.markRequirementNotApplicable).toHaveBeenCalledWith(
+      current,
+      'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      'financial',
       body,
     );
   });

@@ -22,6 +22,7 @@ function principal(
     email: 'motorista@example.com',
     cpf: null,
     type: 'employee',
+    isAdministrator: false,
     departments: ['operations'],
     permissions: ['dashboard:view', 'drivers:view', 'operations:view'],
     clientCategory: null,
@@ -47,18 +48,18 @@ function setup(configOverrides: Readonly<Record<string, unknown>> = {}) {
     listTransitions,
   };
   const commercialQuotes = { currentForConversation: vi.fn() };
-  const ensureConversation = { execute: vi.fn() };
+  const startHumanConversation = { execute: vi.fn() };
   const transition = { execute: vi.fn() };
-  const createHumanOutbound = { execute: vi.fn() };
+  const createHumanOutbound = { authorize: vi.fn(), execute: vi.fn() };
   const mediaStorage = {
     read: vi.fn().mockResolvedValue(Buffer.alloc(0)),
-    write: vi.fn().mockResolvedValue(undefined),
+    write: vi.fn().mockResolvedValue({ created: true }),
     delete: vi.fn().mockResolvedValue(undefined),
   };
   const controller = new WhatsAppPanelController(
     queryUseCase as unknown as QueryWhatsAppUseCase,
     commercialQuotes as unknown as QuoteProposalUseCase,
-    ensureConversation as never,
+    startHumanConversation as never,
     transition as never,
     createHumanOutbound as never,
     {} as never,
@@ -78,7 +79,7 @@ function setup(configOverrides: Readonly<Record<string, unknown>> = {}) {
     getConversation,
     listMessages,
     listTransitions,
-    ensureConversation,
+    startHumanConversation,
     transition,
     createHumanOutbound,
     mediaStorage,
@@ -118,20 +119,17 @@ describe('WhatsAppPanelController conversation scope', () => {
     );
   });
 
-  it('allows a tenant-wide scope only for a manager without departments', () => {
+  it('does not turn a management capability without department into tenant-wide scope', () => {
     const { controller, getConversation } = setup();
     const current = principal({
       departments: [],
       permissions: ['whatsapp-conversations:manage'],
     });
 
-    void controller.detail(current, '00000000-0000-4000-8000-000000000003');
-
-    expect(getConversation).toHaveBeenCalledWith(
-      current.companyId,
-      '00000000-0000-4000-8000-000000000003',
-      { departments: null },
-    );
+    expect(() =>
+      controller.detail(current, '00000000-0000-4000-8000-000000000003'),
+    ).toThrowError(expect.objectContaining({ code: 'FORBIDDEN' }));
+    expect(getConversation).not.toHaveBeenCalled();
   });
 
   it('rejects conversation reads without a department or management access', () => {
@@ -147,17 +145,12 @@ describe('WhatsAppPanelController conversation scope', () => {
 
 describe('WhatsAppPanelController start conversation', () => {
   it('reuses the canonical conversation and assigns the current attendant', async () => {
-    const { controller, ensureConversation, transition } = setup();
-    ensureConversation.execute.mockResolvedValue({
-      id: '00000000-0000-4000-8000-000000000003',
-      version: 7,
-      conversationState: 'closed',
-      assignedTo: null,
-    });
-    transition.execute.mockResolvedValue({
+    const { controller, startHumanConversation } = setup();
+    startHumanConversation.execute.mockResolvedValue({
       id: '00000000-0000-4000-8000-000000000003',
       version: 8,
       conversationState: 'human-active',
+      idempotent: false,
     });
 
     await controller.startConversation(principal(), {
@@ -165,16 +158,29 @@ describe('WhatsAppPanelController start conversation', () => {
       phone: '(34) 99999-9999',
     });
 
-    expect(ensureConversation.execute).toHaveBeenCalledWith(
-      '00000000-0000-4000-8000-000000000002',
-      '5534999999999',
+    expect(startHumanConversation.execute).toHaveBeenCalledWith({
+      companyId: '00000000-0000-4000-8000-000000000002',
+      phoneNormalized: '5534999999999',
+      commandId: '00000000-0000-4000-8000-000000000010',
+      actorUserId: '00000000-0000-4000-8000-000000000001',
+      targetDepartment: undefined,
+    });
+  });
+
+  it('forwards the explicitly selected initial queue', async () => {
+    const { controller, startHumanConversation } = setup();
+
+    await controller.startConversation(
+      principal({ departments: ['operations', 'financial'] }),
+      {
+        commandId: '00000000-0000-4000-8000-000000000010',
+        phone: '(34) 99999-9999',
+        targetDepartment: 'financial',
+      },
     );
-    expect(transition.execute).toHaveBeenCalledWith(
-      expect.objectContaining({
-        name: 'take-over',
-        expectedVersion: 7,
-        actorUserId: '00000000-0000-4000-8000-000000000001',
-      }),
+
+    expect(startHumanConversation.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ targetDepartment: 'financial' }),
     );
   });
 });
@@ -361,6 +367,7 @@ describe('WhatsAppPanelController dashboard indicators', () => {
 
     void controller.dashboard(
       principal({
+        isAdministrator: true,
         departments: [],
         permissions: ['dashboard:view', 'whatsapp-conversations:manage'],
       }),
@@ -387,6 +394,122 @@ describe('WhatsAppPanelController dashboard indicators', () => {
 });
 
 describe('WhatsAppPanelController media messages', () => {
+  it('reuses the same message identity and storage key on an identical retry', async () => {
+    const { controller, createHumanOutbound, mediaStorage } = setup();
+    createHumanOutbound.execute.mockResolvedValue({
+      message: { id: 'message' },
+    });
+    const current = principal({
+      permissions: ['whatsapp-conversations:manage'],
+    });
+    const conversationId = '00000000-0000-4000-8000-000000000003';
+    const body = {
+      commandId: '00000000-0000-4000-8000-000000000010',
+      idempotencyKey: '00000000-0000-4000-8000-000000000011',
+      expectedVersion: 4,
+      caption: 'Comprovante solicitado',
+    };
+    const file = {
+      originalname: 'comprovante.jpg',
+      mimetype: 'image/jpeg',
+      size: 6,
+      buffer: Buffer.from('imagem'),
+    };
+
+    await controller.createMediaMessage(current, conversationId, body, file);
+    await controller.createMediaMessage(current, conversationId, body, file);
+
+    const firstInput = createHumanOutbound.execute.mock.calls[0][0];
+    const retryInput = createHumanOutbound.execute.mock.calls[1][0];
+    expect(retryInput.attachment).toEqual(firstInput.attachment);
+    expect(firstInput.attachment.storageKey).toBe(
+      `v1/${current.companyId}/${conversationId}/${firstInput.attachment.messageId}`,
+    );
+    expect(mediaStorage.write).toHaveBeenNthCalledWith(2, {
+      storageKey: firstInput.attachment.storageKey,
+      content: file.buffer,
+    });
+  });
+
+  it('authorizes a divergent retry before writing another media blob', async () => {
+    const { controller, createHumanOutbound, mediaStorage } = setup();
+    const idempotencyConflict = new Error('idempotency conflict');
+    createHumanOutbound.authorize
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(idempotencyConflict);
+    createHumanOutbound.execute.mockResolvedValueOnce({
+      message: { id: 'message' },
+    });
+    const current = principal({
+      permissions: ['whatsapp-conversations:manage'],
+    });
+    const conversationId = '00000000-0000-4000-8000-000000000003';
+    const body = {
+      commandId: '00000000-0000-4000-8000-000000000010',
+      idempotencyKey: '00000000-0000-4000-8000-000000000011',
+      expectedVersion: 4,
+    };
+
+    await controller.createMediaMessage(current, conversationId, body, {
+      originalname: 'comprovante.jpg',
+      mimetype: 'image/jpeg',
+      size: 6,
+      buffer: Buffer.from('imagem'),
+    });
+    await expect(
+      controller.createMediaMessage(current, conversationId, body, {
+        originalname: 'comprovante.jpg',
+        mimetype: 'image/jpeg',
+        size: 8,
+        buffer: Buffer.from('alterado'),
+      }),
+    ).rejects.toBe(idempotencyConflict);
+
+    const originalAttachment =
+      createHumanOutbound.authorize.mock.calls[0][0].attachment;
+    const conflictingAttachment =
+      createHumanOutbound.authorize.mock.calls[1][0].attachment;
+    expect(conflictingAttachment.messageId).toBe(originalAttachment.messageId);
+    expect(conflictingAttachment.sha256).not.toBe(originalAttachment.sha256);
+    expect(conflictingAttachment.storageKey).toBe(
+      originalAttachment.storageKey,
+    );
+    expect(conflictingAttachment.storageKey).toBe(
+      `v1/${current.companyId}/${conversationId}/${conflictingAttachment.messageId}`,
+    );
+    expect(mediaStorage.write).toHaveBeenCalledOnce();
+    expect(createHumanOutbound.execute).toHaveBeenCalledOnce();
+    expect(mediaStorage.delete).not.toHaveBeenCalled();
+  });
+
+  it('does not write media when the current actor or conversation fails preflight authorization', async () => {
+    const { controller, createHumanOutbound, mediaStorage } = setup();
+    createHumanOutbound.authorize.mockRejectedValue(
+      new Error('preflight forbidden'),
+    );
+
+    await expect(
+      controller.createMediaMessage(
+        principal({ permissions: ['whatsapp-conversations:attend'] }),
+        '00000000-0000-4000-8000-000000000003',
+        {
+          commandId: '00000000-0000-4000-8000-000000000010',
+          idempotencyKey: '00000000-0000-4000-8000-000000000011',
+          expectedVersion: 4,
+        },
+        {
+          originalname: 'comprovante.jpg',
+          mimetype: 'image/jpeg',
+          size: 6,
+          buffer: Buffer.from('imagem'),
+        },
+      ),
+    ).rejects.toThrow('preflight forbidden');
+
+    expect(mediaStorage.write).not.toHaveBeenCalled();
+    expect(createHumanOutbound.execute).not.toHaveBeenCalled();
+  });
+
   it('uses the panel limit instead of the smaller inbound retention limit', async () => {
     const { controller, createHumanOutbound } = setup({
       WHATSAPP_MAX_ATTACHMENT_BYTES: 2,
@@ -463,7 +586,7 @@ describe('WhatsAppPanelController media messages', () => {
     );
   });
 
-  it('removes the stored file when message persistence fails', async () => {
+  it('preserves the stored file when persistence has an ambiguous outcome', async () => {
     const { controller, createHumanOutbound, mediaStorage } = setup();
     createHumanOutbound.execute.mockRejectedValue(
       new Error('persistence failed'),
@@ -486,9 +609,34 @@ describe('WhatsAppPanelController media messages', () => {
         },
       ),
     ).rejects.toThrow('persistence failed');
-    expect(mediaStorage.delete).toHaveBeenCalledWith(
-      expect.stringContaining('/00000000-0000-4000-8000-000000000003/'),
+    expect(mediaStorage.delete).not.toHaveBeenCalled();
+  });
+
+  it('preserves an identical pre-existing file when a retry fails transiently', async () => {
+    const { controller, createHumanOutbound, mediaStorage } = setup();
+    mediaStorage.write.mockResolvedValue({ created: false });
+    createHumanOutbound.execute.mockRejectedValue(
+      new Error('temporary database failure'),
     );
+
+    await expect(
+      controller.createMediaMessage(
+        principal({ permissions: ['whatsapp-conversations:attend'] }),
+        '00000000-0000-4000-8000-000000000003',
+        {
+          commandId: '00000000-0000-4000-8000-000000000010',
+          idempotencyKey: '00000000-0000-4000-8000-000000000011',
+          expectedVersion: 4,
+        },
+        {
+          originalname: 'comprovante.jpg',
+          mimetype: 'image/jpeg',
+          size: 6,
+          buffer: Buffer.from('imagem'),
+        },
+      ),
+    ).rejects.toThrow('temporary database failure');
+    expect(mediaStorage.delete).not.toHaveBeenCalled();
   });
 
   it('persists a WebP selected explicitly as a sticker', async () => {

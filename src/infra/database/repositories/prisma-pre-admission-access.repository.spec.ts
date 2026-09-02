@@ -15,6 +15,7 @@ const authorizedActor = {
   isActive: true,
   status: 'ACTIVE',
   deletedAt: null,
+  isAdministrator: false,
   departments: ['human-resources'],
   permissionCodes: ['documents:manage'],
 };
@@ -72,7 +73,44 @@ function creationInput() {
   };
 }
 
+function withActorRowLock<T extends object>(transaction: T) {
+  return {
+    $queryRaw: vi.fn().mockResolvedValue([{ id: actorUserId }]),
+    ...transaction,
+  };
+}
+
 describe('PrismaPreAdmissionAccessRepository', () => {
+  it('locks the actor row before reading the authoritative access state', async () => {
+    const callOrder: string[] = [];
+    const transaction = {
+      $queryRaw: vi.fn().mockImplementation(async () => {
+        callOrder.push('lock');
+        return [{ id: actorUserId }];
+      }),
+      user: {
+        findUnique: vi.fn().mockImplementation(async () => {
+          callOrder.push('read');
+          return null;
+        }),
+      },
+      preAdmissionAccessHistory: { findUnique: vi.fn() },
+      preAdmissionAccess: { create: vi.fn() },
+    };
+    const prisma = {
+      $transaction: vi.fn(
+        async (work: (client: typeof transaction) => Promise<unknown>) =>
+          work(withActorRowLock(transaction)),
+      ),
+    } as unknown as PrismaService;
+
+    await expect(
+      new PrismaPreAdmissionAccessRepository(prisma).create(creationInput()),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    expect(callOrder).toEqual(['lock', 'read']);
+  });
+
   it('revalidates the authorized RH actor inside the transaction', async () => {
     const transaction = {
       user: { findUnique: vi.fn().mockResolvedValue(null) },
@@ -82,7 +120,7 @@ describe('PrismaPreAdmissionAccessRepository', () => {
     const prisma = {
       $transaction: vi.fn(
         async (work: (client: typeof transaction) => Promise<unknown>) =>
-          work(transaction),
+          work(withActorRowLock(transaction)),
       ),
     } as unknown as PrismaService;
 
@@ -106,7 +144,7 @@ describe('PrismaPreAdmissionAccessRepository', () => {
     const prisma = {
       $transaction: vi.fn(
         async (work: (client: typeof transaction) => Promise<unknown>) =>
-          work(transaction),
+          work(withActorRowLock(transaction)),
       ),
     } as unknown as PrismaService;
 
@@ -164,7 +202,7 @@ describe('PrismaPreAdmissionAccessRepository', () => {
     const prisma = {
       $transaction: vi.fn(
         async (work: (client: typeof transaction) => Promise<unknown>) =>
-          work(transaction),
+          work(withActorRowLock(transaction)),
       ),
     } as unknown as PrismaService;
 
@@ -178,6 +216,8 @@ describe('PrismaPreAdmissionAccessRepository', () => {
         isActive: true,
         status: true,
         deletedAt: true,
+        isAdministrator: true,
+        documentAccessMode: true,
         departments: true,
         permissionCodes: true,
       },
@@ -238,7 +278,7 @@ describe('PrismaPreAdmissionAccessRepository', () => {
     const prisma = {
       $transaction: vi.fn(
         async (work: (client: typeof transaction) => Promise<unknown>) =>
-          work(transaction),
+          work(withActorRowLock(transaction)),
       ),
     } as unknown as PrismaService;
 
@@ -270,7 +310,7 @@ describe('PrismaPreAdmissionAccessRepository', () => {
     const prisma = {
       $transaction: vi.fn(
         async (work: (client: typeof transaction) => Promise<unknown>) =>
-          work(transaction),
+          work(withActorRowLock(transaction)),
       ),
     } as unknown as PrismaService;
 
@@ -314,7 +354,7 @@ describe('PrismaPreAdmissionAccessRepository', () => {
     const prisma = {
       $transaction: vi.fn(
         async (work: (client: typeof transaction) => Promise<unknown>) =>
-          work(transaction),
+          work(withActorRowLock(transaction)),
       ),
     } as unknown as PrismaService;
 
@@ -364,7 +404,7 @@ describe('PrismaPreAdmissionAccessRepository', () => {
     const prisma = {
       $transaction: vi.fn(
         async (work: (client: typeof transaction) => Promise<unknown>) =>
-          work(transaction),
+          work(withActorRowLock(transaction)),
       ),
     } as unknown as PrismaService;
 
@@ -409,7 +449,7 @@ describe('PrismaPreAdmissionAccessRepository', () => {
       .mockRejectedValueOnce({ code: 'P2034' })
       .mockImplementationOnce(
         async (work: (client: typeof transaction) => Promise<unknown>) =>
-          work(transaction),
+          work(withActorRowLock(transaction)),
       );
     const prisma = {
       $transaction: transactionRunner,
@@ -495,7 +535,7 @@ describe('PrismaPreAdmissionAccessRepository', () => {
     const prisma = {
       $transaction: vi.fn(
         async (work: (client: typeof transaction) => Promise<unknown>) =>
-          work(transaction),
+          work(withActorRowLock(transaction)),
       ),
       preAdmissionAccessHistory: {
         findUnique: persistedHistoryLookup,
@@ -563,7 +603,7 @@ describe('PrismaPreAdmissionAccessRepository', () => {
       })
       .mockImplementationOnce(
         async (work: (client: typeof transaction) => Promise<unknown>) =>
-          work(transaction),
+          work(withActorRowLock(transaction)),
       );
     const prisma = {
       $transaction: transactionRunner,

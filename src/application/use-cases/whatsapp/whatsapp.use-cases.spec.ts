@@ -11,6 +11,7 @@ import {
   type MessageListQuery,
   type PersistWebhookMessageInput,
   type ReconcileAutomationOutboxInput,
+  type StartHumanWhatsAppConversationInput,
   type TransitionCommand,
   type TransitionListQuery,
   type WebhookChannelConfiguration,
@@ -23,6 +24,7 @@ import {
   QueryWhatsAppUseCase,
   ReconcileAutomationOutboxUseCase,
   RecordEvolutionResultUseCase,
+  StartHumanWhatsAppConversationUseCase,
   TransitionWhatsAppConversationUseCase,
 } from './whatsapp.use-cases';
 
@@ -43,9 +45,22 @@ class RecordingWhatsAppRepository extends WhatsAppRepository {
     this.calls.push('transition');
     return { operation: 'transition' };
   }
+  async startHumanConversation(_input: StartHumanWhatsAppConversationInput) {
+    this.calls.push('startHumanConversation');
+    return {
+      id: 'conversation',
+      version: 1,
+      conversationState: 'human-active' as const,
+      assignedTo: null,
+      idempotent: false,
+    };
+  }
   async createOutbound(_input: CreateOutboundInput) {
     this.calls.push('createOutbound');
     return { operation: 'createOutbound' };
+  }
+  async authorizeHumanOutbound(_input: CreateHumanOutboundInput) {
+    this.calls.push('authorizeHumanOutbound');
   }
   async createHumanOutbound(_input: CreateHumanOutboundInput) {
     this.calls.push('createHumanOutbound');
@@ -126,19 +141,28 @@ describe('casos de uso WhatsApp', () => {
       name: 'mark-read',
       actorType: 'system',
     });
+    await new StartHumanWhatsAppConversationUseCase(repository).execute({
+      companyId: 'company',
+      phoneNormalized: '5534999999999',
+      commandId: 'start-command',
+      actorUserId: 'user',
+    });
     await new CreateOutboundWhatsAppUseCase(repository).execute({
       ...common,
       automatic: true,
       kind: 'text',
       text: 'Olá',
     });
-    await new CreateHumanOutboundWhatsAppUseCase(repository).execute({
+    const humanOutbound = new CreateHumanOutboundWhatsAppUseCase(repository);
+    const humanCommand = {
       ...common,
       idempotencyKey: 'idempotency',
       expectedVersion: 1,
       actorUserId: 'user',
       text: 'Resposta humana',
-    });
+    };
+    await humanOutbound.authorize(humanCommand);
+    await humanOutbound.execute(humanCommand);
     await new ClaimEvolutionDispatchUseCase(repository).execute({
       companyId: 'company',
       messageId: 'message',
@@ -165,7 +189,9 @@ describe('casos de uso WhatsApp', () => {
     expect(repository.calls).toEqual([
       'persistWebhookMessage',
       'transition',
+      'startHumanConversation',
       'createOutbound',
+      'authorizeHumanOutbound',
       'createHumanOutbound',
       'claimEvolutionDispatch',
       'recordEvolutionResult',

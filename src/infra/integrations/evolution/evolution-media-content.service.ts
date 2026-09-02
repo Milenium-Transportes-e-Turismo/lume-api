@@ -44,6 +44,7 @@ const departmentToPrisma: Readonly<Record<Department, DepartmentCode>> = {
   maintenance: DepartmentCode.MAINTENANCE,
   monitoring: DepartmentCode.MONITORING,
   management: DepartmentCode.MANAGEMENT,
+  directorate: DepartmentCode.DIRECTORATE,
   operations: DepartmentCode.OPERATIONS,
   cleaning: DepartmentCode.CLEANING,
   financial: DepartmentCode.FINANCIAL,

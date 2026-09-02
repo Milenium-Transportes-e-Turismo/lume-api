@@ -5,6 +5,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfirmedServiceRepository } from '../../contracts/confirmed-service.repository';
 import type { AuthenticatedPrincipal } from '../../presenters/user.presenter';
 import {
+  assertCanMarkCommercialServiceRequirementNotApplicable,
   assertCanAttestCommercialServiceRequirement,
   assertCanConfirmCommercialService,
   assertCanViewCommercialServiceReadiness,
@@ -12,6 +13,7 @@ import {
   LEGACY_PRIMARY_SERVICE_ITEM_KEY,
   normalizeCommercialServiceRequirementEvidence,
   normalizeCommercialServiceRequirementKind,
+  normalizeCommercialServiceRequirementReason,
   normalizeConfirmationBasis,
 } from '../../../domain/commercial/confirmed-service';
 
@@ -25,6 +27,13 @@ export interface ConfirmServiceInput {
   readonly commandId: string;
   readonly expectedVersion: number;
   readonly confirmationBasis: string;
+}
+
+export interface MarkCommercialServiceRequirementNotApplicableInput {
+  readonly commandId: string;
+  readonly expectedVersion: number;
+  readonly reason: string;
+  readonly evidence: string;
 }
 
 function fingerprint(value: Readonly<Record<string, unknown>>): string {
@@ -64,6 +73,43 @@ export class ConfirmedServicesService {
       kind,
       commandId: input.commandId,
       expectedVersion: input.expectedVersion,
+      evidence,
+      requestFingerprint,
+    });
+  }
+
+  markRequirementNotApplicable(
+    principal: AuthenticatedPrincipal,
+    quoteRequestId: string,
+    requirement: string,
+    input: MarkCommercialServiceRequirementNotApplicableInput,
+  ) {
+    const kind = normalizeCommercialServiceRequirementKind(requirement);
+    assertCanMarkCommercialServiceRequirementNotApplicable(principal);
+    assertExpectedAcceptedQuoteVersion(input.expectedVersion);
+    const reason = normalizeCommercialServiceRequirementReason(input.reason);
+    const evidence = normalizeCommercialServiceRequirementEvidence(
+      input.evidence,
+    );
+    const sourceItemKey = LEGACY_PRIMARY_SERVICE_ITEM_KEY;
+    const requestFingerprint = fingerprint({
+      action: 'mark-commercial-service-requirement-not-applicable',
+      quoteRequestId,
+      sourceItemKey,
+      kind,
+      expectedVersion: input.expectedVersion,
+      reason,
+      evidence,
+    });
+    return this.repository.markRequirementNotApplicable({
+      companyId: principal.companyId,
+      actorUserId: principal.id,
+      quoteRequestId,
+      sourceItemKey,
+      kind,
+      commandId: input.commandId,
+      expectedVersion: input.expectedVersion,
+      reason,
       evidence,
       requestFingerprint,
     });

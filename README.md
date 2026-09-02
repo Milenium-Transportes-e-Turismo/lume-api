@@ -72,9 +72,9 @@ o `lume-control`. A queda do computador da fornecedora não interrompe o
 cliente.
 
 A licença assinada possui validade e tolerância locais. O endpoint autenticado
-`GET /api/v1/license/status` mostra o estado sem realizar chamadas externas e
-exige simultaneamente o departamento Gerência (`management`) e a permissão
-`license:view`.
+`GET /api/v1/license/status` mostra o estado sem realizar chamadas externas. O
+Administrador da Instalação possui acesso total; os demais usuários precisam
+simultaneamente do departamento Gerência (`management`) e de `license:view`.
 
 O vínculo público de acesso é composto por um ou mais departamentos e por
 `permissionCodes` selecionadas individualmente. As permissões efetivas nunca
@@ -86,15 +86,25 @@ explícita de produto, Gerência pode receber individualmente `clients:create` e
 `clients:update`, além de `clients:view`, para consultar, criar e editar
 Cadastros normais e temporários. Isso não concede `clients:manage`, histórico
 ou permissões comerciais.
-`isAdministrator=true` é uma autoridade explícita e separada: somente outro
-administrador pode concedê-la ou removê-la, e ela apresenta todos os
-departamentos e permissões do catálogo atual.
+`isAdministrator=true` é a autoridade total e separada do Administrador da
+Instalação Lume: somente outro administrador pode concedê-la ou removê-la. A
+Diretoria também é distinta: pertencer a `directorate` não basta; a autoridade
+ampla de negócio exige `tenant:manage` atribuída individualmente. A Gerência
+continua controlada pelas capacidades estreitas de cada processo. Supervisão é
+uma capacidade explícita, não um cargo ou perfil implícito.
 
-O bootstrap idempotente sincroniza as nove áreas operacionais: Comercial,
-Compras, Controladoria, Departamento Pessoal, Financeiro, Gerência, Manutenção,
-Monitoramento e Operacional. A conta administrativa inicial é vinculada à
-autoridade administrativa explícita; seus vínculos diretos ficam vazios para
-não confundir administração global com o departamento Gerência.
+O bootstrap idempotente sincroniza o catálogo fixo atual: Empresa Cliente e as
+áreas internas RH, Comercial, Compras, Controladoria, Departamento Pessoal,
+Financeiro, Gerência, Diretoria, Manutenção, Monitoramento, Operacional e TI. A
+conta administrativa inicial é vinculada à autoridade administrativa
+explícita; seus vínculos diretos ficam vazios para não confundir administração
+global com Gerência ou Diretoria.
+
+RH e Departamento Pessoal são departamentos separados com o mesmo teto de
+capacidades documentais. O catálogo do runtime ainda é fechado no código e no
+enum do banco; criar departamentos internos dinamicamente continua sendo uma
+lacuna. Quando essa extensão existir, capacidades transversais devem alcançar os
+novos departamentos sem incluir `client-company`.
 
 ## Contas e acesso
 
@@ -114,6 +124,9 @@ não confundir administração global com o departamento Gerência.
 - `users:update` altera dados, departamentos, permissões e solicita recuperação
   de senha; `users:manage` fica restrito ao ciclo de estado da conta
   (ativar novamente, desativar ou suspender);
+- `PATCH /api/v1/users/:id` exige `commandId` e `expectedVersion`, incrementa a
+  versão do cadastro e grava recibo idempotente, histórico e auditoria na mesma
+  transação; repetição divergente ou versão antiga retorna conflito;
 - `users:delete` não faz parte do catálogo delegável; `DELETE /api/v1/users/:id`
   exige administrador, impede autoexclusão e preserva históricos por exclusão
   lógica;
@@ -204,9 +217,21 @@ conta fictícia ou repositório paralelo.
 
 Os dois departamentos possuem o mesmo teto de capacidades `documents:*`, mas a
 autorização continua individual: pertencer ao departamento não concede
-`documents:manage` automaticamente. `human-resources` permanece aceito para
-contas legadas e Departamento Pessoal permanece como a opção atribuível no
-catálogo atual.
+`documents:manage` automaticamente. RH e Departamento Pessoal permanecem
+opções atribuíveis e separadas. Definir a responsabilidade por tipo documental
+ainda é uma lacuna; igualdade de permissões não escolhe o departamento
+responsável.
+
+### Atendimento WhatsApp transversal
+
+`whatsapp-conversations:attend` é atribuída individualmente e pode ser usada
+por qualquer departamento interno catalogado, nunca por `client-company`.
+`whatsapp-conversations:manage` permanece como capacidade ampla legada para
+administração do canal e operações de proposta Comercial; ela não deve ser
+concedida apenas para liberar atendimento. O responsável da conversa é uma
+referência corrente, não uma trava exclusiva: outro usuário autorizado pode
+atuar ou assumir, com `expectedVersion` e histórico do ator e da substituição.
+Supervisão segue a mesma regra de capacidade explícita, sem perfil fixo.
 
 ### Aceite e confirmação comercial
 
@@ -218,11 +243,13 @@ Comercial finaliza em `confirmed-services`. Cada etapa possui ator, evidência,
 `commandId`, versão do orçamento, idempotência e revalidação de acesso dentro da
 transação. O estado pode ser recuperado em `confirmed-service-readiness`.
 
-Dispensas `not-applicable` permanecem bloqueadas até a definição de uma
-capacidade específica de Gerência/Diretoria. O modelo legado ainda representa
-um serviço por orçamento; itens comerciais múltiplos e cancelamento
-pós-confirmação continuam lacunas explícitas, sem fallback que apague o estágio
-alcançado.
+Uma dispensa `not-applicable` é registrada separadamente com motivo, evidência,
+`commandId` e versão esperada. Gerência depende da capacidade estreita
+`service-confirmations:approve`; Diretoria depende de `directorate` com
+`tenant:manage` individual; e o Administrador da Instalação possui autoridade
+total. O modelo legado ainda representa um serviço por orçamento; itens
+comerciais múltiplos e cancelamento pós-confirmação continuam lacunas
+explícitas, sem fallback que apague o estágio alcançado.
 
 ### Viagens operacionais
 

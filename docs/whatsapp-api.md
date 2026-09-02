@@ -98,6 +98,16 @@ páginas para calcular os indicadores. Esse contrato evita rajadas de centenas
 de requisições depois da importação de um histórico grande.
 
 Existe uma conversa canônica para cada combinação de empresa, canal e contato.
+Ao iniciar um atendimento manual por `POST /api/v1/whatsapp/conversations`, a
+API revalida `whatsapp-conversations:attend`, cria ou reutiliza Contato e
+Conversa e assume o atendimento dentro da mesma transação. `commandId` torna a
+abertura idempotente; uma revogação concorrente não deixa registros vazios
+persistidos antes da negativa. A conversa nova nasce na única fila interna do
+atendente. Contas com vários departamentos, ou sem um departamento próprio,
+devem enviar `targetDepartment`; a API confirma novamente na transação que a
+fila pertence ao usuário, salvo autoridade ampla de Administrador ou Diretoria.
+`client-company` nunca pode ser usada como fila interna.
+
 Encerrar atendimento finaliza somente a sessão humana atual: remove o atendente
 e preserva mensagens, anexos e orçamentos. A conversa permanece encerrada até o
 próximo contato. A primeira mensagem seguinte, textual ou não, reabre a mesma
@@ -105,12 +115,13 @@ conversa, registra `reopen-after-customer-message` e apresenta o menu inicial
 antes de qualquer interpretação do conteúdo.
 
 Devolver ao bot remove o atendente, mas preserva o contexto comercial para que o
-fluxo retome do ponto adequado. A própria transação que executa
-`return-to-bot` confirma que o usuário autenticado ainda é o atendente
-responsável; outro usuário recebe `403` e nenhuma alteração é persistida. Não há
-exceção implícita para administrador, gerente ou supervisor. Uma conversa em
-`human-active` sempre possui um atendente; qualquer estado legado incompatível é
-normalizado pela migração.
+fluxo retome do ponto adequado. `assignedTo` identifica o Responsável Atual,
+mas não funciona como mutex. Um usuário interno com a capacidade individual
+`whatsapp-conversations:attend` pode atuar ou substituir essa referência. A
+transação revalida o ator, exige `expectedVersion` e registra quem atuou, o
+responsável anterior e o resultado. `client-company` nunca pode receber essa
+capacidade. Uma conversa em `human-active` sempre possui um Responsável Atual;
+qualquer estado legado incompatível é normalizado pela migração.
 
 Uma transferência explícita usa dois comandos versionados. O usuário solicita
 com `POST .../actions/request-transfer`, informando departamento de destino e
@@ -126,35 +137,40 @@ registra o ciclo como cancelado antes de remover o estado mutável. O endpoint
 legado de encaminhamento continua como alias de rota, mas não preserva o payload
 nem a semântica imediata anteriores: também exige motivo e produz a transferência
 pendente. Clientes antigos devem ser atualizados de forma coordenada. A troca
-direta de departamento exige motivo e é recusada quando já existe atendente
-atribuído; nesse caso, o painel deve usar solicitação e aceite.
+direta de departamento exige motivo e continua usando solicitação e aceite
+quando existe atendimento humano, preservando origem, destino e ator.
 
-O escopo da fila também é aplicado às consultas por identificador direto:
-detalhe, mensagens, transições, proposta e mídia só ficam disponíveis ao
-departamento responsável ou ao destino de uma transferência pendente. As ações
-de painel repetem a autorização com o usuário recarregado dentro da transação.
-Assumir não substitui outro atendente, encerrar uma conversa atribuída exige o
-responsável atual e arquivar, desarquivar, marcar como lida ou reclassificar uma
-conversa exige pertencer ao departamento responsável. Um perfil sem departamento
-só recebe visão total quando possui explicitamente
-`whatsapp-conversations:manage`.
+Consultas por identificador direto continuam isoladas pelo tenant. A capacidade
+`attend` pode ser atribuída a usuários de qualquer departamento interno, mas não
+transforma um usuário comum em autoridade global: ele continua limitado às
+próprias filas e ao destino de uma transferência pendente. Administrador e
+Diretoria com `tenant:manage` possuem escopo amplo explicitamente reconhecido.
+As ações de painel repetem a autorização com o usuário recarregado dentro da
+transação.
 
-O aceite continua exigindo `whatsapp-conversations:manage`. No catálogo atual,
-somente o teto do Comercial admite esse código. Por isso, um usuário apenas do
-Operacional ou do Financeiro pode receber a pendência em seu departamento, mas
-não consegue abrir a caixa, aceitá-la e conduzir a conversa. Ampliar `manage`
-resolveria o bloqueio, porém também concederia ações administrativas como
-importar históricos e gerenciar contatos. A decisão segura pendente é criar uma
-capacidade menor de atendimento departamental para abrir a própria fila, aceitar
-a transferência e responder, sem essas ações administrativas.
+Aceitar transferência, responder, assumir, substituir o Responsável Atual,
+encerrar e devolver ao bot usam `whatsapp-conversations:attend` ou uma
+autoridade mais ampla explicitamente reconhecida. Concorrência continua sendo
+resolvida por `expectedVersion`; uma resposta `409` exige recarregar a conversa.
+`whatsapp-conversations:manage` permanece como capacidade ampla legada para
+importações, gestão de contatos e operações de proposta Comercial; não deve ser
+concedida apenas para liberar atendimento. Supervisão é capacidade, não um
+perfil chamado supervisor.
 
 O envio humano de uma proposta em PDF assume o usuário remetente como atendente
 ativo antes de enfileirar o documento e registra a transição no histórico.
 O mesmo compositor autenticado pode enviar texto, imagem, áudio, vídeo,
 documento ou contato por
 `POST /api/v1/whatsapp/conversations/:conversationId/media-messages`. O arquivo
-é armazenado antes de entrar na outbox e é removido se a persistência da
-mensagem falhar.
+somente é armazenado depois de uma pré-autorização transacional que recarrega o
+ator, valida tenant, fila, estado, versão e fingerprint da `idempotencyKey`.
+A persistência final repete essas verificações antes de criar mensagem e outbox.
+Se esse resultado final for ambíguo, o arquivo não é apagado sincronamente,
+pois outra repetição pode já referenciá-lo; a limpeza operacional deve considerar
+somente blobs comprovados sem referência. A chave física e o identificador
+lógico são determinísticos por tenant, conversa e `idempotencyKey`: um retry
+idêntico reutiliza o mesmo arquivo, enquanto conteúdo divergente é recusado sem
+criar outra chave nem apagar o original.
 
 ## Conteúdo de mídia
 

@@ -49,12 +49,14 @@ const departmentPersistenceCodes: Readonly<
   Record<AssignableDepartment, DepartmentCode>
 > = {
   'client-company': DepartmentCode.CLIENT_COMPANY,
+  'human-resources': DepartmentCode.HUMAN_RESOURCES,
   commercial: DepartmentCode.COMMERCIAL,
   purchasing: DepartmentCode.PURCHASING,
   controllership: DepartmentCode.CONTROLLING,
   'personnel-department': DepartmentCode.PERSONNEL_DEPARTMENT,
   financial: DepartmentCode.FINANCIAL,
   management: DepartmentCode.MANAGEMENT,
+  directorate: DepartmentCode.DIRECTORATE,
   maintenance: DepartmentCode.MAINTENANCE,
   monitoring: DepartmentCode.MONITORING,
   operations: DepartmentCode.OPERATIONS,

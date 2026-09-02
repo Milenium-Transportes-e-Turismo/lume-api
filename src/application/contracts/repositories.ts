@@ -45,6 +45,8 @@ export interface UserListQuery {
   status?: UserAccountStatus;
   excludeUserId?: string;
   excludeAdministrators?: boolean;
+  /** Mirrors assertCanAccessUserTarget for non-Admin user catalogs. */
+  excludePrivilegedUsers?: boolean;
 }
 
 export interface UserListResult {
@@ -53,6 +55,20 @@ export interface UserListResult {
 }
 
 export interface UpdateUserPersistenceInput {
+  command: {
+    commandId: string;
+    expectedVersion: number;
+    requestFingerprint: string;
+    actorUserId: string;
+    changedFields: string[];
+  };
+  mutationSnapshot: {
+    actorUserId: string;
+    actorUpdatedAt: Date;
+    actorVersion: number;
+    actorAuthorizationFingerprint: string;
+    targetUpdatedAt: Date;
+  };
   routingCompanyId?: string | null;
   name?: string;
   email?: string;
@@ -67,6 +83,18 @@ export interface UpdateUserPersistenceInput {
   dependents?: UserDependent[];
   departments?: UserDepartment[];
   permissionCodes?: PermissionCode[];
+}
+
+export interface UpdateUserPersistenceResult {
+  record: UserRecord;
+  idempotent: boolean;
+}
+
+export interface FindUserUpdateReplayInput {
+  userId: string;
+  actorUserId: string;
+  commandId: string;
+  requestFingerprint: string;
 }
 
 export interface UpdateUserStatusPersistenceInput {
@@ -127,16 +155,20 @@ export abstract class UsersRepository {
     companyId: string,
     query: UserListQuery,
   ): Promise<UserListResult>;
+  abstract findUpdateReplay(
+    companyId: string,
+    input: FindUserUpdateReplayInput,
+  ): Promise<UpdateUserPersistenceResult | null>;
   abstract update(
     companyId: string,
     userId: string,
     input: UpdateUserPersistenceInput,
-  ): Promise<UserRecord>;
+  ): Promise<UpdateUserPersistenceResult>;
   abstract updateWithAdministratorInvariant(
     companyId: string,
     userId: string,
     input: UpdateUserPersistenceInput,
-  ): Promise<UserRecord | null>;
+  ): Promise<UpdateUserPersistenceResult | null>;
   abstract updateStatus(
     companyId: string,
     userId: string,

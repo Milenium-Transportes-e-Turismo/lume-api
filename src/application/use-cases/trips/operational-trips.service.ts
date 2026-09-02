@@ -9,6 +9,8 @@ import {
   notFound,
   validationError,
 } from '../../../core/errors/app-error';
+import type { PermissionCode } from '../../../domain/access/access.constants';
+import { canExercisePermission } from '../../../domain/access/tenant-authority';
 import {
   applyTripCommand,
   createTripDraft,
@@ -370,8 +372,18 @@ export class OperationalTripsService {
   private async assertActorCanMutate(
     transaction: Prisma.TransactionClient,
     current: AuthenticatedPrincipal,
-    requiredPermissions: readonly string[],
+    requiredPermissions: readonly PermissionCode[],
   ): Promise<void> {
+    const lockedActor = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT id
+      FROM users
+      WHERE id = CAST(${current.id} AS uuid)
+        AND company_id = CAST(${current.companyId} AS uuid)
+      FOR SHARE
+    `;
+    if (lockedActor.length !== 1) {
+      throw forbidden('O usuário não está ativo neste tenant.');
+    }
     const actor = await transaction.user.findUnique({
       where: {
         id_companyId: { id: current.id, companyId: current.companyId },
@@ -381,6 +393,8 @@ export class OperationalTripsService {
         status: true,
         deletedAt: true,
         isAdministrator: true,
+        documentAccessMode: true,
+        departments: true,
         permissionCodes: true,
       },
     });
@@ -392,9 +406,19 @@ export class OperationalTripsService {
       throw forbidden('O usuário não está ativo neste tenant.');
     }
     if (
-      !actor.isAdministrator &&
       !requiredPermissions.some((permission) =>
-        actor.permissionCodes.includes(permission),
+        canExercisePermission(
+          {
+            isAdministrator: actor.isAdministrator,
+            departments: actor.departments.map((department) =>
+              department.toLowerCase().replaceAll('_', '-'),
+            ),
+            permissionCodes: actor.permissionCodes,
+            permissions: actor.permissionCodes,
+            documentAccessMode: actor.documentAccessMode,
+          },
+          permission,
+        ),
       )
     ) {
       throw forbidden('A permissão para alterar Viagens não está mais ativa.');

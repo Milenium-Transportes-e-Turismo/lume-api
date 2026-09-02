@@ -184,17 +184,39 @@ export class PrismaPreAdmissionAccessRepository extends PreAdmissionAccessReposi
     super();
   }
 
+  private async lockActorForAuthority(
+    transaction: Prisma.TransactionClient,
+    companyId: string,
+    actorUserId: string,
+  ): Promise<void> {
+    const lockedActor = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT id
+      FROM users
+      WHERE id = CAST(${actorUserId} AS uuid)
+        AND company_id = CAST(${companyId} AS uuid)
+      FOR SHARE
+    `;
+    if (lockedActor.length !== 1) {
+      throw forbidden(
+        'Somente RH ou Departamento Pessoal com permissão específica de gestão documental pode administrar acessos de pré-admissão.',
+      );
+    }
+  }
+
   private async assertActorCanManage(
     transaction: Prisma.TransactionClient,
     companyId: string,
     actorUserId: string,
   ): Promise<void> {
+    await this.lockActorForAuthority(transaction, companyId, actorUserId);
     const actor = await transaction.user.findUnique({
       where: { id_companyId: { id: actorUserId, companyId } },
       select: {
         isActive: true,
         status: true,
         deletedAt: true,
+        isAdministrator: true,
+        documentAccessMode: true,
         departments: true,
         permissionCodes: true,
       },
@@ -204,8 +226,11 @@ export class PrismaPreAdmissionAccessRepository extends PreAdmissionAccessReposi
       actor.status !== UserAccountStatus.ACTIVE ||
       actor.deletedAt ||
       !canManagePreAdmission({
+        isAdministrator: actor.isAdministrator,
         departments: actor.departments,
+        permissionCodes: actor.permissionCodes,
         permissions: actor.permissionCodes,
+        documentAccessMode: actor.documentAccessMode,
       })
     ) {
       throw forbidden(

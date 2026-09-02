@@ -10,6 +10,7 @@ import type {
   MessageListQuery,
   PersistWebhookMessageInput,
   ReconcileAutomationOutboxInput,
+  StartHumanWhatsAppConversationInput,
   TransitionCommand,
   TransitionListQuery,
 } from '../../contracts/whatsapp.repository';
@@ -28,14 +29,11 @@ export class TransitionWhatsAppConversationUseCase {
   }
 }
 
-export class EnsureWhatsAppConversationUseCase {
+export class StartHumanWhatsAppConversationUseCase {
   constructor(private readonly repository: WhatsAppRepository) {}
 
-  execute(companyId: string, phoneNormalized: string) {
-    return this.repository.ensureConversationForPhone(
-      companyId,
-      phoneNormalized,
-    );
+  execute(input: StartHumanWhatsAppConversationInput) {
+    return this.repository.startHumanConversation(input);
   }
 }
 
@@ -48,6 +46,9 @@ export class CreateOutboundWhatsAppUseCase {
 
 export class CreateHumanOutboundWhatsAppUseCase {
   constructor(private readonly repository: WhatsAppRepository) {}
+  authorize(input: CreateHumanOutboundInput) {
+    return this.repository.authorizeHumanOutbound(input);
+  }
   execute(input: CreateHumanOutboundInput) {
     return this.repository.createHumanOutbound(input);
   }

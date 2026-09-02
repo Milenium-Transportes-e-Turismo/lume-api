@@ -1,4 +1,7 @@
-import type { CommercialServiceRequirementKind } from '../../domain/commercial/confirmed-service';
+import type {
+  CommercialServiceRequirementKind,
+  CommercialServiceRequirementOutcome,
+} from '../../domain/commercial/confirmed-service';
 
 export interface ConfirmedServiceRecord {
   readonly id: string;
@@ -21,6 +24,8 @@ export interface CommercialServiceRequirementAttestationRecord {
   readonly sourceQuoteVersion: number;
   readonly sourceItemKey: string;
   readonly kind: CommercialServiceRequirementKind;
+  readonly outcome: CommercialServiceRequirementOutcome;
+  readonly reason: string | null;
   readonly evidence: string;
   readonly actorUserId: string;
   readonly commandId: string;
@@ -43,6 +48,22 @@ export interface AttestCommercialServiceRequirementResult {
   readonly attestation: CommercialServiceRequirementAttestationRecord;
   readonly idempotent: boolean;
 }
+
+export interface MarkCommercialServiceRequirementNotApplicableCommand {
+  readonly companyId: string;
+  readonly actorUserId: string;
+  readonly quoteRequestId: string;
+  readonly sourceItemKey: 'legacy-primary';
+  readonly kind: CommercialServiceRequirementKind;
+  readonly commandId: string;
+  readonly expectedVersion: number;
+  readonly reason: string;
+  readonly evidence: string;
+  readonly requestFingerprint: string;
+}
+
+export type MarkCommercialServiceRequirementNotApplicableResult =
+  AttestCommercialServiceRequirementResult;
 
 export interface ConfirmServiceCommand {
   readonly companyId: string;
@@ -74,6 +95,10 @@ export abstract class ConfirmedServiceRepository {
   abstract attestRequirement(
     input: AttestCommercialServiceRequirementCommand,
   ): Promise<AttestCommercialServiceRequirementResult>;
+
+  abstract markRequirementNotApplicable(
+    input: MarkCommercialServiceRequirementNotApplicableCommand,
+  ): Promise<MarkCommercialServiceRequirementNotApplicableResult>;
 
   abstract confirm(input: ConfirmServiceCommand): Promise<ConfirmServiceResult>;
 

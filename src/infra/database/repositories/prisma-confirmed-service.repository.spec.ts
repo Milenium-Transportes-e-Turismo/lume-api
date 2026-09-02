@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type {
   AttestCommercialServiceRequirementCommand,
   ConfirmServiceCommand,
+  MarkCommercialServiceRequirementNotApplicableCommand,
 } from '../../../application/contracts/confirmed-service.repository';
 import type { PrismaService } from '../prisma/prisma.service';
 import { PrismaConfirmedServiceRepository } from './prisma-confirmed-service.repository';
@@ -36,14 +37,27 @@ const attestInput: AttestCommercialServiceRequirementCommand = {
   evidence: 'Pagamento confirmado pelo Financeiro.',
   requestFingerprint: 'b'.repeat(64),
 };
+const notApplicableInput: MarkCommercialServiceRequirementNotApplicableCommand =
+  {
+    companyId,
+    actorUserId,
+    quoteRequestId,
+    sourceItemKey: 'legacy-primary',
+    kind: 'financial',
+    commandId: '77777777-7777-4777-8777-777777777777',
+    expectedVersion: 4,
+    reason: 'Pagamento antecipado não integra este serviço.',
+    evidence: 'Condição registrada na proposta aceita.',
+    requestFingerprint: 'd'.repeat(64),
+  };
 
 const actor = {
   isActive: true,
   status: 'ACTIVE',
   deletedAt: null,
-  isAdministrator: false,
-  departments: ['commercial'],
-  permissionCodes: ['commercial:manage'],
+  isAdministrator: true,
+  departments: [],
+  permissionCodes: [],
 };
 
 const quote = {
@@ -74,6 +88,8 @@ const financialAttestation = {
   sourceQuoteVersion: 4,
   sourceItemKey: 'legacy-primary',
   kind: 'FINANCIAL',
+  outcome: 'SATISFIED',
+  reason: null,
   evidence: 'Pagamento confirmado pelo Financeiro.',
   actorUserId: financialActorUserId,
   commandId: '33333333-3333-4333-8333-333333333333',
@@ -91,6 +107,16 @@ const operationalAttestation = {
   commandFingerprint: 'c'.repeat(64),
   attestedAt: new Date('2026-09-01T11:00:00.000Z'),
   createdAt: new Date('2026-09-01T11:00:00.000Z'),
+};
+const financialNotApplicableAttestation = {
+  ...financialAttestation,
+  id: '88888888-8888-4888-8888-888888888888',
+  outcome: 'NOT_APPLICABLE',
+  reason: notApplicableInput.reason,
+  evidence: notApplicableInput.evidence,
+  actorUserId: notApplicableInput.actorUserId,
+  commandId: notApplicableInput.commandId,
+  commandFingerprint: notApplicableInput.requestFingerprint,
 };
 const serviceRow = {
   id: confirmedServiceId,
@@ -147,15 +173,55 @@ const serviceRow = {
 };
 
 function prismaWithTransaction(transaction: object): PrismaService {
+  const lockableTransaction = {
+    $queryRaw: vi.fn().mockResolvedValue([{ id: actorUserId }]),
+    ...transaction,
+  };
+
   return {
     $transaction: vi.fn(
-      async (work: (client: typeof transaction) => Promise<unknown>) =>
-        work(transaction),
+      async (work: (client: typeof lockableTransaction) => Promise<unknown>) =>
+        work(lockableTransaction),
     ),
   } as unknown as PrismaService;
 }
 
 describe('PrismaConfirmedServiceRepository', () => {
+  it('bloqueia a linha do ator antes da revalidação autoritativa', async () => {
+    const callOrder: string[] = [];
+    const transaction = {
+      $queryRaw: vi.fn().mockImplementation(async () => {
+        callOrder.push('lock');
+        return [{ id: actorUserId }];
+      }),
+      user: {
+        findUnique: vi.fn().mockImplementation(async () => {
+          callOrder.push('read');
+          return actor;
+        }),
+      },
+      confirmedServiceHistory: {
+        findUnique: vi.fn().mockResolvedValue({
+          confirmedServiceId,
+          actorUserId,
+          action: 'confirmed',
+          commandFingerprint: input.requestFingerprint,
+        }),
+      },
+      confirmedService: {
+        findUniqueOrThrow: vi.fn().mockResolvedValue(serviceRow),
+      },
+    };
+
+    await expect(
+      new PrismaConfirmedServiceRepository(
+        prismaWithTransaction(transaction),
+      ).confirm(input),
+    ).resolves.toMatchObject({ idempotent: true });
+
+    expect(callOrder).toEqual(['lock', 'read']);
+  });
+
   it('persiste o ateste financeiro com ator da própria área e auditoria', async () => {
     const transaction = {
       user: {
@@ -163,8 +229,9 @@ describe('PrismaConfirmedServiceRepository', () => {
           isActive: true,
           status: 'ACTIVE',
           deletedAt: null,
-          departments: ['financial'],
-          permissionCodes: ['financial:approve'],
+          isAdministrator: true,
+          departments: [],
+          permissionCodes: [],
         }),
       },
       quoteRequest: { findUnique: vi.fn().mockResolvedValue(quote) },
@@ -185,6 +252,8 @@ describe('PrismaConfirmedServiceRepository', () => {
     ).resolves.toEqual({
       attestation: expect.objectContaining({
         kind: 'financial',
+        outcome: 'SATISFIED',
+        reason: null,
         actorUserId: financialActorUserId,
         evidence: attestInput.evidence,
       }),
@@ -198,6 +267,132 @@ describe('PrismaConfirmedServiceRepository', () => {
         }),
       }),
     );
+  });
+
+  it('marca requisito não aplicável com autoridade ampla da Diretoria revalidada, motivo, evidência e auditoria', async () => {
+    const transaction = {
+      user: {
+        findUnique: vi.fn().mockResolvedValue({
+          isActive: true,
+          status: 'ACTIVE',
+          deletedAt: null,
+          isAdministrator: false,
+          departments: ['DIRECTORATE'],
+          permissionCodes: ['tenant:manage'],
+        }),
+      },
+      quoteRequest: { findUnique: vi.fn().mockResolvedValue(quote) },
+      commercialServiceRequirementAttestation: {
+        findUnique: vi
+          .fn()
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(null),
+        create: vi.fn().mockResolvedValue(financialNotApplicableAttestation),
+      },
+      tenantAuditLog: { create: vi.fn().mockResolvedValue({}) },
+    };
+
+    await expect(
+      new PrismaConfirmedServiceRepository(
+        prismaWithTransaction(transaction),
+      ).markRequirementNotApplicable(notApplicableInput),
+    ).resolves.toEqual({
+      attestation: expect.objectContaining({
+        kind: 'financial',
+        outcome: 'NOT_APPLICABLE',
+        reason: notApplicableInput.reason,
+        evidence: notApplicableInput.evidence,
+      }),
+      idempotent: false,
+    });
+    expect(
+      transaction.commercialServiceRequirementAttestation.create,
+    ).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        companyId,
+        outcome: 'NOT_APPLICABLE',
+        reason: notApplicableInput.reason,
+        evidence: notApplicableInput.evidence,
+      }),
+    });
+    expect(transaction.tenantAuditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        companyId,
+        actorUserId,
+        action: 'commercial.service-requirement.mark-not-applicable',
+        metadata: expect.objectContaining({
+          outcome: 'NOT_APPLICABLE',
+          reason: notApplicableInput.reason,
+          evidence: notApplicableInput.evidence,
+        }),
+      }),
+    });
+  });
+
+  it('reexecuta a mesma dispensa sem duplicar a decisão', async () => {
+    const transaction = {
+      user: {
+        findUnique: vi.fn().mockResolvedValue({
+          isActive: true,
+          status: 'ACTIVE',
+          deletedAt: null,
+          isAdministrator: false,
+          departments: ['management'],
+          permissionCodes: ['service-confirmations:approve'],
+        }),
+      },
+      commercialServiceRequirementAttestation: {
+        findUnique: vi
+          .fn()
+          .mockResolvedValue(financialNotApplicableAttestation),
+        create: vi.fn(),
+      },
+    };
+
+    await expect(
+      new PrismaConfirmedServiceRepository(
+        prismaWithTransaction(transaction),
+      ).markRequirementNotApplicable(notApplicableInput),
+    ).resolves.toEqual({
+      attestation: expect.objectContaining({
+        outcome: 'NOT_APPLICABLE',
+        reason: notApplicableInput.reason,
+      }),
+      idempotent: true,
+    });
+    expect(
+      transaction.commercialServiceRequirementAttestation.create,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('rejeita dispensa quando o ator persistido não tem a autoridade estreita', async () => {
+    const transaction = {
+      user: {
+        findUnique: vi.fn().mockResolvedValue({
+          isActive: true,
+          status: 'ACTIVE',
+          deletedAt: null,
+          isAdministrator: false,
+          departments: ['commercial'],
+          permissionCodes: [
+            'commercial:manage',
+            'service-confirmations:approve',
+          ],
+        }),
+      },
+      quoteRequest: { findUnique: vi.fn() },
+      commercialServiceRequirementAttestation: {
+        findUnique: vi.fn(),
+        create: vi.fn(),
+      },
+    };
+
+    await expect(
+      new PrismaConfirmedServiceRepository(
+        prismaWithTransaction(transaction),
+      ).markRequirementNotApplicable(notApplicableInput),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(transaction.quoteRequest.findUnique).not.toHaveBeenCalled();
   });
 
   it('cria snapshot, histórico e auditoria somente por comando explícito', async () => {
@@ -268,6 +463,54 @@ describe('PrismaConfirmedServiceRepository', () => {
         version: 1,
       }),
       idempotent: false,
+    });
+  });
+
+  it('aceita requisito financeiro não aplicável na confirmação final e preserva a justificativa', async () => {
+    const transaction = {
+      user: { findUnique: vi.fn().mockResolvedValue(actor) },
+      confirmedServiceHistory: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue({}),
+      },
+      quoteRequest: { findUnique: vi.fn().mockResolvedValue(quote) },
+      confirmedService: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockImplementation(({ data }) => ({
+          ...serviceRow,
+          ...data,
+        })),
+      },
+      commercialServiceRequirementAttestation: {
+        findMany: vi
+          .fn()
+          .mockResolvedValue([
+            financialNotApplicableAttestation,
+            operationalAttestation,
+          ]),
+      },
+      tenantAuditLog: { create: vi.fn().mockResolvedValue({}) },
+    };
+
+    await new PrismaConfirmedServiceRepository(
+      prismaWithTransaction(transaction),
+    ).confirm(input);
+
+    expect(transaction.confirmedService.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        financialAttestationId: financialNotApplicableAttestation.id,
+        requirementsSnapshot: expect.objectContaining({
+          financial: expect.objectContaining({
+            outcome: 'not-applicable',
+            reason: notApplicableInput.reason,
+            evidence: notApplicableInput.evidence,
+          }),
+          operational: expect.objectContaining({
+            outcome: 'satisfied',
+            reason: null,
+          }),
+        }),
+      }),
     });
   });
 

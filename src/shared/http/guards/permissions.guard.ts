@@ -7,6 +7,7 @@ import {
 import { Reflector } from '@nestjs/core';
 
 import type { PermissionCode } from '../../../domain/access/access.constants';
+import { canExercisePermission } from '../../../domain/access/tenant-authority';
 import type { AuthenticatedRequest } from '../decorators/current-user.decorator';
 import { REQUIRED_PERMISSIONS } from '../decorators/require-permissions.decorator';
 
@@ -28,8 +29,7 @@ export class PermissionsGuard implements CanActivate {
 
     if (
       !user ||
-      (!user.isAdministrator &&
-        !required.some((permission) => user.permissions.includes(permission)))
+      !required.some((permission) => canExercisePermission(user, permission))
     ) {
       throw new ForbiddenException(
         'Você não possui permissão para esta operação.',

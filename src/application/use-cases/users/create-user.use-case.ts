@@ -7,6 +7,7 @@ import {
   allowedPermissionsForDepartments,
   isPermissionCode,
   normalizeUserDepartments,
+  TENANT_WIDE_PERMISSION,
   type PermissionCode,
   type SupportedUserDepartment,
 } from '../../../domain/access/access.constants';
@@ -75,6 +76,15 @@ export class CreateUserUseCase {
       : null;
     const actorIsAdministrator = actorRole === 'administrator';
     const isAdministrator = input.isAdministrator === true;
+
+    if (
+      input.permissionCodes.includes(TENANT_WIDE_PERMISSION) &&
+      !actorIsAdministrator
+    ) {
+      throw forbidden(
+        'Somente administradores podem conceder acesso amplo à Diretoria.',
+      );
+    }
 
     if (input.actorUserId && !actorIsAdministrator) {
       if (actorRole === 'none') {
@@ -146,6 +156,16 @@ export class CreateUserUseCase {
     const clientCategory = isAdministrator
       ? null
       : (input.clientCategory ?? null);
+
+    if (
+      !isAdministrator &&
+      documentAccessMode === 'document-portal' &&
+      (departments.length > 0 || input.permissionCodes.length > 0)
+    ) {
+      throw validationError(
+        'O Portal de documentos não aceita departamentos nem permissões de negócio.',
+      );
+    }
 
     if (documentAccessMode === 'client') {
       if (

@@ -284,6 +284,8 @@ alteração do rollback é confirmada.
 - mensagens inbound usam `received`; outbound histórico aceita somente
   `sent`, `delivered`, `read` ou `failed` — `pending` é rejeitado porque a
   importação não cria tentativa de envio;
-- somente os nove departamentos publicados:
-  `commercial`, `purchasing`, `controlling`, `personnel-department`,
-  `financial`, `management`, `maintenance`, `monitoring` e `operations`.
+- somente departamentos internos do catálogo canônico: `human-resources`,
+  `personnel-department`, `commercial`, `purchasing`, `controlling`,
+  `maintenance`, `monitoring`, `management`, `directorate`, `operations`,
+  `cleaning`, `financial` e `information-technology`; `client-company` é
+  rejeitado porque representa uma empresa cliente, não uma fila interna.

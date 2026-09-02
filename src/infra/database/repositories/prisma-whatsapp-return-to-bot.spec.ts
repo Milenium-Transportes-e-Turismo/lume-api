@@ -7,6 +7,7 @@ import {
   DepartmentCode,
   FlowStep,
   RequestStatus,
+  UserAccountStatus,
 } from '../prisma/generated/client';
 import type { PrismaService } from '../prisma/prisma.service';
 import { PrismaWhatsAppRepository } from './prisma-whatsapp.repository';
@@ -99,6 +100,9 @@ function createHarness(
     department?: DepartmentCode;
     conversationState?: ConversationState;
     actorDepartments?: readonly string[];
+    actorPermissionCodes?: readonly string[];
+    actorIsAdministrator?: boolean;
+    actorIsActive?: boolean;
     assignedToUserId?: string | null;
     pendingTransferDepartment?: DepartmentCode | null;
   } = {},
@@ -179,7 +183,13 @@ function createHarness(
         conversation.version += Number(version.increment);
       }
       conversation.assignedTo = conversation.assignedToUserId
-        ? conversation.assignedTo
+        ? {
+            id: conversation.assignedToUserId,
+            name:
+              conversation.assignedToUserId === ids.responsible
+                ? 'Atendente responsável'
+                : 'Outro atendente',
+          }
         : null;
       return { count: 1 };
     },
@@ -187,6 +197,7 @@ function createHarness(
   const createTransition = vi.fn(async () => undefined);
   const transaction = {
     $executeRaw: vi.fn(async () => 1),
+    $queryRaw: vi.fn(async () => [{ id: ids.otherAttendant }]),
     whatsAppConversationTransition: {
       findUnique: vi.fn(async () => null),
       create: createTransition,
@@ -207,7 +218,13 @@ function createHarness(
             where.id_companyId.id === ids.responsible
               ? 'Atendente responsável'
               : 'Outro atendente',
-          isActive: true,
+          isActive: options.actorIsActive ?? true,
+          status: UserAccountStatus.ACTIVE,
+          deletedAt: null,
+          isAdministrator: options.actorIsAdministrator ?? false,
+          permissionCodes: options.actorPermissionCodes ?? [
+            'whatsapp-conversations:attend',
+          ],
           departments:
             where.id_companyId.id === ids.otherAttendant
               ? (options.actorDepartments ?? ['commercial'])
@@ -237,14 +254,48 @@ function createHarness(
 }
 
 describe('PrismaWhatsAppRepository return-to-bot authorization', () => {
-  it('impede que outro atendente devolva ao bot uma conversa atribuída', async () => {
+  it('permite que outro atendente autorizado devolva ao bot com histórico do responsável anterior', async () => {
     const harness = createHarness();
+
+    await expect(
+      harness.repository.transition(returnToBotCommand()),
+    ).resolves.toMatchObject({
+      conversationState: 'bot-active',
+      assignedTo: null,
+      version: 4,
+    });
+    expect(harness.createTransition).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          metadata: expect.objectContaining({
+            assignment: {
+              previousAssignedToUserId: ids.responsible,
+              resultingAssignedToUserId: null,
+              changedByUserId: ids.otherAttendant,
+              cause: 'return-to-bot',
+            },
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('bloqueia um usuário sem capacidade individual de atendimento', async () => {
+    const harness = createHarness({ actorPermissionCodes: [] });
 
     await expect(
       harness.repository.transition(returnToBotCommand()),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
     expect(harness.updateMany).not.toHaveBeenCalled();
-    expect(harness.createTransition).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia a devolução por usuário fora do departamento responsável', async () => {
+    const harness = createHarness({ actorDepartments: ['operations'] });
+
+    await expect(
+      harness.repository.transition(returnToBotCommand()),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(harness.updateMany).not.toHaveBeenCalled();
   });
 
   it('permite que o atendente responsável devolva a conversa ao bot', async () => {
@@ -348,14 +399,29 @@ describe('PrismaWhatsAppRepository take-over authorization', () => {
     expect(harness.createTransition).not.toHaveBeenCalled();
   });
 
-  it('impede substituir outro atendente do mesmo departamento sem regra de supervisão', async () => {
+  it('permite substituir outro atendente autorizado e registra a troca', async () => {
     const harness = createHarness({ actorDepartments: ['commercial'] });
 
     await expect(
       harness.repository.transition(takeOverCommand()),
-    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
-    expect(harness.updateMany).not.toHaveBeenCalled();
-    expect(harness.createTransition).not.toHaveBeenCalled();
+    ).resolves.toMatchObject({
+      assignedTo: { id: ids.otherAttendant },
+      version: 4,
+    });
+    expect(harness.createTransition).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          metadata: expect.objectContaining({
+            assignment: {
+              previousAssignedToUserId: ids.responsible,
+              resultingAssignedToUserId: ids.otherAttendant,
+              changedByUserId: ids.otherAttendant,
+              cause: 'take-over',
+            },
+          }),
+        }),
+      }),
+    );
   });
 });
 
@@ -376,14 +442,13 @@ describe('PrismaWhatsAppRepository generic panel action authorization', () => {
     },
   );
 
-  it('impede outro atendente do mesmo departamento de encerrar a conversa atribuída', async () => {
+  it('permite que outro atendente autorizado encerre a conversa atribuída', async () => {
     const harness = createHarness({ actorDepartments: ['commercial'] });
 
     await expect(
       harness.repository.transition(genericUserCommand('close')),
-    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
-    expect(harness.updateMany).not.toHaveBeenCalled();
-    expect(harness.createTransition).not.toHaveBeenCalled();
+    ).resolves.toMatchObject({ conversationState: 'closed', version: 4 });
+    expect(harness.createTransition).toHaveBeenCalled();
   });
 });
 
@@ -393,6 +458,40 @@ describe('PrismaWhatsAppRepository transfer request invariants', () => {
 
     await expect(
       harness.repository.transition(transferCommand('request-transfer')),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+    expect(harness.updateMany).not.toHaveBeenCalled();
+    expect(harness.createTransition).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia solicitação por usuário fora do departamento responsável', async () => {
+    const harness = createHarness({ actorDepartments: ['operations'] });
+
+    await expect(
+      harness.repository.transition(
+        transferCommand(
+          'request-transfer',
+          { reason: 'Cliente solicitou apoio do Financeiro.' },
+          ids.otherAttendant,
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(harness.updateMany).not.toHaveBeenCalled();
+    expect(harness.createTransition).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia Empresa cliente como fila mesmo para encaminhamento sistêmico', async () => {
+    const harness = createHarness();
+
+    await expect(
+      harness.repository.transition({
+        companyId: ids.company,
+        conversationId: ids.conversation,
+        commandId: ids.command,
+        expectedVersion: 3,
+        name: 'forward',
+        targetDepartment: 'client-company',
+        actorType: 'system',
+      }),
     ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
     expect(harness.updateMany).not.toHaveBeenCalled();
     expect(harness.createTransition).not.toHaveBeenCalled();

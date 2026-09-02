@@ -35,6 +35,13 @@ import {
 } from '../../../domain/whatsapp/whatsapp.constants';
 
 const REQUEST_STATUSES = QUOTE_REQUEST_STATUSES;
+const WHATSAPP_INTERNAL_DEPARTMENTS = DEPARTMENTS.filter(
+  (department) => department !== 'client-company',
+);
+type WhatsAppInternalDepartment = Exclude<
+  (typeof DEPARTMENTS)[number],
+  'client-company'
+>;
 
 export class VersionedCommandDto {
   @ApiProperty({ format: 'uuid' })
@@ -58,6 +65,15 @@ export class StartHumanConversationDto {
   @MinLength(10)
   @MaxLength(30)
   phone!: string;
+
+  @ApiPropertyOptional({
+    enum: WHATSAPP_INTERNAL_DEPARTMENTS,
+    description:
+      'Fila interna inicial. É obrigatória quando o atendente pertence a mais de um departamento ou não possui departamento próprio.',
+  })
+  @IsOptional()
+  @IsIn(WHATSAPP_INTERNAL_DEPARTMENTS)
+  targetDepartment?: WhatsAppInternalDepartment;
 }
 
 export class CloseConversationDto extends VersionedCommandDto {
@@ -96,9 +112,9 @@ export class TransitionConversationDto extends VersionedCommandDto {
 }
 
 export class ForwardConversationDto extends VersionedCommandDto {
-  @ApiProperty({ enum: DEPARTMENTS })
-  @IsIn(DEPARTMENTS)
-  targetDepartment!: (typeof DEPARTMENTS)[number];
+  @ApiProperty({ enum: WHATSAPP_INTERNAL_DEPARTMENTS })
+  @IsIn(WHATSAPP_INTERNAL_DEPARTMENTS)
+  targetDepartment!: WhatsAppInternalDepartment;
 
   @ApiProperty({ minLength: 3, maxLength: 500 })
   @Transform(({ value }: { value: unknown }) =>

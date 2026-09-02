@@ -2,7 +2,9 @@ import { Injectable } from '@nestjs/common';
 
 import {
   UsersRepository,
+  type FindUserUpdateReplayInput,
   type UpdateUserPersistenceInput,
+  type UpdateUserPersistenceResult,
   type UpdateUserStatusPersistenceInput,
   type UserListQuery,
   type UserListResult,
@@ -13,7 +15,9 @@ import type { User } from '../../../domain/entities/user';
 import {
   departmentsAllowingPermission,
   isImplicitPermissionCode,
+  TENANT_WIDE_PERMISSION,
 } from '../../../domain/access/access.constants';
+import { isTenantBusinessPermission } from '../../../domain/access/tenant-authority';
 import {
   DocumentAccessMode as PrismaDocumentAccessMode,
   UserClientCategory as PrismaUserClientCategory,
@@ -23,6 +27,8 @@ import {
 import { rethrowKnownPrismaConflict } from '../prisma/prisma-errors';
 import { mapUserRecord, userRecordSelect } from '../prisma/prisma.mappers';
 import { PrismaService } from '../prisma/prisma.service';
+import { conflict } from '../../../core/errors/app-error';
+import { userMutationAuthorizationFingerprint } from '../../../domain/access/user-management-policy';
 
 const userProfileSelect = {
   id: true,
@@ -98,19 +104,98 @@ function userUpdateData(
     ...(input.permissionCodes === undefined
       ? {}
       : { permissionCodes: [...input.permissionCodes] }),
+    version: { increment: 1 },
   };
+}
+
+function isUniqueConflict(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 'P2002'
+  );
+}
+
+function json(value: unknown): Prisma.InputJsonValue {
+  return value as Prisma.InputJsonValue;
+}
+
+function userMutationSnapshot(record: UserRecord) {
+  const props = record.user.props;
+  return {
+    id: props.id,
+    routingCompanyId: props.routingCompanyId,
+    name: props.name,
+    email: props.email,
+    cpfNormalized: props.cpfNormalized,
+    isAdministrator: props.isAdministrator,
+    documentAccessMode: props.documentAccessMode,
+    clientCategory: props.clientCategory,
+    jobTitle: props.jobTitle,
+    maritalStatus: props.maritalStatus,
+    militaryDocumentStatus: props.militaryDocumentStatus,
+    dependents: props.dependents,
+    departments: props.departments,
+    permissionCodes: props.permissionCodes,
+    status: props.status,
+    isActive: props.isActive,
+    version: props.version,
+    updatedAt: props.updatedAt.toISOString(),
+  };
+}
+
+function userChangedFields(before: UserRecord, after: UserRecord): string[] {
+  const beforeSnapshot = userMutationSnapshot(before);
+  const afterSnapshot = userMutationSnapshot(after);
+  const trackedFields = [
+    ['routingCompanyId', 'routingCompanyId'],
+    ['name', 'name'],
+    ['email', 'email'],
+    ['cpf', 'cpfNormalized'],
+    ['isAdministrator', 'isAdministrator'],
+    ['documentAccessMode', 'documentAccessMode'],
+    ['clientCategory', 'clientCategory'],
+    ['jobTitle', 'jobTitle'],
+    ['maritalStatus', 'maritalStatus'],
+    ['militaryDocumentStatus', 'militaryDocumentStatus'],
+    ['dependents', 'dependents'],
+    ['departments', 'departments'],
+    ['permissionCodes', 'permissionCodes'],
+  ] as const;
+
+  return trackedFields
+    .filter(
+      ([, snapshotField]) =>
+        JSON.stringify(beforeSnapshot[snapshotField]) !==
+        JSON.stringify(afterSnapshot[snapshotField]),
+    )
+    .map(([field]) => field);
 }
 
 function isSerializationConflict(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
-  if ('code' in error && error.code === 'P2034') return true;
-  if (!('cause' in error)) return false;
-  const cause = error.cause;
+  if (
+    ('code' in error &&
+      ['P2034', '40001', '40P01'].includes(String(error.code))) ||
+    ('kind' in error && error.kind === 'TransactionWriteConflict')
+  ) {
+    return true;
+  }
+  if (
+    'message' in error &&
+    typeof error.message === 'string' &&
+    /write conflict|deadlock|serialization failure|transactionwriteconflict/i.test(
+      error.message,
+    )
+  ) {
+    return true;
+  }
   return (
-    typeof cause === 'object' &&
-    cause !== null &&
-    'kind' in cause &&
-    cause.kind === 'TransactionWriteConflict'
+    ('cause' in error && isSerializationConflict(error.cause)) ||
+    ('meta' in error && isSerializationConflict(error.meta)) ||
+    ('driverAdapterError' in error &&
+      isSerializationConflict(error.driverAdapterError))
   );
 }
 
@@ -132,6 +217,125 @@ export class PrismaUsersRepository extends UsersRepository {
           setTimeout(resolve, Math.min(5 * 2 ** attempt, 40)),
         );
       }
+    }
+  }
+
+  private mutationUserIds(
+    userId: string,
+    input: UpdateUserPersistenceInput,
+  ): string[] {
+    return Array.from(new Set([userId, input.command.actorUserId])).sort();
+  }
+
+  private async lockMutationUsers(
+    transaction: Prisma.TransactionClient,
+    companyId: string,
+    userId: string,
+    input: UpdateUserPersistenceInput,
+  ): Promise<void> {
+    const userIds = this.mutationUserIds(userId, input);
+    for (const lockedUserId of userIds) {
+      const locked = await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT id
+        FROM users
+        WHERE id = CAST(${lockedUserId} AS uuid)
+          AND company_id = CAST(${companyId} AS uuid)
+        FOR UPDATE
+      `;
+      if (locked.length !== 1) {
+        throw conflict(
+          'O usuário foi alterado por outra operação. Atualize os dados e tente novamente.',
+        );
+      }
+    }
+  }
+
+  private async lockAdministratorInvariant(
+    transaction: Prisma.TransactionClient,
+    companyId: string,
+  ): Promise<void> {
+    await transaction.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${`${companyId}:active-administrator-invariant`})
+      )
+    `;
+  }
+
+  private async assertMutationSnapshot(
+    transaction: Prisma.TransactionClient,
+    companyId: string,
+    userId: string,
+    input: UpdateUserPersistenceInput,
+  ): Promise<void> {
+    const snapshot = input.mutationSnapshot;
+    const userIds = this.mutationUserIds(userId, input);
+    const current = await transaction.user.findMany({
+      where: { companyId, id: { in: userIds } },
+      select: {
+        id: true,
+        updatedAt: true,
+        version: true,
+        isAdministrator: true,
+        documentAccessMode: true,
+        departments: true,
+        permissionCodes: true,
+        isActive: true,
+        status: true,
+        deletedAt: true,
+        company: { select: { status: true } },
+      },
+    });
+    const updatedAtByUserId = new Map(
+      current.map((user) => [user.id, user.updatedAt.getTime()]),
+    );
+    const actor = current.find((user) => user.id === input.command.actorUserId);
+    if (
+      snapshot.actorUserId !== input.command.actorUserId ||
+      updatedAtByUserId.get(userId) !== snapshot.targetUpdatedAt.getTime() ||
+      !actor ||
+      actor.deletedAt !== null ||
+      !actor.isActive ||
+      actor.status !== PrismaUserAccountStatus.ACTIVE ||
+      actor.company.status !== 'ACTIVE' ||
+      actor.updatedAt.getTime() !== snapshot.actorUpdatedAt.getTime() ||
+      actor.version !== snapshot.actorVersion ||
+      userMutationAuthorizationFingerprint({
+        ...actor,
+        companyIsActive: actor.company.status === 'ACTIVE',
+      }) !== snapshot.actorAuthorizationFingerprint
+    ) {
+      throw conflict(
+        'O usuário ou o acesso do responsável foi alterado. Atualize os dados e tente novamente.',
+      );
+    }
+  }
+
+  private async assertActiveMutationActor(
+    transaction: Prisma.TransactionClient,
+    companyId: string,
+    actorUserId: string,
+  ): Promise<void> {
+    const actor = await transaction.user.findUnique({
+      where: {
+        id_companyId: { id: actorUserId, companyId },
+      },
+      select: {
+        isActive: true,
+        status: true,
+        deletedAt: true,
+        company: { select: { status: true } },
+      },
+    });
+    if (
+      !actor ||
+      actor.deletedAt !== null ||
+      !actor.isActive ||
+      actor.status !== PrismaUserAccountStatus.ACTIVE ||
+      actor.company.status !== 'ACTIVE'
+    ) {
+      throw conflict(
+        'O acesso do responsável foi revogado. Atualize os dados e tente novamente.',
+      );
     }
   }
 
@@ -299,12 +503,7 @@ export class PrismaUsersRepository extends UsersRepository {
     const search = query.search?.trim();
     const accessFilters: Prisma.UserWhereInput[] = [];
     if (query.department) {
-      accessFilters.push({
-        OR: [
-          { isAdministrator: true },
-          { departments: { has: query.department } },
-        ],
-      });
+      accessFilters.push({ departments: { has: query.department } });
     }
     if (query.permission && !isImplicitPermissionCode(query.permission)) {
       accessFilters.push({
@@ -312,11 +511,40 @@ export class PrismaUsersRepository extends UsersRepository {
           { isAdministrator: true },
           {
             AND: [
-              { permissionCodes: { has: query.permission } },
               {
-                departments: {
-                  hasSome: departmentsAllowingPermission(query.permission),
+                documentAccessMode: {
+                  not: PrismaDocumentAccessMode.DOCUMENT_PORTAL,
                 },
+              },
+              {
+                OR: [
+                  ...(isTenantBusinessPermission(query.permission)
+                    ? [
+                        {
+                          AND: [
+                            { departments: { has: 'directorate' } },
+                            {
+                              permissionCodes: {
+                                has: TENANT_WIDE_PERMISSION,
+                              },
+                            },
+                          ],
+                        },
+                      ]
+                    : []),
+                  {
+                    AND: [
+                      { permissionCodes: { has: query.permission } },
+                      {
+                        departments: {
+                          hasSome: departmentsAllowingPermission(
+                            query.permission,
+                          ),
+                        },
+                      },
+                    ],
+                  },
+                ],
               },
             ],
           },
@@ -330,7 +558,28 @@ export class PrismaUsersRepository extends UsersRepository {
         : {}),
       deletedAt: null,
       ...(query.excludeUserId ? { id: { not: query.excludeUserId } } : {}),
-      ...(query.excludeAdministrators ? { isAdministrator: false } : {}),
+      ...(query.excludePrivilegedUsers
+        ? {
+            NOT: {
+              OR: [
+                { isAdministrator: true },
+                {
+                  AND: [
+                    {
+                      documentAccessMode: {
+                        not: PrismaDocumentAccessMode.DOCUMENT_PORTAL,
+                      },
+                    },
+                    { departments: { has: 'directorate' } },
+                    { permissionCodes: { has: TENANT_WIDE_PERMISSION } },
+                  ],
+                },
+              ],
+            },
+          }
+        : query.excludeAdministrators
+          ? { isAdministrator: false }
+          : {}),
       ...(accessFilters.length > 0 ? { AND: accessFilters } : {}),
       ...(query.status
         ? {
@@ -367,75 +616,237 @@ export class PrismaUsersRepository extends UsersRepository {
     return { items: rows.map(mapUserRecord), total };
   }
 
-  async update(
+  private async loadUpdateReplay(
+    client: Prisma.TransactionClient,
     companyId: string,
-    userId: string,
-    input: UpdateUserPersistenceInput,
-  ): Promise<UserRecord> {
-    const data = userUpdateData(input);
-
-    try {
-      return await this.prisma.$transaction(async (transaction) => {
-        await transaction.user.update({
-          where: { id_companyId: { id: userId, companyId } },
-          data,
-        });
-
-        const row = await transaction.user.findUniqueOrThrow({
-          where: { id_companyId: { id: userId, companyId } },
-          select: userRecordSelect,
-        });
-        return mapUserRecord(row);
-      });
-    } catch (error) {
-      rethrowKnownPrismaConflict(error);
+    input: FindUserUpdateReplayInput,
+  ): Promise<UpdateUserPersistenceResult | null> {
+    const history = await client.userUpdateHistory.findUnique({
+      where: {
+        companyId_commandId: {
+          companyId,
+          commandId: input.commandId,
+        },
+      },
+      select: {
+        userId: true,
+        actorUserId: true,
+        commandFingerprint: true,
+      },
+    });
+    if (!history) return null;
+    if (
+      history.userId !== input.userId ||
+      (history.actorUserId ?? undefined) !== input.actorUserId ||
+      history.commandFingerprint !== input.requestFingerprint
+    ) {
+      throw conflict('O commandId já foi utilizado com outros dados.');
     }
+    const row = await client.user.findUnique({
+      where: { id_companyId: { id: input.userId, companyId } },
+      select: userRecordSelect,
+    });
+    if (!row) {
+      throw conflict('O resultado idempotente não está mais disponível.');
+    }
+    return { record: mapUserRecord(row), idempotent: true };
   }
 
-  async updateWithAdministratorInvariant(
+  async findUpdateReplay(
+    companyId: string,
+    input: FindUserUpdateReplayInput,
+  ): Promise<UpdateUserPersistenceResult | null> {
+    return this.retrySerializable(() =>
+      this.prisma.$transaction(
+        async (transaction) => {
+          const locked = await transaction.$queryRaw<Array<{ id: string }>>`
+            SELECT id
+            FROM users
+            WHERE id = CAST(${input.actorUserId} AS uuid)
+              AND company_id = CAST(${companyId} AS uuid)
+            FOR UPDATE
+          `;
+          if (locked.length !== 1) {
+            throw conflict(
+              'O acesso do responsável foi revogado. Atualize os dados e tente novamente.',
+            );
+          }
+          await this.assertActiveMutationActor(
+            transaction,
+            companyId,
+            input.actorUserId,
+          );
+          return this.loadUpdateReplay(transaction, companyId, input);
+        },
+        { isolationLevel: 'Serializable' },
+      ),
+    );
+  }
+
+  private async executeUpdateCommand(
     companyId: string,
     userId: string,
     input: UpdateUserPersistenceInput,
-  ): Promise<UserRecord | null> {
-    const data = userUpdateData(input);
+    enforceAdministratorInvariant: boolean,
+  ): Promise<UpdateUserPersistenceResult | null> {
+    const replayInput: FindUserUpdateReplayInput = {
+      userId,
+      actorUserId: input.command.actorUserId,
+      commandId: input.command.commandId,
+      requestFingerprint: input.command.requestFingerprint,
+    };
     try {
       return await this.retrySerializable(() =>
         this.prisma.$transaction(
           async (transaction) => {
-            const activeAdministrators = await transaction.user.count({
-              where: {
-                companyId,
-                isAdministrator: true,
-                isActive: true,
-                status: PrismaUserAccountStatus.ACTIVE,
-              },
+            if (enforceAdministratorInvariant) {
+              await this.lockAdministratorInvariant(transaction, companyId);
+            }
+            await this.lockMutationUsers(transaction, companyId, userId, input);
+            await this.assertActiveMutationActor(
+              transaction,
+              companyId,
+              input.command.actorUserId,
+            );
+            const replayed = await this.loadUpdateReplay(
+              transaction,
+              companyId,
+              replayInput,
+            );
+            if (replayed) return replayed;
+
+            await this.assertMutationSnapshot(
+              transaction,
+              companyId,
+              userId,
+              input,
+            );
+            const beforeRow = await transaction.user.findUnique({
+              where: { id_companyId: { id: userId, companyId } },
+              select: userRecordSelect,
             });
-            if (activeAdministrators <= 1) return null;
+            if (!beforeRow) {
+              throw conflict(
+                'O usuário foi alterado por outra operação. Atualize os dados e tente novamente.',
+              );
+            }
+            if (beforeRow.version !== input.command.expectedVersion) {
+              throw conflict(
+                `O usuário foi alterado por outro comando. Versão atual: ${beforeRow.version}.`,
+              );
+            }
+
+            if (enforceAdministratorInvariant) {
+              const activeAdministrators = await transaction.user.count({
+                where: {
+                  companyId,
+                  isAdministrator: true,
+                  isActive: true,
+                  status: PrismaUserAccountStatus.ACTIVE,
+                },
+              });
+              if (activeAdministrators <= 1) return null;
+            }
 
             const changed = await transaction.user.updateMany({
               where: {
                 id: userId,
                 companyId,
-                isAdministrator: true,
-                isActive: true,
-                status: PrismaUserAccountStatus.ACTIVE,
+                deletedAt: null,
+                version: input.command.expectedVersion,
+                ...(enforceAdministratorInvariant
+                  ? {
+                      isAdministrator: true,
+                      isActive: true,
+                      status: PrismaUserAccountStatus.ACTIVE,
+                    }
+                  : {}),
               },
-              data,
+              data: userUpdateData(input),
             });
-            if (changed.count !== 1) return null;
+            if (changed.count !== 1) {
+              throw conflict(
+                'O usuário foi alterado por outro comando. Recarregue e tente novamente.',
+              );
+            }
 
             const row = await transaction.user.findUniqueOrThrow({
               where: { id_companyId: { id: userId, companyId } },
               select: userRecordSelect,
             });
-            return mapUserRecord(row);
+            const before = mapUserRecord(beforeRow);
+            const record = mapUserRecord(row);
+            const changedFields = userChangedFields(before, record);
+            const occurredAt = new Date();
+            await transaction.userUpdateHistory.create({
+              data: {
+                companyId,
+                userId,
+                actorUserId: input.command.actorUserId,
+                commandId: input.command.commandId,
+                commandFingerprint: input.command.requestFingerprint,
+                action: 'USER_UPDATED',
+                expectedVersion: input.command.expectedVersion,
+                resultingVersion: record.user.props.version,
+                changedFields,
+                beforeSnapshot: json(userMutationSnapshot(before)),
+                resultSnapshot: json(userMutationSnapshot(record)),
+                occurredAt,
+              },
+            });
+            await transaction.tenantAuditLog.create({
+              data: {
+                companyId,
+                actorUserId: input.command.actorUserId,
+                action: 'USER_UPDATED',
+                targetType: 'user',
+                targetId: userId,
+                metadata: json({
+                  commandId: input.command.commandId,
+                  expectedVersion: input.command.expectedVersion,
+                  resultingVersion: record.user.props.version,
+                  changedFields,
+                  requestedFields: input.command.changedFields,
+                }),
+              },
+            });
+            return { record, idempotent: false };
           },
           { isolationLevel: 'Serializable' },
         ),
       );
     } catch (error) {
+      if (isUniqueConflict(error)) {
+        const replayed = await this.findUpdateReplay(companyId, replayInput);
+        if (replayed) return replayed;
+      }
       rethrowKnownPrismaConflict(error);
     }
+  }
+
+  async update(
+    companyId: string,
+    userId: string,
+    input: UpdateUserPersistenceInput,
+  ): Promise<UpdateUserPersistenceResult> {
+    const result = await this.executeUpdateCommand(
+      companyId,
+      userId,
+      input,
+      false,
+    );
+    if (!result) {
+      throw conflict('Não foi possível atualizar o usuário.');
+    }
+    return result;
+  }
+
+  updateWithAdministratorInvariant(
+    companyId: string,
+    userId: string,
+    input: UpdateUserPersistenceInput,
+  ): Promise<UpdateUserPersistenceResult | null> {
+    return this.executeUpdateCommand(companyId, userId, input, true);
   }
 
   async updateStatus(
@@ -451,8 +862,20 @@ export class PrismaUsersRepository extends UsersRepository {
           : PrismaUserAccountStatus.SUSPENDED;
 
     return this.prisma.$transaction(async (transaction) => {
-      await transaction.user.update({
-        where: { id_companyId: { id: userId, companyId } },
+      const changed = await transaction.user.updateMany({
+        where: {
+          id: userId,
+          companyId,
+          ...(input.status === 'active'
+            ? {}
+            : {
+                NOT: {
+                  isAdministrator: true,
+                  isActive: true,
+                  status: PrismaUserAccountStatus.ACTIVE,
+                },
+              }),
+        },
         data: {
           status,
           isActive: input.status === 'active',
@@ -461,6 +884,11 @@ export class PrismaUsersRepository extends UsersRepository {
           tokenVersion: { increment: 1 },
         },
       });
+      if (changed.count !== 1) {
+        throw conflict(
+          'O estado administrativo do usuário mudou. Atualize os dados e tente novamente.',
+        );
+      }
       await transaction.refreshToken.updateMany({
         where: { companyId, userId, revokedAt: null },
         data: { revokedAt: input.changedAt },
@@ -488,6 +916,7 @@ export class PrismaUsersRepository extends UsersRepository {
     return this.retrySerializable(() =>
       this.prisma.$transaction(
         async (transaction) => {
+          await this.lockAdministratorInvariant(transaction, companyId);
           const activeAdministrators = await transaction.user.count({
             where: {
               companyId,
@@ -539,6 +968,7 @@ export class PrismaUsersRepository extends UsersRepository {
     return this.retrySerializable(() =>
       this.prisma.$transaction(
         async (transaction) => {
+          await this.lockAdministratorInvariant(transaction, companyId);
           const target = await transaction.user.findFirst({
             where: { id: userId, companyId, deletedAt: null },
             select: { isAdministrator: true },

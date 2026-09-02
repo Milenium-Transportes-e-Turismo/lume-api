@@ -9,6 +9,8 @@ import {
   type ConfirmedServiceRecord,
   type ConfirmServiceCommand,
   type ConfirmServiceResult,
+  type MarkCommercialServiceRequirementNotApplicableCommand,
+  type MarkCommercialServiceRequirementNotApplicableResult,
 } from '../../../application/contracts/confirmed-service.repository';
 import {
   AppError,
@@ -18,13 +20,16 @@ import {
   validationError,
 } from '../../../core/errors/app-error';
 import {
+  assertCanMarkCommercialServiceRequirementNotApplicable,
   assertCanAttestCommercialServiceRequirement,
   assertCanConfirmCommercialService,
   type CommercialServiceRequirementKind,
+  type CommercialServiceRequirementOutcome,
 } from '../../../domain/commercial/confirmed-service';
 import { presentDateOnly } from '../../../domain/commercial/quote-schedule';
 import {
   CommercialServiceRequirementKind as PrismaCommercialServiceRequirementKind,
+  CommercialServiceRequirementOutcome as PrismaCommercialServiceRequirementOutcome,
   Prisma,
   RequestStatus,
   UserAccountStatus,
@@ -42,6 +47,15 @@ type RepeatedAttestationClient = Pick<
   Prisma.TransactionClient,
   'commercialServiceRequirementAttestation'
 >;
+
+type RequirementAttestationWriteCommand =
+  | (AttestCommercialServiceRequirementCommand & {
+      readonly outcome: 'SATISFIED';
+      readonly reason: null;
+    })
+  | (MarkCommercialServiceRequirementNotApplicableCommand & {
+      readonly outcome: 'NOT_APPLICABLE';
+    });
 
 type ConfirmedServiceRow = {
   readonly id: string;
@@ -64,6 +78,8 @@ type CommercialServiceRequirementAttestationRow = {
   readonly sourceQuoteVersion: number;
   readonly sourceItemKey: string;
   readonly kind: PrismaCommercialServiceRequirementKind;
+  readonly outcome: PrismaCommercialServiceRequirementOutcome;
+  readonly reason: string | null;
   readonly evidence: string;
   readonly actorUserId: string;
   readonly commandId: string;
@@ -90,6 +106,36 @@ const requirementKindFromPrisma: Readonly<
   OPERATIONAL: 'operational',
 };
 
+const requirementOutcomeFromPrisma: Readonly<
+  Record<
+    PrismaCommercialServiceRequirementOutcome,
+    CommercialServiceRequirementOutcome
+  >
+> = {
+  SATISFIED: 'SATISFIED',
+  NOT_APPLICABLE: 'NOT_APPLICABLE',
+};
+
+const requirementOutcomeToPrisma: Readonly<
+  Record<
+    CommercialServiceRequirementOutcome,
+    PrismaCommercialServiceRequirementOutcome
+  >
+> = {
+  SATISFIED: PrismaCommercialServiceRequirementOutcome.SATISFIED,
+  NOT_APPLICABLE: PrismaCommercialServiceRequirementOutcome.NOT_APPLICABLE,
+};
+
+const requirementOutcomeSnapshotValue: Readonly<
+  Record<
+    PrismaCommercialServiceRequirementOutcome,
+    'satisfied' | 'not-applicable'
+  >
+> = {
+  SATISFIED: 'satisfied',
+  NOT_APPLICABLE: 'not-applicable',
+};
+
 function mapAttestation(
   row: CommercialServiceRequirementAttestationRow,
 ): CommercialServiceRequirementAttestationRecord {
@@ -100,6 +146,8 @@ function mapAttestation(
     sourceQuoteVersion: row.sourceQuoteVersion,
     sourceItemKey: row.sourceItemKey,
     kind: requirementKindFromPrisma[row.kind],
+    outcome: requirementOutcomeFromPrisma[row.outcome],
+    reason: row.reason,
     evidence: row.evidence,
     actorUserId: row.actorUserId,
     commandId: row.commandId,
@@ -193,10 +241,32 @@ export class PrismaConfirmedServiceRepository extends ConfirmedServiceRepository
     super();
   }
 
+  private async lockActorForAuthority(
+    transaction: Prisma.TransactionClient,
+    companyId: string,
+    actorUserId: string,
+  ): Promise<void> {
+    const lockedActor = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT id
+      FROM users
+      WHERE id = CAST(${actorUserId} AS uuid)
+        AND company_id = CAST(${companyId} AS uuid)
+      FOR SHARE
+    `;
+    if (lockedActor.length !== 1) {
+      throw forbidden('O usuário não está ativo neste tenant.');
+    }
+  }
+
   private async assertActorCanConfirm(
     transaction: Prisma.TransactionClient,
     input: Pick<ConfirmServiceCommand, 'companyId' | 'actorUserId'>,
   ): Promise<void> {
+    await this.lockActorForAuthority(
+      transaction,
+      input.companyId,
+      input.actorUserId,
+    );
     const actor = await transaction.user.findUnique({
       where: {
         id_companyId: {
@@ -208,6 +278,8 @@ export class PrismaConfirmedServiceRepository extends ConfirmedServiceRepository
         isActive: true,
         status: true,
         deletedAt: true,
+        isAdministrator: true,
+        documentAccessMode: true,
         departments: true,
         permissionCodes: true,
       },
@@ -220,18 +292,26 @@ export class PrismaConfirmedServiceRepository extends ConfirmedServiceRepository
       throw forbidden('O usuário não está ativo neste tenant.');
     }
     assertCanConfirmCommercialService({
+      isAdministrator: actor.isAdministrator,
       departments: actor.departments,
+      permissionCodes: actor.permissionCodes,
       permissions: actor.permissionCodes,
+      documentAccessMode: actor.documentAccessMode,
     });
   }
 
-  private async assertActorCanAttest(
+  private async assertActorCanRecordRequirement(
     transaction: Prisma.TransactionClient,
     input: Pick<
-      AttestCommercialServiceRequirementCommand,
-      'companyId' | 'actorUserId' | 'kind'
+      RequirementAttestationWriteCommand,
+      'companyId' | 'actorUserId' | 'kind' | 'outcome'
     >,
   ): Promise<void> {
+    await this.lockActorForAuthority(
+      transaction,
+      input.companyId,
+      input.actorUserId,
+    );
     const actor = await transaction.user.findUnique({
       where: {
         id_companyId: {
@@ -243,6 +323,8 @@ export class PrismaConfirmedServiceRepository extends ConfirmedServiceRepository
         isActive: true,
         status: true,
         deletedAt: true,
+        isAdministrator: true,
+        documentAccessMode: true,
         departments: true,
         permissionCodes: true,
       },
@@ -254,13 +336,26 @@ export class PrismaConfirmedServiceRepository extends ConfirmedServiceRepository
     ) {
       throw forbidden('O usuário não está ativo neste tenant.');
     }
-    assertCanAttestCommercialServiceRequirement(
-      {
-        departments: actor.departments,
-        permissions: actor.permissionCodes,
-      },
-      input.kind,
-    );
+    if (input.outcome === 'SATISFIED') {
+      assertCanAttestCommercialServiceRequirement(
+        {
+          isAdministrator: actor.isAdministrator,
+          departments: actor.departments,
+          permissionCodes: actor.permissionCodes,
+          permissions: actor.permissionCodes,
+          documentAccessMode: actor.documentAccessMode,
+        },
+        input.kind,
+      );
+      return;
+    }
+    assertCanMarkCommercialServiceRequirementNotApplicable({
+      isAdministrator: actor.isAdministrator,
+      departments: actor.departments,
+      permissionCodes: actor.permissionCodes,
+      permissions: actor.permissionCodes,
+      documentAccessMode: actor.documentAccessMode,
+    });
   }
 
   private async repeatedCommand(
@@ -302,7 +397,7 @@ export class PrismaConfirmedServiceRepository extends ConfirmedServiceRepository
 
   private async repeatedAttestation(
     client: RepeatedAttestationClient,
-    input: AttestCommercialServiceRequirementCommand,
+    input: RequirementAttestationWriteCommand,
   ): Promise<AttestCommercialServiceRequirementResult | null> {
     const attestation =
       await client.commercialServiceRequirementAttestation.findUnique({
@@ -318,6 +413,7 @@ export class PrismaConfirmedServiceRepository extends ConfirmedServiceRepository
       attestation.actorUserId !== input.actorUserId ||
       attestation.sourceQuoteRequestId !== input.quoteRequestId ||
       attestation.kind !== requirementKindToPrisma[input.kind] ||
+      attestation.outcome !== requirementOutcomeToPrisma[input.outcome] ||
       attestation.commandFingerprint !== input.requestFingerprint
     ) {
       throw conflict('Este commandId já foi utilizado com outros dados.');
@@ -354,7 +450,7 @@ export class PrismaConfirmedServiceRepository extends ConfirmedServiceRepository
   }
 
   private async replayAttestationAfterConcurrentFailure(
-    input: AttestCommercialServiceRequirementCommand,
+    input: RequirementAttestationWriteCommand,
   ): Promise<AttestCommercialServiceRequirementResult | null> {
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       const repeated = await this.repeatedAttestation(this.prisma, input);
@@ -369,11 +465,30 @@ export class PrismaConfirmedServiceRepository extends ConfirmedServiceRepository
   async attestRequirement(
     input: AttestCommercialServiceRequirementCommand,
   ): Promise<AttestCommercialServiceRequirementResult> {
+    return this.recordRequirementAttestation({
+      ...input,
+      outcome: 'SATISFIED',
+      reason: null,
+    });
+  }
+
+  async markRequirementNotApplicable(
+    input: MarkCommercialServiceRequirementNotApplicableCommand,
+  ): Promise<MarkCommercialServiceRequirementNotApplicableResult> {
+    return this.recordRequirementAttestation({
+      ...input,
+      outcome: 'NOT_APPLICABLE',
+    });
+  }
+
+  private async recordRequirementAttestation(
+    input: RequirementAttestationWriteCommand,
+  ): Promise<AttestCommercialServiceRequirementResult> {
     try {
       return await this.retrySerializable(() =>
         this.prisma.$transaction(
           async (transaction) => {
-            await this.assertActorCanAttest(transaction, input);
+            await this.assertActorCanRecordRequirement(transaction, input);
             const repeated = await this.repeatedAttestation(transaction, input);
             if (repeated) return repeated;
 
@@ -439,6 +554,8 @@ export class PrismaConfirmedServiceRepository extends ConfirmedServiceRepository
                   sourceQuoteVersion: quote.version,
                   sourceItemKey: input.sourceItemKey,
                   kind: requirementKindToPrisma[input.kind],
+                  outcome: requirementOutcomeToPrisma[input.outcome],
+                  reason: input.reason,
                   evidence: input.evidence,
                   actorUserId: input.actorUserId,
                   commandId: input.commandId,
@@ -451,13 +568,18 @@ export class PrismaConfirmedServiceRepository extends ConfirmedServiceRepository
               data: {
                 companyId: input.companyId,
                 actorUserId: input.actorUserId,
-                action: 'commercial.service-requirement.attest',
+                action:
+                  input.outcome === 'SATISFIED'
+                    ? 'commercial.service-requirement.attest'
+                    : 'commercial.service-requirement.mark-not-applicable',
                 targetType: 'quote-request',
                 targetId: quote.id,
                 metadata: {
                   sourceQuoteVersion: quote.version,
                   sourceItemKey: input.sourceItemKey,
                   requirement: input.kind,
+                  outcome: input.outcome,
+                  reason: input.reason,
                   evidence: input.evidence,
                   attestationId: attestation.id,
                 },
@@ -608,17 +730,31 @@ export class PrismaConfirmedServiceRepository extends ConfirmedServiceRepository
                 decidedByUserId: quote.decidedByUserId,
               },
               financial: {
-                outcome: 'satisfied',
-                provenance: 'financial-attestation',
+                outcome:
+                  requirementOutcomeSnapshotValue[financialAttestation.outcome],
+                provenance:
+                  financialAttestation.outcome ===
+                  PrismaCommercialServiceRequirementOutcome.SATISFIED
+                    ? 'financial-attestation'
+                    : 'requirement-not-applicable-decision',
                 attestationId: financialAttestation.id,
+                reason: financialAttestation.reason,
                 evidence: financialAttestation.evidence,
                 attestedByUserId: financialAttestation.actorUserId,
                 attestedAt: financialAttestation.attestedAt.toISOString(),
               },
               operational: {
-                outcome: 'satisfied',
-                provenance: 'operational-attestation',
+                outcome:
+                  requirementOutcomeSnapshotValue[
+                    operationalAttestation.outcome
+                  ],
+                provenance:
+                  operationalAttestation.outcome ===
+                  PrismaCommercialServiceRequirementOutcome.SATISFIED
+                    ? 'operational-attestation'
+                    : 'requirement-not-applicable-decision',
                 attestationId: operationalAttestation.id,
+                reason: operationalAttestation.reason,
                 evidence: operationalAttestation.evidence,
                 attestedByUserId: operationalAttestation.actorUserId,
                 attestedAt: operationalAttestation.attestedAt.toISOString(),

@@ -22,7 +22,9 @@ function principal(
   return {
     id: actorUserId,
     companyId,
+    isAdministrator: false,
     departments: ['human-resources'],
+    permissionCodes: ['documents:manage'],
     permissions: ['documents:manage'],
     ...overrides,
   } as AuthenticatedPrincipal;
@@ -180,6 +182,57 @@ describe('PreAdmissionAccessService', () => {
         uploadAvailable: false,
       }),
     );
+  });
+
+  it('allows Admin without departments and tenant-wide Directorate to create pre-admission access', async () => {
+    for (const current of [
+      principal({
+        isAdministrator: true,
+        departments: [],
+        permissionCodes: [],
+        permissions: [],
+      }),
+      principal({
+        isAdministrator: false,
+        departments: ['directorate'],
+        permissionCodes: ['tenant:manage'],
+        permissions: ['tenant:manage'],
+      }),
+    ]) {
+      const { service } = setup();
+      await expect(
+        service.create(current, {
+          commandId: '11111111-1111-4111-8111-111111111111',
+          expectedVersion: 0,
+          personRegistrationId,
+          documentTypeIds: [documentTypeId],
+        }),
+      ).resolves.toMatchObject({
+        purpose: 'admission-document-upload',
+        version: 1,
+      });
+    }
+  });
+
+  it('rejects Directorate without tenant authority from pre-admission management', async () => {
+    const { service } = setup();
+
+    await expect(
+      service.create(
+        principal({
+          isAdministrator: false,
+          departments: ['directorate'],
+          permissionCodes: ['documents:manage'],
+          permissions: ['documents:manage'],
+        }),
+        {
+          commandId: '11111111-1111-4111-8111-111111111111',
+          expectedVersion: 0,
+          personRegistrationId,
+          documentTypeIds: [documentTypeId],
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
   it('returns the same raw token when an idempotent creation is retried', async () => {

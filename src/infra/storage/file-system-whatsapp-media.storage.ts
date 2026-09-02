@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { dirname, resolve, sep } from 'node:path';
 
 import { Injectable } from '@nestjs/common';
@@ -8,12 +8,13 @@ import { ConfigService } from '@nestjs/config';
 import {
   WhatsAppMediaStorage,
   type PersistWhatsAppMediaInput,
+  type PersistWhatsAppMediaResult,
 } from '../../application/contracts/whatsapp-media.storage';
 
 const UUID_SEGMENT =
   '[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
 const STORAGE_KEY_PATTERN = new RegExp(
-  `^v1/${UUID_SEGMENT}/${UUID_SEGMENT}/${UUID_SEGMENT}/[0-9a-f]{64}$`,
+  `^v1/${UUID_SEGMENT}/${UUID_SEGMENT}/${UUID_SEGMENT}(?:/[0-9a-f]{64})?$`,
   'i',
 );
 
@@ -35,7 +36,9 @@ export class FileSystemWhatsAppMediaStorage extends WhatsAppMediaStorage {
     );
   }
 
-  async write(input: PersistWhatsAppMediaInput): Promise<void> {
+  async write(
+    input: PersistWhatsAppMediaInput,
+  ): Promise<PersistWhatsAppMediaResult> {
     const destination = this.resolveStorageKey(input.storageKey);
     await mkdir(dirname(destination), { recursive: true });
 
@@ -43,13 +46,15 @@ export class FileSystemWhatsAppMediaStorage extends WhatsAppMediaStorage {
     try {
       await writeFile(temporary, input.content, { flag: 'wx', mode: 0o600 });
       try {
-        await rename(temporary, destination);
+        await link(temporary, destination);
+        return { created: true };
       } catch (error) {
         if (!['EEXIST', 'EPERM'].includes(errorCode(error) ?? '')) throw error;
         const existing = await readFile(destination);
         if (!existing.equals(input.content)) {
           throw new Error('A chave de mídia já contém outro conteúdo.');
         }
+        return { created: false };
       }
     } finally {
       await unlink(temporary).catch((error: unknown) => {

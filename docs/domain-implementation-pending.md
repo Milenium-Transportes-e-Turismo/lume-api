@@ -80,10 +80,10 @@ esteira paralela.
 
 **Decisão organizacional concluída**: RH e Departamento Pessoal possuem o mesmo
 teto de capacidades documentais e ambos podem administrar a pré-admissão quando
-recebem individualmente `documents:manage`. `human-resources` continua
-suportado para contas legadas; Departamento Pessoal continua sendo a opção
-atribuível no catálogo atual. Esta decisão documental não cria, por si só, um
-segundo departamento ou fila de WhatsApp.
+recebem individualmente `documents:manage`. Os dois são departamentos
+atribuíveis e separados no catálogo atual, embora exerçam funções documentais
+parecidas. Essa equivalência de permissões não define qual deles responde por
+cada tipo de documento nem cria uma trava exclusiva na fila de WhatsApp.
 
 ## Titulares documentais
 
@@ -104,13 +104,21 @@ classificação automática de titular.
 
 ## Novo modelo de autorização
 
-**Estado**: projeção determinística do acesso legado implementada; novo modelo
-de perfis e restrições ainda não ativado no runtime.
+**Estado**: projeção determinística do acesso legado implementada e autoridade
+alvo definida; perfis, restrições e departamentos dinâmicos ainda não estão
+ativados integralmente no runtime.
 
 Perfis e áreas entram de forma aditiva e inicialmente reproduzem o acesso
-efetivo atual. Administradores preservam sua autoridade. Restrições novas só
-prevalecem depois de registradas e revisadas, mantendo a proteção do último
-administrador ativo e um caminho de reversão.
+efetivo atual. O Administrador da Instalação preserva autoridade total. A
+Diretoria somente recebe autoridade ampla de negócio com `directorate` e a
+atribuição individual `tenant:manage`; a Gerência continua limitada às
+capacidades estreitas de cada processo. Supervisão é capacidade, não perfil ou
+cargo fixo. Restrições novas só prevalecem depois de registradas e revisadas,
+mantendo a proteção do último administrador ativo e um caminho de reversão.
+
+O catálogo de departamentos ainda é fechado no código e no enum do banco. A
+regra aprovada abrange departamentos internos atuais e futuros, mas a criação
+dinâmica em runtime permanece uma lacuna e não deve ser anunciada pela API.
 
 ## Operação de viagens
 
@@ -126,9 +134,13 @@ contínuos não criam viagens automaticamente nesta fase.
 Antes da confirmação eventual, o Financeiro registra o ateste com
 `financial:approve`, o Operacional registra o seu com `operations:manage` e o
 Comercial finaliza com `commercial:manage`. Os três atores são revalidados
-dentro das transações; a Administradora não substitui essas responsabilidades.
-Dispensas `not-applicable` permanecem bloqueadas até existir uma capacidade
-estreita de Gerência/Diretoria aprovada.
+dentro das transações. A autorização para exceções foi definida: Gerência usa
+`service-confirmations:approve`, Diretoria usa `tenant:manage` atribuída
+individualmente e o Administrador da Instalação possui autoridade total. O
+contrato `not-applicable` está implementado com motivo, evidência, `commandId`,
+versão esperada, idempotência, auditoria e revalidação do ator dentro da
+transação. A Gerência não recebe, por essa capacidade estreita, o direito de
+executar os atestes ordinários ou confirmar o Serviço.
 
 A criação exige a versão esperada do contrato ou do Serviço Confirmado, e cada
 comando da viagem exige `commandId` e `expectedVersion`. Aceite e confirmação
@@ -153,31 +165,27 @@ acesso é migrado, sem transformar Plano de Rota na fonte da operação.
 
 ## Atendimento e transferências
 
-**Estado**: proteção autoritativa de devolução ao bot e fluxo explícito de
-solicitação/aceite implementados; política de exceção por supervisão permanece
-fechada em modo seguro.
+**Estado**: fluxo explícito de solicitação/aceite e política de atendimento
+transversal implementados na API; a integração correspondente no Tenant Web
+ainda precisa consumir o contrato publicado.
 
-Somente o atendente atribuído pode executar `return-to-bot`, com a validação
-dentro da transação. Uma transferência nova registra destino e motivo, mas
-mantém o atendimento ativo, o departamento e o responsável de origem até o
-aceite. A pendência aparece na fila do destino e somente um usuário ativo desse
-departamento pode aceitá-la; o aceite troca departamento e responsável na mesma
-transação. Até existir uma decisão explícita sobre autoridade de supervisores,
-nenhum perfil recebe exceção implícita. O encaminhamento legado é mantido como
-alias, mas exige motivo e produz a mesma espera por aceite. A mudança direta de
-departamento também exige motivo e não pode contornar uma atribuição humana.
-Consultas por identificador, histórico, proposta e mídia respeitam o
-departamento atual ou o destino pendente. Ações genéricas também são revalidadas
-na transação; assumir ou encerrar não substitui silenciosamente outro atendente.
+Uma transferência registra destino e motivo, mas mantém o atendimento ativo e
+o departamento de origem até o aceite. A pendência aparece na fila do destino e
+um usuário autorizado desse departamento pode aceitá-la. A capacidade
+individual `whatsapp-conversations:attend` é transversal a todos os
+departamentos internos catalogados e é proibida para `client-company`.
 
-O contrato está implementado no backend, mas o rollout geral permanece
-bloqueado pela matriz atual: `whatsapp-conversations:manage` pertence ao teto do
-Comercial, e um usuário somente de Operacional ou Financeiro não consegue
-recebê-lo por atribuição individual. Não se deve adicionar Comercial
-artificialmente para contornar esse limite. A definição de quais departamentos
-recebem essa capacidade, ou de uma capacidade separada para aceitar
-transferências, permanece uma decisão de autorização e não foi ampliada por
-inferência.
+O responsável é a referência corrente da conversa, não um mutex. Qualquer
+usuário autorizado no escopo pode atuar ou substituir essa referência; toda
+mutação continua exigindo `expectedVersion`, revalidação dentro da transação
+e histórico com ator e responsável anterior. Supervisão segue a mesma regra de
+capacidade explícita, sem perfil rígido ou override implícito por nome de cargo.
+
+`whatsapp-conversations:manage` permanece como capacidade ampla legada para
+administração do canal e operações de proposta Comercial; não deve ser
+concedido apenas para liberar atendimento. O Tenant Web deve usar `attend` em
+leitura, resposta, substituição, transferência, encerramento e retorno ao bot,
+enviando a versão esperada e tratando conflitos sem simular sucesso local.
 
 ## Classificação dos cancelamentos existentes
 
@@ -215,3 +223,32 @@ atribuídas individualmente em `permissionCodes`; pertencer à Gerência não as
 ativa sozinho. As decisões não concedem `clients:manage`, acesso ao histórico,
 permissões comerciais ou autoridade administrativa, e os guards, o tenant e as
 regras de domínio continuam aplicáveis.
+
+**ADR-0013 — Autoridade e atendimento**: RH e Departamento Pessoal permanecem
+separados com o mesmo teto documental; `whatsapp-conversations:attend` é
+individual e transversal somente a departamentos internos; `directorate` com
+`tenant:manage` individual representa autoridade ampla de negócio; Gerência
+usa capacidades estreitas; e o Administrador da Instalação permanece uma
+autoridade total distinta. Responsável de conversa é referência corrente e
+supervisão é capacidade, sempre com versão esperada e auditoria.
+
+## Endurecimentos concorrenciais
+
+O `PATCH /users/:id` exige `commandId` e `expectedVersion`, trava e revalida o
+responsável e o alvo, incrementa a versão do cadastro e grava o recibo
+idempotente, o histórico e a auditoria dentro da mesma transação. O mesmo
+comando com o mesmo conteúdo não repete a mutação; conteúdo divergente ou versão
+antiga retorna conflito. O Tenant Web deve consumir `version` da resposta e não
+inferir concorrência apenas a partir de `updatedAt`.
+
+Quando a alteração de perfil recalcula documentos do funcionário, a
+sincronização usa o mesmo `commandId` e registra seu recibo no histórico da
+atualização. Um retry conclui uma falha posterior ao PATCH sem criar outra
+solicitação, incrementar novamente sua versão ou duplicar a auditoria.
+
+Uploads de mídia do painel usam uma única chave imutável por tenant, conversa e
+identidade idempotente da mensagem; conteúdo divergente não cria uma segunda
+chave. Falhas ambíguas continuam preservando o blob para não apagar uma mídia
+que possa ter sido confirmada. Antes de produção com alto volume, falta o job
+de reconciliação/quota para remover somente blobs comprovadamente órfãos de
+comandos distintos, sem depender de limpeza síncrona insegura.

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import ExcelJS from 'exceljs';
@@ -11,6 +11,10 @@ import {
   notFound,
   validationError,
 } from '../../../core/errors/app-error';
+import {
+  canExercisePermission,
+  hasTenantWideAuthority,
+} from '../../../domain/access/tenant-authority';
 import {
   assertDocumentItemTransition,
   deriveDocumentRequestStatus,
@@ -42,7 +46,7 @@ import {
   DocumentRequirement as PrismaDocumentRequirement,
   DocumentReviewDecision,
   DocumentValidationStatus,
-  type Prisma,
+  Prisma,
 } from '../../../infra/database/prisma/generated/client';
 import { PrismaService } from '../../../infra/database/prisma/prisma.service';
 import { seedInitialDocumentCatalog } from '../../../infra/bootstrap/document-catalog.seed';
@@ -366,7 +370,7 @@ function contextFromPrisma(
 
 function hasPeopleOperationsScope(principal: AuthenticatedPrincipal): boolean {
   return (
-    principal.isAdministrator ||
+    hasTenantWideAuthority(principal) ||
     principal.departments.some((department) =>
       ['management', 'personnel-department', 'human-resources'].includes(
         department,
@@ -378,21 +382,17 @@ function hasPeopleOperationsScope(principal: AuthenticatedPrincipal): boolean {
 function assertManage(principal: AuthenticatedPrincipal): void {
   if (
     !hasPeopleOperationsScope(principal) ||
-    (!principal.isAdministrator &&
-      !principal.permissions.includes('documents:manage'))
+    !canExercisePermission(principal, 'documents:manage')
   ) {
     throw forbidden(
-      'Esta operação exige gestão documental por RH, DP ou Gerência.',
+      'Esta operação exige gestão documental por RH, DP, Gerência ou autoridade ampla no tenant.',
     );
   }
 }
 
 function assertReview(principal: AuthenticatedPrincipal): void {
   assertManage(principal);
-  if (
-    !principal.isAdministrator &&
-    !principal.permissions.includes('documents:approve')
-  ) {
+  if (!canExercisePermission(principal, 'documents:approve')) {
     throw forbidden('Esta operação exige permissão para revisar documentos.');
   }
 }
@@ -501,6 +501,52 @@ function requestStatusForItems(
   ];
 }
 
+const SERIALIZABLE_TRANSACTION_ATTEMPTS = 3;
+
+function isSerializableTransactionConflict(
+  error: unknown,
+  seen = new Set<unknown>(),
+): boolean {
+  if (typeof error !== 'object' || error === null || seen.has(error)) {
+    return false;
+  }
+  seen.add(error);
+  const record = error as Record<string, unknown>;
+  if (
+    ['P2034', '40001', '40P01'].includes(String(record.code)) ||
+    ['40001', '40P01'].includes(String(record.originalCode)) ||
+    record.kind === 'TransactionWriteConflict'
+  ) {
+    return true;
+  }
+  if (
+    typeof record.message === 'string' &&
+    /write conflict|deadlock|serialization failure|could not serialize|transactionwriteconflict/i.test(
+      record.message,
+    )
+  ) {
+    return true;
+  }
+  return ['cause', 'meta', 'driverAdapterError'].some((key) =>
+    isSerializableTransactionConflict(record[key], seen),
+  );
+}
+
+type SubmissionMutationSnapshot = {
+  id: string;
+  requestItemId: string;
+  status: PrismaDocumentItemStatus;
+  version: number;
+  updatedAt: Date;
+  requestItem: {
+    id: string;
+    requestId: string;
+    status: PrismaDocumentItemStatus;
+    currentVersion: number;
+    updatedAt: Date;
+  };
+};
+
 @Injectable()
 export class DocumentManagementUseCase {
   constructor(
@@ -509,6 +555,141 @@ export class DocumentManagementUseCase {
     @Inject(DOCUMENT_REVIEW_AGENT)
     private readonly reviewAgent?: DocumentReviewAgent,
   ) {}
+
+  private async retrySerializableTransaction<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    for (
+      let attempt = 1;
+      attempt <= SERIALIZABLE_TRANSACTION_ATTEMPTS;
+      attempt += 1
+    ) {
+      try {
+        return await operation();
+      } catch (error) {
+        if (
+          attempt === SERIALIZABLE_TRANSACTION_ATTEMPTS ||
+          !isSerializableTransactionConflict(error)
+        ) {
+          throw error;
+        }
+      }
+    }
+    throw new Error('Limite de tentativas serializáveis inválido.');
+  }
+
+  private async currentSubmissionMutationState(
+    transaction: Prisma.TransactionClient,
+    companyId: string,
+    submissionId: string,
+  ) {
+    return transaction.documentSubmission.findUnique({
+      where: {
+        id_companyId: { id: submissionId, companyId },
+      },
+      select: {
+        id: true,
+        requestItemId: true,
+        status: true,
+        version: true,
+        updatedAt: true,
+        validation: true,
+        requestItem: {
+          select: {
+            id: true,
+            requestId: true,
+            status: true,
+            currentVersion: true,
+            updatedAt: true,
+          },
+        },
+      },
+    });
+  }
+
+  private assertSubmissionSnapshot(
+    expected: SubmissionMutationSnapshot,
+    current: SubmissionMutationSnapshot | null,
+  ): asserts current is SubmissionMutationSnapshot {
+    if (
+      !current ||
+      current.id !== expected.id ||
+      current.requestItemId !== expected.requestItemId ||
+      current.status !== expected.status ||
+      current.version !== expected.version ||
+      current.updatedAt.getTime() !== expected.updatedAt.getTime() ||
+      current.requestItem.id !== expected.requestItem.id ||
+      current.requestItem.requestId !== expected.requestItem.requestId ||
+      current.requestItem.status !== expected.requestItem.status ||
+      current.requestItem.currentVersion !==
+        expected.requestItem.currentVersion ||
+      current.requestItem.updatedAt.getTime() !==
+        expected.requestItem.updatedAt.getTime()
+    ) {
+      throw conflict(
+        'O envio documental foi alterado por outra operação. Recarregue e tente novamente.',
+      );
+    }
+    if (current.version !== current.requestItem.currentVersion) {
+      throw conflict('Somente o envio documental atual pode ser alterado.');
+    }
+  }
+
+  private async lockEmployeeDocumentRequirementInvariant(
+    transaction: Prisma.TransactionClient,
+    companyId: string,
+    subjectUserId: string,
+    documentTypeId: string,
+  ): Promise<void> {
+    await transaction.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${`${companyId}:${subjectUserId}:${documentTypeId}:document-requirement`})
+      )
+    `;
+  }
+
+  private async lockDocumentRequestAggregates(
+    transaction: Prisma.TransactionClient,
+    companyId: string,
+    requestIds: readonly string[],
+  ): Promise<void> {
+    const orderedRequestIds = Array.from(new Set(requestIds)).sort();
+    for (const requestId of orderedRequestIds) {
+      await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT id
+        FROM document_request_items
+        WHERE company_id = CAST(${companyId} AS uuid)
+          AND request_id = CAST(${requestId} AS uuid)
+        ORDER BY id
+        FOR UPDATE
+      `;
+    }
+    for (const requestId of orderedRequestIds) {
+      await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT submissions.id
+        FROM document_submissions AS submissions
+        INNER JOIN document_request_items AS items
+          ON items.id = submissions.request_item_id
+         AND items.company_id = submissions.company_id
+        WHERE submissions.company_id = CAST(${companyId} AS uuid)
+          AND items.request_id = CAST(${requestId} AS uuid)
+        ORDER BY submissions.id
+        FOR UPDATE OF submissions
+      `;
+    }
+    for (const requestId of orderedRequestIds) {
+      const lockedRequest = await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT id
+        FROM document_requests
+        WHERE id = CAST(${requestId} AS uuid)
+          AND company_id = CAST(${companyId} AS uuid)
+        FOR UPDATE
+      `;
+      if (lockedRequest.length !== 1) {
+        throw notFound('Solicitação documental');
+      }
+    }
+  }
 
   async ensureInitialDocumentCatalog(
     principal: AuthenticatedPrincipal,
@@ -763,6 +944,184 @@ export class DocumentManagementUseCase {
     });
   }
 
+  private async createRequestInTransaction(
+    transaction: Prisma.TransactionClient,
+    principal: AuthenticatedPrincipal,
+    input: {
+      commandId: string;
+      subjectUserId: string;
+      checklistId: string;
+      context: DocumentRequestContext;
+      deadline?: string;
+      notes?: string;
+    },
+  ): Promise<string> {
+    const [subject, checklist] = await Promise.all([
+      transaction.user.findUnique({
+        where: {
+          id_companyId: {
+            id: input.subjectUserId,
+            companyId: principal.companyId,
+          },
+        },
+        select: {
+          id: true,
+          isActive: true,
+          jobTitle: true,
+          maritalStatus: true,
+          militaryDocumentStatus: true,
+          dependents: true,
+        },
+      }),
+      transaction.documentChecklistTemplate.findUnique({
+        where: {
+          id_companyId: {
+            id: input.checklistId,
+            companyId: principal.companyId,
+          },
+        },
+        include: {
+          items: {
+            where: { active: true },
+            orderBy: { position: 'asc' },
+            include: { documentType: true },
+          },
+        },
+      }),
+    ]);
+    if (!subject?.isActive) throw notFound('Usuário titular ativo');
+    if (!checklist?.active) throw notFound('Checklist ativo');
+    if (checklist.context !== requestContextToPrisma[input.context]) {
+      throw validationError(
+        'O contexto não corresponde ao checklist selecionado.',
+      );
+    }
+    const dependents = Array.isArray(subject.dependents)
+      ? (subject.dependents as unknown as UserDependent[])
+      : [];
+    const ruleContext = employeeDocumentRuleContext({
+      jobTitle: subject.jobTitle,
+      maritalStatus: subject.maritalStatus as MaritalStatus | null,
+      militaryDocumentStatus:
+        subject.militaryDocumentStatus as MilitaryDocumentStatus,
+      dependents,
+    });
+    const applicableItems = checklist.items.filter((item) =>
+      item.requirement === PrismaDocumentRequirement.CONDITIONAL
+        ? matchesEmployeeDocumentCondition(
+            jsonRecord(item.condition),
+            ruleContext,
+          )
+        : true,
+    );
+    const request = await transaction.documentRequest.create({
+      data: {
+        companyId: principal.companyId,
+        subjectUserId: input.subjectUserId,
+        createdByUserId: principal.id,
+        checklistId: checklist.id,
+        context: checklist.context,
+        department: DepartmentCode.PERSONNEL_DEPARTMENT,
+        status: PrismaDocumentRequestStatus.PENDING_UPLOAD,
+        deadline: input.deadline ? new Date(input.deadline) : null,
+        notes: input.notes?.trim() || null,
+        commandId: input.commandId,
+        items: {
+          create: applicableItems.map((item) => ({
+            company: {
+              connect: { id: principal.companyId },
+            },
+            documentType: {
+              connect: {
+                id_companyId: {
+                  id: item.documentTypeId,
+                  companyId: principal.companyId,
+                },
+              },
+            },
+            requirement:
+              item.documentType.code === 'military-certificate' &&
+              ruleContext.militaryDocumentStatus === 'pending-confirmation'
+                ? PrismaDocumentRequirement.OPTIONAL
+                : item.requirement === PrismaDocumentRequirement.CONDITIONAL
+                  ? PrismaDocumentRequirement.REQUIRED
+                  : item.requirement,
+            position: item.position,
+            instructions: item.instructions,
+            dueAt: input.deadline ? new Date(input.deadline) : null,
+            configSnapshot: {
+              code: item.documentType.code,
+              name: item.documentType.name,
+              acceptedMimeTypes: item.documentType.acceptedMimeTypes,
+              maxFileSizeBytes: item.documentType.maxFileSizeBytes,
+              minFiles: item.documentType.minFiles,
+              maxFiles: item.documentType.maxFiles,
+              allowsMultiplePages: item.documentType.allowsMultiplePages,
+              requiresFrontBack: item.documentType.requiresFrontBack,
+              expires: item.documentType.expires,
+              defaultValidityDays: item.documentType.defaultValidityDays,
+              renewalLeadDays: item.documentType.renewalLeadDays,
+              requiresOriginal: item.documentType.requiresOriginal,
+              extractionSchema: item.documentType.extractionSchema,
+              checklistCondition: item.condition,
+              ...(item.documentType.code.startsWith('child-')
+                ? { dependents }
+                : {}),
+              ...(item.documentType.code === 'military-certificate' &&
+              ruleContext.militaryDocumentStatus === 'pending-confirmation'
+                ? {
+                    personnelDecisionRequired: true,
+                    instructions:
+                      'Departamento Pessoal deve confirmar se o documento militar é aplicável.',
+                  }
+                : {}),
+              ...(item.documentType.code === 'cnh' && ruleContext.isDriver
+                ? {
+                    driverRequirements: {
+                      category: 'D',
+                      earRequired: true,
+                      validityRequired: true,
+                    },
+                  }
+                : {}),
+              ...jsonRecord(item.configOverrides),
+            } as unknown as Prisma.InputJsonValue,
+          })),
+        },
+      },
+    });
+    await transaction.documentStatusHistory.create({
+      data: {
+        companyId: principal.companyId,
+        requestId: request.id,
+        actorUserId: principal.id,
+        action: 'request.created',
+        toStatus: 'pending-upload',
+        metadata: {
+          checklistId: checklist.id,
+          checklistVersion: checklist.version,
+          ruleContext,
+        } as unknown as Prisma.InputJsonValue,
+      },
+    });
+    await transaction.tenantAuditLog.create({
+      data: {
+        companyId: principal.companyId,
+        actorUserId: principal.id,
+        action: 'document.request.create',
+        targetType: 'document-request',
+        targetId: request.id,
+        metadata: {
+          subjectUserId: input.subjectUserId,
+          context: input.context,
+          checklistId: checklist.id,
+          checklistVersion: checklist.version,
+        },
+      },
+    });
+    return request.id;
+  }
+
   async createRequest(
     principal: AuthenticatedPrincipal,
     input: {
@@ -791,172 +1150,9 @@ export class DocumentManagementUseCase {
         idempotent: true,
       };
 
-    const requestId = await this.prisma.$transaction(async (transaction) => {
-      const [subject, checklist] = await Promise.all([
-        transaction.user.findUnique({
-          where: {
-            id_companyId: {
-              id: input.subjectUserId,
-              companyId: principal.companyId,
-            },
-          },
-          select: {
-            id: true,
-            isActive: true,
-            jobTitle: true,
-            maritalStatus: true,
-            militaryDocumentStatus: true,
-            dependents: true,
-          },
-        }),
-        transaction.documentChecklistTemplate.findUnique({
-          where: {
-            id_companyId: {
-              id: input.checklistId,
-              companyId: principal.companyId,
-            },
-          },
-          include: {
-            items: {
-              where: { active: true },
-              orderBy: { position: 'asc' },
-              include: { documentType: true },
-            },
-          },
-        }),
-      ]);
-      if (!subject?.isActive) throw notFound('Usuário titular ativo');
-      if (!checklist?.active) throw notFound('Checklist ativo');
-      if (checklist.context !== requestContextToPrisma[input.context]) {
-        throw validationError(
-          'O contexto não corresponde ao checklist selecionado.',
-        );
-      }
-      const dependents = Array.isArray(subject.dependents)
-        ? (subject.dependents as unknown as UserDependent[])
-        : [];
-      const ruleContext = employeeDocumentRuleContext({
-        jobTitle: subject.jobTitle,
-        maritalStatus: subject.maritalStatus as MaritalStatus | null,
-        militaryDocumentStatus:
-          subject.militaryDocumentStatus as MilitaryDocumentStatus,
-        dependents,
-      });
-      const applicableItems = checklist.items.filter((item) =>
-        item.requirement === PrismaDocumentRequirement.CONDITIONAL
-          ? matchesEmployeeDocumentCondition(
-              jsonRecord(item.condition),
-              ruleContext,
-            )
-          : true,
-      );
-      const request = await transaction.documentRequest.create({
-        data: {
-          companyId: principal.companyId,
-          subjectUserId: input.subjectUserId,
-          createdByUserId: principal.id,
-          checklistId: checklist.id,
-          context: checklist.context,
-          department: DepartmentCode.PERSONNEL_DEPARTMENT,
-          status: PrismaDocumentRequestStatus.PENDING_UPLOAD,
-          deadline: input.deadline ? new Date(input.deadline) : null,
-          notes: input.notes?.trim() || null,
-          commandId: input.commandId,
-          items: {
-            create: applicableItems.map((item) => ({
-              company: {
-                connect: { id: principal.companyId },
-              },
-              documentType: {
-                connect: {
-                  id_companyId: {
-                    id: item.documentTypeId,
-                    companyId: principal.companyId,
-                  },
-                },
-              },
-              requirement:
-                item.documentType.code === 'military-certificate' &&
-                ruleContext.militaryDocumentStatus === 'pending-confirmation'
-                  ? PrismaDocumentRequirement.OPTIONAL
-                  : item.requirement === PrismaDocumentRequirement.CONDITIONAL
-                    ? PrismaDocumentRequirement.REQUIRED
-                    : item.requirement,
-              position: item.position,
-              instructions: item.instructions,
-              dueAt: input.deadline ? new Date(input.deadline) : null,
-              configSnapshot: {
-                code: item.documentType.code,
-                name: item.documentType.name,
-                acceptedMimeTypes: item.documentType.acceptedMimeTypes,
-                maxFileSizeBytes: item.documentType.maxFileSizeBytes,
-                minFiles: item.documentType.minFiles,
-                maxFiles: item.documentType.maxFiles,
-                allowsMultiplePages: item.documentType.allowsMultiplePages,
-                requiresFrontBack: item.documentType.requiresFrontBack,
-                expires: item.documentType.expires,
-                defaultValidityDays: item.documentType.defaultValidityDays,
-                renewalLeadDays: item.documentType.renewalLeadDays,
-                requiresOriginal: item.documentType.requiresOriginal,
-                extractionSchema: item.documentType.extractionSchema,
-                checklistCondition: item.condition,
-                ...(item.documentType.code.startsWith('child-')
-                  ? { dependents }
-                  : {}),
-                ...(item.documentType.code === 'military-certificate' &&
-                ruleContext.militaryDocumentStatus === 'pending-confirmation'
-                  ? {
-                      personnelDecisionRequired: true,
-                      instructions:
-                        'Departamento Pessoal deve confirmar se o documento militar é aplicável.',
-                    }
-                  : {}),
-                ...(item.documentType.code === 'cnh' && ruleContext.isDriver
-                  ? {
-                      driverRequirements: {
-                        category: 'D',
-                        earRequired: true,
-                        validityRequired: true,
-                      },
-                    }
-                  : {}),
-                ...jsonRecord(item.configOverrides),
-              } as unknown as Prisma.InputJsonValue,
-            })),
-          },
-        },
-      });
-      await transaction.documentStatusHistory.create({
-        data: {
-          companyId: principal.companyId,
-          requestId: request.id,
-          actorUserId: principal.id,
-          action: 'request.created',
-          toStatus: 'pending-upload',
-          metadata: {
-            checklistId: checklist.id,
-            checklistVersion: checklist.version,
-            ruleContext,
-          } as unknown as Prisma.InputJsonValue,
-        },
-      });
-      await transaction.tenantAuditLog.create({
-        data: {
-          companyId: principal.companyId,
-          actorUserId: principal.id,
-          action: 'document.request.create',
-          targetType: 'document-request',
-          targetId: request.id,
-          metadata: {
-            subjectUserId: input.subjectUserId,
-            context: input.context,
-            checklistId: checklist.id,
-            checklistVersion: checklist.version,
-          },
-        },
-      });
-      return request.id;
-    });
+    const requestId = await this.prisma.$transaction((transaction) =>
+      this.createRequestInTransaction(transaction, principal, input),
+    );
     return {
       request: await this.getRequestById(principal, requestId),
       idempotent: false,
@@ -1377,7 +1573,7 @@ export class DocumentManagementUseCase {
     },
   ) {
     if (
-      !principal.isAdministrator &&
+      !hasTenantWideAuthority(principal) &&
       !principal.departments.some((department) =>
         ['personnel-department', 'human-resources'].includes(department),
       )
@@ -1418,9 +1614,10 @@ export class DocumentManagementUseCase {
   async synchronizeEmployeeDocuments(
     principal: AuthenticatedPrincipal,
     subjectUserId: string,
+    commandId: string,
   ) {
     if (
-      !principal.isAdministrator &&
+      !hasTenantWideAuthority(principal) &&
       !principal.departments.some((department) =>
         ['personnel-department', 'human-resources'].includes(department),
       )
@@ -1429,219 +1626,448 @@ export class DocumentManagementUseCase {
         'Somente administradores, RH e Departamento Pessoal podem recalcular documentos.',
       );
     }
-    const [subject, checklist, request] = await Promise.all([
-      this.prisma.user.findUnique({
-        where: {
-          id_companyId: { id: subjectUserId, companyId: principal.companyId },
-        },
-        select: {
-          id: true,
-          jobTitle: true,
-          maritalStatus: true,
-          militaryDocumentStatus: true,
-          dependents: true,
-        },
-      }),
-      this.prisma.documentChecklistTemplate.findFirst({
-        where: {
-          companyId: principal.companyId,
-          code: 'employee-documents-dynamic',
-          active: true,
-        },
-        orderBy: { version: 'desc' },
-        include: {
-          items: {
-            where: { active: true },
-            orderBy: { position: 'asc' },
-            include: { documentType: true },
-          },
-        },
-      }),
-      this.prisma.documentRequest.findFirst({
-        where: {
+    await this.ensureInitialDocumentCatalog(principal);
+    const syncFingerprint = createHash('sha256')
+      .update(
+        JSON.stringify({
           companyId: principal.companyId,
           subjectUserId,
-          status: { not: PrismaDocumentRequestStatus.CANCELLED },
-        },
-        orderBy: { createdAt: 'desc' },
-        include: {
-          items: {
+          operation: 'employee-document-profile-sync',
+        }),
+      )
+      .digest('hex');
+    const synchronized = await this.retrySerializableTransaction(() =>
+      this.prisma.$transaction(
+        async (transaction) => {
+          const lockedHistory = await transaction.$queryRaw<
+            Array<{ id: string }>
+          >`
+        SELECT id
+        FROM user_update_history
+        WHERE company_id = CAST(${principal.companyId} AS uuid)
+          AND command_id = CAST(${commandId} AS uuid)
+        FOR UPDATE
+      `;
+          if (lockedHistory.length !== 1) {
+            throw conflict(
+              'A sincronização documental exige o comando autoritativo da atualização do usuário.',
+            );
+          }
+          const updateCommand = await transaction.userUpdateHistory.findUnique({
+            where: {
+              companyId_commandId: {
+                companyId: principal.companyId,
+                commandId,
+              },
+            },
+            select: {
+              id: true,
+              userId: true,
+              documentSyncFingerprint: true,
+              documentSynchronizedAt: true,
+              documentRequestId: true,
+            },
+          });
+          if (!updateCommand || updateCommand.userId !== subjectUserId) {
+            throw conflict(
+              'O comando informado não pertence à atualização deste usuário.',
+            );
+          }
+          if (updateCommand.documentSynchronizedAt) {
+            if (
+              updateCommand.documentSyncFingerprint !== syncFingerprint ||
+              !updateCommand.documentRequestId
+            ) {
+              throw conflict(
+                'O comando já possui um recibo documental incompatível.',
+              );
+            }
+            return {
+              requestId: updateCommand.documentRequestId,
+              idempotent: true,
+            };
+          }
+          if (
+            updateCommand.documentSyncFingerprint &&
+            updateCommand.documentSyncFingerprint !== syncFingerprint
+          ) {
+            throw conflict(
+              'O comando já foi reservado para outra sincronização.',
+            );
+          }
+
+          const lockedSubject = await transaction.$queryRaw<
+            Array<{ id: string }>
+          >`
+        SELECT id
+        FROM users
+        WHERE id = CAST(${subjectUserId} AS uuid)
+          AND company_id = CAST(${principal.companyId} AS uuid)
+        FOR UPDATE
+      `;
+          if (lockedSubject.length !== 1) throw notFound('Usuário');
+
+          const [subject, checklist] = await Promise.all([
+            transaction.user.findUnique({
+              where: {
+                id_companyId: {
+                  id: subjectUserId,
+                  companyId: principal.companyId,
+                },
+              },
+              select: {
+                id: true,
+                isActive: true,
+                jobTitle: true,
+                maritalStatus: true,
+                militaryDocumentStatus: true,
+                dependents: true,
+              },
+            }),
+            transaction.documentChecklistTemplate.findFirst({
+              where: {
+                companyId: principal.companyId,
+                code: 'employee-documents-dynamic',
+                active: true,
+              },
+              orderBy: { version: 'desc' },
+              include: {
+                items: {
+                  where: { active: true },
+                  orderBy: { position: 'asc' },
+                  include: { documentType: true },
+                },
+              },
+            }),
+          ]);
+          if (!subject?.isActive) throw notFound('Usuário titular ativo');
+          if (!checklist) throw notFound('Checklist documental dinâmico');
+
+          const requestCandidate = await transaction.documentRequest.findFirst({
+            where: {
+              companyId: principal.companyId,
+              subjectUserId,
+              context: PrismaDocumentRequestContext.ADMISSION,
+              status: { not: PrismaDocumentRequestStatus.CANCELLED },
+              checklist: { code: 'employee-documents-dynamic' },
+            },
+            orderBy: { createdAt: 'desc' },
+            select: { id: true },
+          });
+
+          if (!requestCandidate) {
+            const requestId = await this.createRequestInTransaction(
+              transaction,
+              principal,
+              {
+                commandId,
+                subjectUserId,
+                checklistId: checklist.id,
+                context: 'admission',
+                notes:
+                  'Solicitação criada automaticamente no cadastro do usuário.',
+              },
+            );
+            const receiptAt = new Date();
+            const receiptResult = {
+              requestId,
+              createdRequest: true,
+            };
+            const receipt = await transaction.userUpdateHistory.updateMany({
+              where: {
+                id: updateCommand.id,
+                documentSynchronizedAt: null,
+              },
+              data: {
+                documentSyncFingerprint: syncFingerprint,
+                documentSynchronizedAt: receiptAt,
+                documentRequestId: requestId,
+                documentSyncResult: receiptResult,
+              },
+            });
+            if (receipt.count !== 1) {
+              throw conflict('A sincronização documental já foi processada.');
+            }
+            await transaction.tenantAuditLog.create({
+              data: {
+                companyId: principal.companyId,
+                actorUserId: principal.id,
+                action: 'document.request.synchronize-profile',
+                targetType: 'document-request',
+                targetId: requestId,
+                metadata: {
+                  subjectUserId,
+                  commandId,
+                  createdRequest: true,
+                },
+              },
+            });
+            return { requestId, idempotent: false };
+          }
+
+          await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT id
+        FROM document_request_items
+        WHERE company_id = CAST(${principal.companyId} AS uuid)
+          AND request_id = CAST(${requestCandidate.id} AS uuid)
+        ORDER BY id
+        FOR UPDATE
+      `;
+          await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT submissions.id
+        FROM document_submissions AS submissions
+        INNER JOIN document_request_items AS items
+          ON items.id = submissions.request_item_id
+         AND items.company_id = submissions.company_id
+        WHERE submissions.company_id = CAST(${principal.companyId} AS uuid)
+          AND items.request_id = CAST(${requestCandidate.id} AS uuid)
+        ORDER BY submissions.id
+        FOR UPDATE OF submissions
+      `;
+          const lockedRequest = await transaction.$queryRaw<
+            Array<{ id: string }>
+          >`
+        SELECT id
+        FROM document_requests
+        WHERE id = CAST(${requestCandidate.id} AS uuid)
+          AND company_id = CAST(${principal.companyId} AS uuid)
+        FOR UPDATE
+      `;
+          if (lockedRequest.length !== 1)
+            throw notFound('Solicitação documental');
+
+          const request = await transaction.documentRequest.findFirst({
+            where: {
+              id: requestCandidate.id,
+              companyId: principal.companyId,
+              subjectUserId,
+              context: PrismaDocumentRequestContext.ADMISSION,
+              status: { not: PrismaDocumentRequestStatus.CANCELLED },
+              checklist: { code: 'employee-documents-dynamic' },
+            },
             include: {
-              documentType: true,
-              submissions: { select: { id: true }, take: 1 },
-            },
-          },
-        },
-      }),
-    ]);
-    if (!subject) throw notFound('Usuário');
-    if (!checklist) throw notFound('Checklist documental dinâmico');
-    if (!request) {
-      return this.createAdmissionRequest(principal, {
-        commandId: randomUUID(),
-        subjectUserId,
-        checklistCode: 'employee-documents-dynamic',
-      });
-    }
-    const dependents = Array.isArray(subject.dependents)
-      ? (subject.dependents as unknown as UserDependent[])
-      : [];
-    const ruleContext = employeeDocumentRuleContext({
-      jobTitle: subject.jobTitle,
-      maritalStatus: subject.maritalStatus as MaritalStatus | null,
-      militaryDocumentStatus:
-        subject.militaryDocumentStatus as MilitaryDocumentStatus,
-      dependents,
-    });
-    const applicable = checklist.items.filter((item) =>
-      item.requirement === PrismaDocumentRequirement.CONDITIONAL
-        ? matchesEmployeeDocumentCondition(
-            jsonRecord(item.condition),
-            ruleContext,
-          )
-        : true,
-    );
-    const applicableByCode = new Map(
-      applicable.map((item) => [item.documentType.code, item]),
-    );
-    const currentByCode = new Map(
-      request.items.map((item) => [item.documentType.code, item]),
-    );
-    await this.prisma.$transaction(async (transaction) => {
-      for (const item of request.items) {
-        const shouldApply = applicableByCode.has(item.documentType.code);
-        const itemConfig = jsonRecord(item.configSnapshot);
-        if (
-          !shouldApply &&
-          item.status === PrismaDocumentItemStatus.PENDING_UPLOAD &&
-          item.submissions.length === 0
-        ) {
-          await transaction.documentRequestItem.update({
-            where: {
-              id_companyId: { id: item.id, companyId: principal.companyId },
-            },
-            data: { status: PrismaDocumentItemStatus.CANCELLED },
-          });
-        } else if (
-          shouldApply &&
-          item.status === PrismaDocumentItemStatus.CANCELLED &&
-          item.submissions.length === 0
-        ) {
-          await transaction.documentRequestItem.update({
-            where: {
-              id_companyId: { id: item.id, companyId: principal.companyId },
-            },
-            data: { status: PrismaDocumentItemStatus.PENDING_UPLOAD },
-          });
-        } else if (
-          shouldApply &&
-          item.documentType.code === 'military-certificate' &&
-          itemConfig.manualPolicy === undefined
-        ) {
-          await transaction.documentRequestItem.update({
-            where: {
-              id_companyId: { id: item.id, companyId: principal.companyId },
-            },
-            data: {
-              requirement:
-                ruleContext.militaryDocumentStatus === 'pending-confirmation'
-                  ? PrismaDocumentRequirement.OPTIONAL
-                  : PrismaDocumentRequirement.REQUIRED,
-              configSnapshot: {
-                ...itemConfig,
-                personnelDecisionRequired:
-                  ruleContext.militaryDocumentStatus === 'pending-confirmation',
+              items: {
+                include: {
+                  documentType: true,
+                  submissions: { select: { id: true }, take: 1 },
+                },
               },
             },
           });
-        }
-      }
-      let position = Math.max(0, ...request.items.map((item) => item.position));
-      for (const item of applicable) {
-        if (currentByCode.has(item.documentType.code)) continue;
-        position += 1;
-        await transaction.documentRequestItem.create({
-          data: {
-            companyId: principal.companyId,
-            requestId: request.id,
-            documentTypeId: item.documentTypeId,
-            requirement:
+          if (!request) {
+            throw conflict(
+              'A solicitação documental dinâmica foi alterada; tente novamente.',
+            );
+          }
+
+          const dependents = Array.isArray(subject.dependents)
+            ? (subject.dependents as unknown as UserDependent[])
+            : [];
+          const ruleContext = employeeDocumentRuleContext({
+            jobTitle: subject.jobTitle,
+            maritalStatus: subject.maritalStatus as MaritalStatus | null,
+            militaryDocumentStatus:
+              subject.militaryDocumentStatus as MilitaryDocumentStatus,
+            dependents,
+          });
+          const applicable = checklist.items.filter((item) =>
+            item.requirement === PrismaDocumentRequirement.CONDITIONAL
+              ? matchesEmployeeDocumentCondition(
+                  jsonRecord(item.condition),
+                  ruleContext,
+                )
+              : true,
+          );
+          const applicableByCode = new Map(
+            applicable.map((item) => [item.documentType.code, item]),
+          );
+          const currentByCode = new Map(
+            request.items.map((item) => [item.documentType.code, item]),
+          );
+          for (const item of request.items) {
+            const shouldApply = applicableByCode.has(item.documentType.code);
+            const itemConfig = jsonRecord(item.configSnapshot);
+            let updateData: Prisma.DocumentRequestItemUpdateManyMutationInput | null =
+              null;
+            if (
+              !shouldApply &&
+              item.status === PrismaDocumentItemStatus.PENDING_UPLOAD &&
+              item.submissions.length === 0
+            ) {
+              updateData = { status: PrismaDocumentItemStatus.CANCELLED };
+            } else if (
+              shouldApply &&
+              item.status === PrismaDocumentItemStatus.CANCELLED &&
+              item.submissions.length === 0
+            ) {
+              updateData = { status: PrismaDocumentItemStatus.PENDING_UPLOAD };
+            } else if (
+              shouldApply &&
               item.documentType.code === 'military-certificate' &&
-              ruleContext.militaryDocumentStatus === 'pending-confirmation'
-                ? PrismaDocumentRequirement.OPTIONAL
-                : item.requirement === PrismaDocumentRequirement.CONDITIONAL
-                  ? PrismaDocumentRequirement.REQUIRED
-                  : item.requirement,
-            position,
-            instructions: item.instructions,
-            configSnapshot: {
-              code: item.documentType.code,
-              name: item.documentType.name,
-              acceptedMimeTypes: item.documentType.acceptedMimeTypes,
-              maxFileSizeBytes: item.documentType.maxFileSizeBytes,
-              minFiles: item.documentType.minFiles,
-              maxFiles: item.documentType.maxFiles,
-              allowsMultiplePages: item.documentType.allowsMultiplePages,
-              requiresFrontBack: item.documentType.requiresFrontBack,
-              expires: item.documentType.expires,
-              defaultValidityDays: item.documentType.defaultValidityDays,
-              renewalLeadDays: item.documentType.renewalLeadDays,
-              requiresOriginal: item.documentType.requiresOriginal,
-              extractionSchema: item.documentType.extractionSchema,
-              checklistCondition: item.condition,
-              ...(item.documentType.code.startsWith('child-')
-                ? { dependents }
-                : {}),
-              ...(item.documentType.code === 'military-certificate' &&
-              ruleContext.militaryDocumentStatus === 'pending-confirmation'
-                ? {
-                    personnelDecisionRequired: true,
-                    instructions:
-                      'Departamento Pessoal deve confirmar se o documento militar é aplicável.',
-                  }
-                : {}),
-              ...(item.documentType.code === 'cnh' && ruleContext.isDriver
-                ? {
-                    driverRequirements: {
-                      category: 'D',
-                      earRequired: true,
-                      validityRequired: true,
-                    },
-                  }
-                : {}),
-              ...jsonRecord(item.configOverrides),
-            } as unknown as Prisma.InputJsonValue,
-          },
-        });
-      }
-      const allItems = await transaction.documentRequestItem.findMany({
-        where: { companyId: principal.companyId, requestId: request.id },
-        select: { status: true, requirement: true },
-      });
-      await transaction.documentRequest.update({
-        where: {
-          id_companyId: { id: request.id, companyId: principal.companyId },
+              itemConfig.manualPolicy === undefined
+            ) {
+              updateData = {
+                requirement:
+                  ruleContext.militaryDocumentStatus === 'pending-confirmation'
+                    ? PrismaDocumentRequirement.OPTIONAL
+                    : PrismaDocumentRequirement.REQUIRED,
+                configSnapshot: {
+                  ...itemConfig,
+                  personnelDecisionRequired:
+                    ruleContext.militaryDocumentStatus ===
+                    'pending-confirmation',
+                },
+              };
+            }
+            if (updateData) {
+              const changed = await transaction.documentRequestItem.updateMany({
+                where: {
+                  id: item.id,
+                  companyId: principal.companyId,
+                  status: item.status,
+                  currentVersion: item.currentVersion,
+                  updatedAt: item.updatedAt,
+                  ...(item.submissions.length === 0
+                    ? { submissions: { none: {} } }
+                    : {}),
+                },
+                data: updateData,
+              });
+              if (changed.count !== 1) {
+                throw conflict(
+                  'Um item documental recebeu envio ou revisão durante a sincronização; tente novamente.',
+                );
+              }
+            }
+          }
+          let position = Math.max(
+            0,
+            ...request.items.map((item) => item.position),
+          );
+          for (const item of applicable) {
+            if (currentByCode.has(item.documentType.code)) continue;
+            position += 1;
+            await transaction.documentRequestItem.create({
+              data: {
+                companyId: principal.companyId,
+                requestId: request.id,
+                documentTypeId: item.documentTypeId,
+                requirement:
+                  item.documentType.code === 'military-certificate' &&
+                  ruleContext.militaryDocumentStatus === 'pending-confirmation'
+                    ? PrismaDocumentRequirement.OPTIONAL
+                    : item.requirement === PrismaDocumentRequirement.CONDITIONAL
+                      ? PrismaDocumentRequirement.REQUIRED
+                      : item.requirement,
+                position,
+                instructions: item.instructions,
+                configSnapshot: {
+                  code: item.documentType.code,
+                  name: item.documentType.name,
+                  acceptedMimeTypes: item.documentType.acceptedMimeTypes,
+                  maxFileSizeBytes: item.documentType.maxFileSizeBytes,
+                  minFiles: item.documentType.minFiles,
+                  maxFiles: item.documentType.maxFiles,
+                  allowsMultiplePages: item.documentType.allowsMultiplePages,
+                  requiresFrontBack: item.documentType.requiresFrontBack,
+                  expires: item.documentType.expires,
+                  defaultValidityDays: item.documentType.defaultValidityDays,
+                  renewalLeadDays: item.documentType.renewalLeadDays,
+                  requiresOriginal: item.documentType.requiresOriginal,
+                  extractionSchema: item.documentType.extractionSchema,
+                  checklistCondition: item.condition,
+                  ...(item.documentType.code.startsWith('child-')
+                    ? { dependents }
+                    : {}),
+                  ...(item.documentType.code === 'military-certificate' &&
+                  ruleContext.militaryDocumentStatus === 'pending-confirmation'
+                    ? {
+                        personnelDecisionRequired: true,
+                        instructions:
+                          'Departamento Pessoal deve confirmar se o documento militar é aplicável.',
+                      }
+                    : {}),
+                  ...(item.documentType.code === 'cnh' && ruleContext.isDriver
+                    ? {
+                        driverRequirements: {
+                          category: 'D',
+                          earRequired: true,
+                          validityRequired: true,
+                        },
+                      }
+                    : {}),
+                  ...jsonRecord(item.configOverrides),
+                } as unknown as Prisma.InputJsonValue,
+              },
+            });
+          }
+          const allItems = await transaction.documentRequestItem.findMany({
+            where: { companyId: principal.companyId, requestId: request.id },
+            select: { status: true, requirement: true },
+          });
+          const requestChanged = await transaction.documentRequest.updateMany({
+            where: {
+              id: request.id,
+              companyId: principal.companyId,
+              version: request.version,
+              status: request.status,
+            },
+            data: {
+              status: requestStatusForItems(allItems),
+              version: { increment: 1 },
+            },
+          });
+          if (requestChanged.count !== 1) {
+            throw conflict(
+              'A solicitação documental foi alterada durante a sincronização; tente novamente.',
+            );
+          }
+          await transaction.tenantAuditLog.create({
+            data: {
+              companyId: principal.companyId,
+              actorUserId: principal.id,
+              action: 'document.request.synchronize-profile',
+              targetType: 'document-request',
+              targetId: request.id,
+              metadata: {
+                subjectUserId,
+                commandId,
+                ruleContext,
+              } as unknown as Prisma.InputJsonValue,
+            },
+          });
+          const receiptAt = new Date();
+          const receiptResult = {
+            requestId: request.id,
+            createdRequest: false,
+            applicableDocumentCodes: Array.from(applicableByCode.keys()).sort(),
+          };
+          const receipt = await transaction.userUpdateHistory.updateMany({
+            where: {
+              id: updateCommand.id,
+              documentSynchronizedAt: null,
+            },
+            data: {
+              documentSyncFingerprint: syncFingerprint,
+              documentSynchronizedAt: receiptAt,
+              documentRequestId: request.id,
+              documentSyncResult: receiptResult,
+            },
+          });
+          if (receipt.count !== 1) {
+            throw conflict('A sincronização documental já foi processada.');
+          }
+          return { requestId: request.id, idempotent: false };
         },
-        data: {
-          status: requestStatusForItems(allItems),
-          version: { increment: 1 },
+        {
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
         },
-      });
-      await transaction.tenantAuditLog.create({
-        data: {
-          companyId: principal.companyId,
-          actorUserId: principal.id,
-          action: 'document.request.synchronize-profile',
-          targetType: 'document-request',
-          targetId: request.id,
-          metadata: {
-            subjectUserId,
-            ruleContext,
-          } as unknown as Prisma.InputJsonValue,
-        },
-      });
-    });
-    return { request: await this.getRequestById(principal, request.id) };
+      ),
+    );
+    return {
+      request: { id: synchronized.requestId },
+      idempotent: synchronized.idempotent,
+    };
   }
 
   async listRequests(
@@ -1748,7 +2174,7 @@ export class DocumentManagementUseCase {
         where: {
           id_companyId: { id: requestId, companyId: principal.companyId },
         },
-        select: { id: true },
+        select: { id: true, subjectUserId: true },
       }),
       this.prisma.documentType.findUnique({
         where: {
@@ -1776,6 +2202,26 @@ export class DocumentManagementUseCase {
       );
     }
     await this.prisma.$transaction(async (transaction) => {
+      await this.lockEmployeeDocumentRequirementInvariant(
+        transaction,
+        principal.companyId,
+        request.subjectUserId,
+        documentType.id,
+      );
+      const concurrentDuplicate =
+        await transaction.documentRequestItem.findFirst({
+          where: {
+            companyId: principal.companyId,
+            requestId,
+            documentTypeId: documentType.id,
+          },
+          select: { id: true },
+        });
+      if (concurrentDuplicate) {
+        throw conflict(
+          'Este tipo documental já existe na solicitação. Altere a exigência do item existente.',
+        );
+      }
       const last = await transaction.documentRequestItem.aggregate({
         where: { companyId: principal.companyId, requestId },
         _max: { position: true },
@@ -2046,6 +2492,11 @@ export class DocumentManagementUseCase {
     assertDocumentItemTransition(currentStatus, 'submitted');
 
     const submissionId = await this.prisma.$transaction(async (transaction) => {
+      await this.lockDocumentRequestAggregates(
+        transaction,
+        principal.companyId,
+        [item.requestId],
+      );
       const changed = await transaction.documentRequestItem.updateMany({
         where: {
           id: item.id,
@@ -2288,16 +2739,34 @@ export class DocumentManagementUseCase {
       ]),
     );
 
-    const validation = await this.prisma.$transaction(async (transaction) => {
-      await transaction.documentSubmission.update({
-        where: {
-          id_companyId: { id: submission.id, companyId: principal.companyId },
-        },
-        data: {
-          status: PrismaDocumentItemStatus.PENDING_HUMAN_REVIEW,
-          extractedData: extractedFields,
-        },
-      });
+    const completion = await this.prisma.$transaction(async (transaction) => {
+      await this.lockDocumentRequestAggregates(
+        transaction,
+        principal.companyId,
+        [submission.requestItem.requestId],
+      );
+      const currentSubmission = await this.currentSubmissionMutationState(
+        transaction,
+        principal.companyId,
+        submission.id,
+      );
+      if (!currentSubmission) throw notFound('Envio documental');
+      if (
+        currentSubmission.validation?.status ===
+          DocumentValidationStatus.COMPLETED &&
+        currentSubmission.status ===
+          PrismaDocumentItemStatus.PENDING_HUMAN_REVIEW &&
+        currentSubmission.requestItem.status ===
+          PrismaDocumentItemStatus.PENDING_HUMAN_REVIEW &&
+        currentSubmission.version ===
+          currentSubmission.requestItem.currentVersion
+      ) {
+        return {
+          validation: currentSubmission.validation,
+          idempotent: true,
+        };
+      }
+      this.assertSubmissionSnapshot(submission, currentSubmission);
       await transaction.documentRequestItem.update({
         where: {
           id_companyId: {
@@ -2306,6 +2775,15 @@ export class DocumentManagementUseCase {
           },
         },
         data: { status: PrismaDocumentItemStatus.PENDING_HUMAN_REVIEW },
+      });
+      await transaction.documentSubmission.update({
+        where: {
+          id_companyId: { id: submission.id, companyId: principal.companyId },
+        },
+        data: {
+          status: PrismaDocumentItemStatus.PENDING_HUMAN_REVIEW,
+          extractedData: extractedFields,
+        },
       });
       const record = await transaction.documentValidation.upsert({
         where: {
@@ -2396,15 +2874,15 @@ export class DocumentManagementUseCase {
           },
         },
       });
-      return record;
+      return { validation: record, idempotent: false };
     });
     return {
       request: await this.getRequestById(
         principal,
         submission.requestItem.requestId,
       ),
-      validation,
-      idempotent: false,
+      validation: completion.validation,
+      idempotent: completion.idempotent,
     };
   }
 
@@ -2450,21 +2928,32 @@ export class DocumentManagementUseCase {
     }
 
     await this.prisma.$transaction(async (transaction) => {
+      await this.lockDocumentRequestAggregates(
+        transaction,
+        principal.companyId,
+        [submission.requestItem.requestId],
+      );
+      const currentSubmission = await this.currentSubmissionMutationState(
+        transaction,
+        principal.companyId,
+        submission.id,
+      );
+      this.assertSubmissionSnapshot(submission, currentSubmission);
+      const lockedCurrent = itemStatusFromPrisma[currentSubmission.status];
+      if (lockedCurrent === 'approved' && !canManage) {
+        throw forbidden(
+          'Documento aprovado só pode ser removido por quem gerencia documentos.',
+        );
+      }
+      if (lockedCurrent === 'approved' && !input.reason?.trim()) {
+        throw validationError(
+          'Informe o motivo para remover um documento aprovado.',
+        );
+      }
+      if (['cancelled', 'waived'].includes(lockedCurrent)) {
+        throw conflict('Este envio já foi removido ou dispensado.');
+      }
       const deletedAt = new Date();
-      await transaction.documentFile.updateMany({
-        where: {
-          companyId: principal.companyId,
-          submissionId: submission.id,
-          deletedAt: null,
-        },
-        data: { deletedAt },
-      });
-      await transaction.documentSubmission.update({
-        where: {
-          id_companyId: { id: submission.id, companyId: principal.companyId },
-        },
-        data: { status: PrismaDocumentItemStatus.CANCELLED },
-      });
       await transaction.documentRequestItem.update({
         where: {
           id_companyId: {
@@ -2476,6 +2965,20 @@ export class DocumentManagementUseCase {
           status: PrismaDocumentItemStatus.PENDING_UPLOAD,
           validUntil: null,
         },
+      });
+      await transaction.documentSubmission.update({
+        where: {
+          id_companyId: { id: submission.id, companyId: principal.companyId },
+        },
+        data: { status: PrismaDocumentItemStatus.CANCELLED },
+      });
+      await transaction.documentFile.updateMany({
+        where: {
+          companyId: principal.companyId,
+          submissionId: submission.id,
+          deletedAt: null,
+        },
+        data: { deletedAt },
       });
       const allItems = await transaction.documentRequestItem.findMany({
         where: {
@@ -2506,7 +3009,7 @@ export class DocumentManagementUseCase {
           submissionId: submission.id,
           actorUserId: principal.id,
           action: 'submission.removed',
-          fromStatus: current,
+          fromStatus: lockedCurrent,
           toStatus: 'pending-upload',
           reason: input.reason?.trim() || 'Arquivo substituído pelo titular.',
           metadata: {
@@ -2524,8 +3027,8 @@ export class DocumentManagementUseCase {
           targetId: submission.id,
           metadata: {
             requestId: submission.requestItem.requestId,
-            previousStatus: current,
-            approvedRemoval: current === 'approved',
+            previousStatus: lockedCurrent,
+            approvedRemoval: lockedCurrent === 'approved',
             reason: input.reason?.trim() || null,
           },
         },
@@ -2615,7 +3118,90 @@ export class DocumentManagementUseCase {
       throw validationError('Informe a data de validade do documento.');
     }
 
-    const reviewId = await this.prisma.$transaction(async (transaction) => {
+    const reviewResult = await this.prisma.$transaction(async (transaction) => {
+      await this.lockEmployeeDocumentRequirementInvariant(
+        transaction,
+        principal.companyId,
+        submission.requestItem.request.subjectUserId,
+        submission.requestItem.documentTypeId,
+      );
+      const findDuplicatedRequirements = () =>
+        transaction.documentRequestItem.findMany({
+          where: {
+            companyId: principal.companyId,
+            id: { not: submission.requestItemId },
+            documentTypeId: submission.requestItem.documentTypeId,
+            status: {
+              in: [
+                PrismaDocumentItemStatus.PENDING_UPLOAD,
+                PrismaDocumentItemStatus.SUBMITTED,
+                PrismaDocumentItemStatus.AUTOMATIC_VALIDATION,
+                PrismaDocumentItemStatus.PENDING_HUMAN_REVIEW,
+                PrismaDocumentItemStatus.RESUBMISSION_REQUIRED,
+                PrismaDocumentItemStatus.REJECTED,
+                PrismaDocumentItemStatus.EXPIRED,
+              ],
+            },
+            request: {
+              subjectUserId: submission.requestItem.request.subjectUserId,
+              status: { not: PrismaDocumentRequestStatus.CANCELLED },
+            },
+          },
+          select: {
+            id: true,
+            requestId: true,
+            status: true,
+            currentVersion: true,
+            configSnapshot: true,
+          },
+        });
+      let duplicatedRequirements =
+        input.decision === 'approved' ? await findDuplicatedRequirements() : [];
+      const requestIdsToLock = new Set<string>([
+        submission.requestItem.requestId,
+        ...duplicatedRequirements.map((duplicate) => duplicate.requestId),
+      ]);
+      await this.lockDocumentRequestAggregates(
+        transaction,
+        principal.companyId,
+        Array.from(requestIdsToLock),
+      );
+      const replay = await transaction.documentReview.findUnique({
+        where: {
+          companyId_commandId: {
+            companyId: principal.companyId,
+            commandId: input.commandId,
+          },
+        },
+        include: { submission: { include: { requestItem: true } } },
+      });
+      if (replay) {
+        return {
+          requestId: replay.submission.requestItem.requestId,
+          reviewId: replay.id,
+          idempotent: true,
+        };
+      }
+      const currentSubmission = await this.currentSubmissionMutationState(
+        transaction,
+        principal.companyId,
+        submission.id,
+      );
+      this.assertSubmissionSnapshot(submission, currentSubmission);
+      const lockedCurrent = itemStatusFromPrisma[currentSubmission.status];
+      assertDocumentItemTransition(lockedCurrent, target);
+      if (input.decision === 'approved') {
+        duplicatedRequirements = await findDuplicatedRequirements();
+        if (
+          duplicatedRequirements.some(
+            (duplicate) => !requestIdsToLock.has(duplicate.requestId),
+          )
+        ) {
+          throw conflict(
+            'As exigências documentais foram alteradas durante a revisão; tente novamente.',
+          );
+        }
+      }
       const correctedFields = input.correctedFields ?? {};
       const confirmedAt = new Date();
       const confirmedFields = Object.fromEntries(
@@ -2632,15 +3218,6 @@ export class DocumentManagementUseCase {
           },
         ]),
       );
-      await transaction.documentSubmission.update({
-        where: {
-          id_companyId: { id: submission.id, companyId: principal.companyId },
-        },
-        data: {
-          status: itemStatusToPrisma[target],
-          confirmedData: confirmedFields as Prisma.InputJsonValue,
-        },
-      });
       await transaction.documentRequestItem.update({
         where: {
           id_companyId: {
@@ -2653,59 +3230,20 @@ export class DocumentManagementUseCase {
           validUntil: input.validUntil ? new Date(input.validUntil) : undefined,
         },
       });
+      await transaction.documentSubmission.update({
+        where: {
+          id_companyId: { id: submission.id, companyId: principal.companyId },
+        },
+        data: {
+          status: itemStatusToPrisma[target],
+          confirmedData: confirmedFields as Prisma.InputJsonValue,
+        },
+      });
       const affectedRequestIds = new Set<string>([
         submission.requestItem.requestId,
       ]);
       if (input.decision === 'approved') {
-        const duplicatedRequirements =
-          await transaction.documentRequestItem.findMany({
-            where: {
-              companyId: principal.companyId,
-              id: { not: submission.requestItemId },
-              documentTypeId: submission.requestItem.documentTypeId,
-              status: {
-                in: [
-                  PrismaDocumentItemStatus.PENDING_UPLOAD,
-                  PrismaDocumentItemStatus.SUBMITTED,
-                  PrismaDocumentItemStatus.AUTOMATIC_VALIDATION,
-                  PrismaDocumentItemStatus.PENDING_HUMAN_REVIEW,
-                  PrismaDocumentItemStatus.RESUBMISSION_REQUIRED,
-                  PrismaDocumentItemStatus.REJECTED,
-                  PrismaDocumentItemStatus.EXPIRED,
-                ],
-              },
-              request: {
-                subjectUserId: submission.requestItem.request.subjectUserId,
-                status: { not: PrismaDocumentRequestStatus.CANCELLED },
-              },
-            },
-            select: {
-              id: true,
-              requestId: true,
-              status: true,
-              currentVersion: true,
-              configSnapshot: true,
-            },
-          });
-
         for (const duplicate of duplicatedRequirements) {
-          await transaction.documentSubmission.updateMany({
-            where: {
-              companyId: principal.companyId,
-              requestItemId: duplicate.id,
-              status: {
-                in: [
-                  PrismaDocumentItemStatus.SUBMITTED,
-                  PrismaDocumentItemStatus.AUTOMATIC_VALIDATION,
-                  PrismaDocumentItemStatus.PENDING_HUMAN_REVIEW,
-                  PrismaDocumentItemStatus.RESUBMISSION_REQUIRED,
-                  PrismaDocumentItemStatus.REJECTED,
-                  PrismaDocumentItemStatus.EXPIRED,
-                ],
-              },
-            },
-            data: { status: PrismaDocumentItemStatus.CANCELLED },
-          });
           await transaction.documentRequestItem.update({
             where: {
               id_companyId: {
@@ -2722,6 +3260,23 @@ export class DocumentManagementUseCase {
                 satisfiedAt: confirmedAt.toISOString(),
               },
             },
+          });
+          await transaction.documentSubmission.updateMany({
+            where: {
+              companyId: principal.companyId,
+              requestItemId: duplicate.id,
+              status: {
+                in: [
+                  PrismaDocumentItemStatus.SUBMITTED,
+                  PrismaDocumentItemStatus.AUTOMATIC_VALIDATION,
+                  PrismaDocumentItemStatus.PENDING_HUMAN_REVIEW,
+                  PrismaDocumentItemStatus.RESUBMISSION_REQUIRED,
+                  PrismaDocumentItemStatus.REJECTED,
+                  PrismaDocumentItemStatus.EXPIRED,
+                ],
+              },
+            },
+            data: { status: PrismaDocumentItemStatus.CANCELLED },
           });
           await transaction.documentStatusHistory.create({
             data: {
@@ -2803,7 +3358,7 @@ export class DocumentManagementUseCase {
           submissionId: submission.id,
           actorUserId: principal.id,
           action: `review.${input.decision}`,
-          fromStatus: current,
+          fromStatus: lockedCurrent,
           toStatus: target,
           reason: input.reason?.trim() || null,
           metadata: {
@@ -2823,20 +3378,21 @@ export class DocumentManagementUseCase {
           metadata: {
             requestId: submission.requestItem.requestId,
             requestItemId: submission.requestItemId,
-            fromStatus: current,
+            fromStatus: lockedCurrent,
             toStatus: target,
           },
         },
       });
-      return review.id;
+      return {
+        requestId: submission.requestItem.requestId,
+        reviewId: review.id,
+        idempotent: false,
+      };
     });
     return {
-      request: await this.getRequestById(
-        principal,
-        submission.requestItem.requestId,
-      ),
-      reviewId,
-      idempotent: false,
+      request: await this.getRequestById(principal, reviewResult.requestId),
+      reviewId: reviewResult.reviewId,
+      idempotent: reviewResult.idempotent,
     };
   }
 
@@ -2911,6 +3467,25 @@ export class DocumentManagementUseCase {
       .map((record) => record.confidence)
       .filter((value): value is number => typeof value === 'number');
     await this.prisma.$transaction(async (transaction) => {
+      await this.lockDocumentRequestAggregates(
+        transaction,
+        principal.companyId,
+        [submission.requestItem.requestId],
+      );
+      const currentSubmission = await this.currentSubmissionMutationState(
+        transaction,
+        principal.companyId,
+        submission.id,
+      );
+      this.assertSubmissionSnapshot(submission, currentSubmission);
+      if (
+        currentSubmission.status !==
+        PrismaDocumentItemStatus.PENDING_HUMAN_REVIEW
+      ) {
+        throw validationError(
+          'Os dados propostos só podem ser alterados durante a revisão humana.',
+        );
+      }
       await transaction.documentSubmission.update({
         where: {
           id_companyId: { id: submission.id, companyId: principal.companyId },

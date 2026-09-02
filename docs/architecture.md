@@ -74,8 +74,8 @@ empresa.
   `profile:update`, `support:view` e `support:create` como permissões implícitas;
 - permissões são recalculadas no banco a cada request autenticada;
 - o `companyId` do JWT precisa corresponder ao tenant da licença;
-- `GET /license/status` exige JWT, departamento `management` e
-  `license:view`;
+- `GET /license/status` exige JWT; o Administrador da Instalação possui acesso
+  total, enquanto usuários comuns precisam de `management` e `license:view`;
 - não existem segredos nem tokens do control;
 - a chave de licença instalada é pública.
 
@@ -83,33 +83,43 @@ O vínculo público de um usuário contém `departments[]` e
 `permissionCodes[]`. O teto permitido é a união da matriz dos departamentos; a
 permissão efetiva é formada pelas permissões implícitas mais permissões
 individuais, sempre intersectadas com esse teto. Não existe resolução indireta
-por cargo ou papel. O teto de `management` contém `settings:*` e `license:view`,
-mas não `users:*`; a gestão completa de usuários pertence a TI. Seu teto não
-inclui recursos comerciais nem WhatsApp. A exceção aprovada para Cadastro
-permite selecionar `clients:view`, `clients:create` e `clients:update` para
-Gerência, sem concedê-las automaticamente e sem incluir `clients:manage` ou
-`clients:history`.
-Orçamentos exigem tanto a permissão quanto o departamento
-`commercial`. Essa regra é aplicada no domínio e reforçada nos controllers de
-usuários, catálogo de permissões, licença e propostas.
+por cargo ou papel. Gerência recebe apenas capacidades estreitas: a exceção
+aprovada para Cadastro permite selecionar `clients:view`, `clients:create` e
+`clients:update`, sem concedê-las automaticamente e sem incluir
+`clients:manage` ou `clients:history`. Diretoria é distinta: somente
+`directorate` com `tenant:manage` individual projeta as capacidades de negócio
+do tenant. Supervisão também é capacidade, não papel implícito.
+Para usuários comuns, orçamentos exigem tanto a permissão quanto o departamento
+`commercial`; o Administrador da Instalação e a Diretoria com `tenant:manage`
+exercem a autoridade ampla de negócio. Essa regra é aplicada no domínio e
+reforçada nos controllers de usuários, catálogo de permissões, licença e
+propostas.
 
-`isAdministrator` não é um cargo nem uma permissão materializada. Quando
-verdadeiro, o presenter e o guard concedem o catálogo completo atual; a
-persistência mantém `departments` e `permissionCodes` vazios. Somente um
-administrador autenticado pode criar, promover ou rebaixar outro
-administrador. `users:manage` isolado nunca eleva uma conta, e auto-rebaixamento
-ou remoção do último administrador ativo são recusados.
+`isAdministrator` não é um cargo nem uma permissão materializada. Ele representa
+o Administrador da Instalação Lume, com autoridade total e separada de
+Diretoria e Gerência. Quando verdadeiro, o presenter e o guard concedem o
+catálogo completo atual; a persistência mantém `departments` e
+`permissionCodes` vazios. Somente outro administrador autenticado pode criar,
+promover ou rebaixar um administrador. `users:manage` e `tenant:manage` nunca
+elevam uma conta a essa autoridade, e auto-rebaixamento ou remoção do último
+administrador ativo são recusados.
 
 Uma projeção de compatibilidade pode materializar o conjunto efetivo legado e
 seu fingerprint determinístico para comparação. Ela não participa da decisão
 HTTP: até o corte explícito do novo modelo, o resolvedor e o bypass
 administrativo descritos acima continuam sendo a autoridade.
 
-O catálogo atribuível contém somente Comercial, Compras, Controladoria,
-Departamento Pessoal, Financeiro, Gerência, Manutenção, Monitoramento e
-Operacional. Valores legados permanecem aceitos para leitura e normalização,
-sem voltar ao catálogo atribuível. O modelo de acesso contém apenas
-departamentos e permissões diretas.
+O catálogo atribuível é fixo e inclui Empresa Cliente, RH, Comercial, Compras,
+Controladoria, Departamento Pessoal, Financeiro, Gerência, Diretoria,
+Manutenção, Monitoramento, Operacional e TI. RH e Departamento Pessoal são
+separados, embora compartilhem o mesmo teto documental. Valores legados
+permanecem aceitos para leitura e normalização. A criação dinâmica de
+departamentos em runtime ainda não existe.
+
+`whatsapp-conversations:attend` é uma capacidade individual transversal ao
+catálogo interno e explicitamente excluída de `client-company`. O Responsável
+Atual da conversa é uma referência auditável, não uma trava exclusiva; atuação
+e substituição continuam serializadas por `expectedVersion`.
 
 ## Continuidade
 
@@ -161,6 +171,9 @@ MIME types configurados e inclui ZIP, RAR e 7z como documentos.
 - `POST /users/:id/password-reset` é restrito a `users:update`;
 - `POST /users` e `PATCH /users/:id` recebem departamentos e permissões
   individuais;
+- `PATCH /users/:id` exige `commandId` e `expectedVersion`; a resposta publica
+  `version` e `idempotent`, enquanto atualização, histórico do comando e
+  auditoria são confirmados na mesma transação;
 - `PATCH /users/:id` também permite promover um acesso `document-portal` para
   `standard`; o modo padrão exige ao menos um departamento e volta a usar as
   permissões efetivas desse vínculo;

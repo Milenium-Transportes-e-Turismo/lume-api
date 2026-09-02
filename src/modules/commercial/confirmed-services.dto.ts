@@ -55,3 +55,38 @@ export class ConfirmServiceDto {
   @MaxLength(500)
   confirmationBasis!: string;
 }
+
+export class MarkCommercialServiceRequirementNotApplicableDto {
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID()
+  commandId!: string;
+
+  @ApiProperty({
+    minimum: 1,
+    description: 'Versão do orçamento aceito em que o requisito foi avaliado.',
+  })
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  expectedVersion!: number;
+
+  @ApiProperty({
+    minLength: 3,
+    maxLength: 500,
+    description: 'Motivo pelo qual o requisito não se aplica ao serviço.',
+  })
+  @IsString()
+  @MinLength(3)
+  @MaxLength(500)
+  reason!: string;
+
+  @ApiProperty({
+    minLength: 3,
+    maxLength: 500,
+    description: 'Evidência que sustenta a decisão de não aplicabilidade.',
+  })
+  @IsString()
+  @MinLength(3)
+  @MaxLength(500)
+  evidence!: string;
+}

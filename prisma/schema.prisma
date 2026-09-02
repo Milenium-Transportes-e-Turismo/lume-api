@@ -180,6 +180,7 @@ enum DepartmentCode {
   MAINTENANCE            @map("maintenance")
   MONITORING             @map("monitoring")
   MANAGEMENT             @map("management")
+  DIRECTORATE            @map("directorate")
   OPERATIONS             @map("operations")
   CLEANING               @map("cleaning")
   FINANCIAL              @map("financial")
@@ -226,6 +227,11 @@ enum CommercialClosureClassification {
 enum CommercialServiceRequirementKind {
   FINANCIAL   @map("financial")
   OPERATIONAL @map("operational")
+}
+
+enum CommercialServiceRequirementOutcome {
+  SATISFIED       @map("satisfied")
+  NOT_APPLICABLE @map("not-applicable")
 }
 
 enum MessageDirection {
@@ -508,6 +514,7 @@ model Company {
   operationalTripHistory                   OperationalTripHistory[]
   operationalTripRoutePlans                OperationalTripRoutePlanSelection[]
   userPersonAssociationHistory             UserPersonAssociationHistory[]
+  userUpdateHistory                        UserUpdateHistory[]
   preAdmissionAccesses                     PreAdmissionAccess[]
   preAdmissionAccessItems                  PreAdmissionAccessItem[]
   preAdmissionAccessHistory                PreAdmissionAccessHistory[]
@@ -544,6 +551,7 @@ model User {
   suspendedUntil           DateTime?           @map("suspended_until")
   suspensionReason         String?             @map("suspension_reason") @db.VarChar(500)
   isActive                 Boolean             @default(true) @map("is_active")
+  version                  Int                 @default(1)
   deletedAt                DateTime?           @map("deleted_at") @db.Timestamptz(3)
   tokenVersion             Int                 @default(1) @map("token_version")
   lastLoginAt              DateTime?           @map("last_login_at")
@@ -601,6 +609,8 @@ model User {
   registrationReviewDecisions              RegistrationReviewDecision[]              @relation("RegistrationDecisionActor")
   personAssociationHistory                 UserPersonAssociationHistory[]            @relation("UserPersonAssociationSubject")
   actedPersonAssociationHistory            UserPersonAssociationHistory[]            @relation("UserPersonAssociationActor")
+  userUpdateHistory                        UserUpdateHistory[]                        @relation("UserUpdateSubject")
+  actedUserUpdateHistory                   UserUpdateHistory[]                        @relation("UserUpdateActor")
   createdPreAdmissionAccesses              PreAdmissionAccess[]                      @relation("PreAdmissionAccessCreator")
   preAdmissionAccessHistory                PreAdmissionAccessHistory[]               @relation("PreAdmissionAccessHistoryActor")
   confirmedServices                        ConfirmedService[]                        @relation("ConfirmedServiceConfirmer")
@@ -788,6 +798,35 @@ model UserPersonAssociationHistory {
   @@index([companyId, userId, resultingVersion])
   @@index([companyId, personRegistrationId, createdAt])
   @@map("user_person_association_history")
+}
+
+model UserUpdateHistory {
+  id                       String    @id @default(uuid()) @db.Uuid
+  companyId                String    @map("company_id") @db.Uuid
+  userId                   String    @map("user_id") @db.Uuid
+  actorUserId              String    @map("actor_user_id") @db.Uuid
+  commandId                String    @map("command_id") @db.Uuid
+  commandFingerprint       String    @map("command_fingerprint") @db.Char(64)
+  action                   String    @db.VarChar(40)
+  expectedVersion          Int       @map("expected_version")
+  resultingVersion         Int       @map("resulting_version")
+  changedFields            String[]  @map("changed_fields")
+  beforeSnapshot           Json      @map("before_snapshot") @db.JsonB
+  resultSnapshot           Json      @map("result_snapshot") @db.JsonB
+  documentSyncFingerprint  String?   @map("document_sync_fingerprint") @db.Char(64)
+  documentSynchronizedAt   DateTime? @map("document_synchronized_at") @db.Timestamptz(3)
+  documentRequestId        String?   @map("document_request_id") @db.Uuid
+  documentSyncResult       Json?     @map("document_sync_result") @db.JsonB
+  occurredAt               DateTime  @map("occurred_at") @db.Timestamptz(3)
+  createdAt                DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user    User    @relation("UserUpdateSubject", fields: [userId, companyId], references: [id, companyId], onDelete: Cascade)
+  actor   User    @relation("UserUpdateActor", fields: [actorUserId, companyId], references: [id, companyId], onDelete: NoAction)
+
+  @@unique([companyId, commandId])
+  @@index([companyId, userId, resultingVersion])
+  @@map("user_update_history")
 }
 
 model RegistrationRole {
@@ -2189,6 +2228,8 @@ model CommercialServiceRequirementAttestation {
   sourceQuoteVersion   Int                              @map("source_quote_version")
   sourceItemKey        String                           @map("source_item_key") @db.VarChar(80)
   kind                 CommercialServiceRequirementKind
+  outcome              CommercialServiceRequirementOutcome @default(SATISFIED)
+  reason               String?                          @db.VarChar(500)
   evidence             String                           @db.VarChar(500)
   actorUserId          String                           @map("actor_user_id") @db.Uuid
   commandId            String                           @map("command_id") @db.Uuid

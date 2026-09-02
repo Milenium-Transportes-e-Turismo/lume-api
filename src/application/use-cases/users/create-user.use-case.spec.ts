@@ -120,9 +120,8 @@ describe('tenant-scoped user use cases', () => {
     });
 
     expect(created.isAdministrator).toBe(true);
-    expect(created.departments).toEqual(
-      expect.arrayContaining(['commercial', 'management', 'operations']),
-    );
+    expect(created.departments).toEqual([]);
+    expect(created.permissionCodes).toEqual([]);
     expect(created.permissions).toEqual(
       expect.arrayContaining(['users:manage', 'commercial:manage']),
     );
@@ -377,6 +376,66 @@ describe('tenant-scoped user use cases', () => {
         permissionCodes: ['license:view'],
       }),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('allows only an administrator to grant tenant-wide Directorate authority', async () => {
+    const administrator = store.users[0];
+    const informationTechnology = await createUser.execute({
+      companyId: administrator.companyId,
+      name: 'Analista de TI Diretoria',
+      username: 'analista.ti.diretoria',
+      email: 'ti.diretoria@empresa.test',
+      password: 'OutraSenha@2026',
+      departments: ['information-technology'],
+      permissionCodes: [],
+    });
+
+    await expect(
+      createUser.execute({
+        companyId: administrator.companyId,
+        actorUserId: informationTechnology.id,
+        name: 'Diretora indevida',
+        username: 'diretora.indevida',
+        email: 'diretora.indevida@empresa.test',
+        password: 'OutraSenha@2026',
+        departments: ['directorate'],
+        permissionCodes: ['tenant:manage'],
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    await expect(
+      createUser.execute({
+        companyId: administrator.companyId,
+        actorUserId: administrator.id,
+        name: 'Diretora autorizada',
+        username: 'diretora.autorizada',
+        email: 'diretora.autorizada@empresa.test',
+        password: 'OutraSenha@2026',
+        departments: ['directorate'],
+        permissionCodes: ['tenant:manage'],
+      }),
+    ).resolves.toMatchObject({
+      departments: ['directorate'],
+      permissionCodes: ['tenant:manage'],
+    });
+  });
+
+  it('rejects tenant-wide authority on a document-portal account', async () => {
+    const administrator = store.users[0];
+
+    await expect(
+      createUser.execute({
+        companyId: administrator.companyId,
+        actorUserId: administrator.id,
+        name: 'Portal documental indevido',
+        username: 'portal.documental.indevido',
+        email: 'portal.documental.indevido@empresa.test',
+        password: 'OutraSenha@2026',
+        documentAccessMode: 'document-portal',
+        departments: ['directorate'],
+        permissionCodes: ['tenant:manage'],
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
   });
 
   it.each(['12345678901', '---', '1234'])(
