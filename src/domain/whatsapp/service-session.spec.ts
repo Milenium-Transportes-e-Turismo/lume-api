@@ -212,6 +212,22 @@ describe('ServiceSession', () => {
 });
 
 describe('service continuity', () => {
+  it('tolerates only the sub-second precision lost by provider timestamps', () => {
+    expect(
+      decideServiceContinuity({
+        now: new Date(startedAt.getTime() - 999),
+        previousClosedAt: startedAt,
+      }),
+    ).toMatchObject({ action: 'reopen-previous' });
+
+    expect(() =>
+      decideServiceContinuity({
+        now: new Date(startedAt.getTime() - 1_000),
+        previousClosedAt: startedAt,
+      }),
+    ).toThrow('A data de fechamento não pode estar no futuro.');
+  });
+
   it('reopens continuation and uncertain classifications within two hours', () => {
     const now = new Date(startedAt.getTime() + CONTINUITY_WINDOW_MS);
 

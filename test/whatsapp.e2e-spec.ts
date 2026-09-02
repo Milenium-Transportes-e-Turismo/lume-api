@@ -252,6 +252,16 @@ function configureEnvironment(mediaStoragePath: string): string {
     EVOLUTION_WEBHOOK_SECRET: webhookSecret,
     WHATSAPP_AI_PROVIDER_ORDER: 'openai',
     WHATSAPP_AI_OPENAI_API_KEY: 'whatsapp-ai-openai-key-for-e2e',
+    LUME_AGENT_ORCHESTRATOR_OPENAI_API_KEY:
+      'sk-e2e-orchestrator-agent-key-0001',
+    LUME_AGENT_CUSTOMER_SERVICE_OPENAI_API_KEY:
+      'sk-e2e-customer-service-agent-key-0002',
+    LUME_AGENT_REGISTRATION_OPENAI_API_KEY:
+      'sk-e2e-registration-agent-key-0003',
+    LUME_AGENT_KNOWLEDGE_OPENAI_API_KEY: 'sk-e2e-knowledge-agent-key-0004',
+    LUME_AGENT_MEDIA_OPENAI_API_KEY: 'sk-e2e-media-agent-key-0005',
+    LUME_AGENT_CONTINUITY_OPENAI_API_KEY: 'sk-e2e-continuity-agent-key-0006',
+    LUME_AGENT_SUPERVISOR_OPENAI_API_KEY: 'sk-e2e-supervisor-agent-key-0007',
     MILENIUM_DIRECTOR_PHONE: '5511999999901',
     MILENIUM_DEPARTMENT_PURCHASES_PHONE: '5511999999902',
     MILENIUM_DEPARTMENT_CONTROLLING_PHONE: '5511999999903',
@@ -825,7 +835,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     });
   });
 
-  it('persiste saída do App/Web na conversa existente sem acionar automação', async () => {
+  it('persiste saída do App/Web e assume controle humano sem acionar automação', async () => {
     const phone = '5511988776604';
     const inbound = await signedWebhook(
       app,
@@ -938,9 +948,9 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     });
     expect(after).toMatchObject({
       unreadCount: before.unreadCount,
-      version: before.version,
-      conversationState: before.conversationState,
-      flowStep: before.flowStep,
+      version: before.version + 1,
+      conversationState: 'SENT_TO_HUMAN',
+      flowStep: 'HUMAN_SERVICE',
     });
     expect(contacts).toBe(1);
     expect(conversations).toBe(1);
@@ -1207,7 +1217,11 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         kind: 'text',
         text: UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT,
       }),
-    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    ).rejects.toMatchObject({
+      code: 'CONFLICT',
+      message: 'A sessão não permite geração ou envio de resposta automática.',
+      details: { controlMode: 'human', status: 'waiting_human' },
+    });
 
     expect(
       await prisma.whatsAppConversation.findUniqueOrThrow({
@@ -1964,7 +1978,10 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         expectedVersion: 1,
         name: 'take-over',
       }),
-    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    ).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      message: 'O ator system não pode executar a transição take-over.',
+    });
 
     const commandId = randomUUID();
     selectedCommandId = commandId;
@@ -2508,7 +2525,11 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         kind: 'text',
         text: 'Não pode enviar',
       }),
-    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    ).rejects.toMatchObject({
+      code: 'CONFLICT',
+      message: 'A sessão não permite geração ou envio de resposta automática.',
+      details: { controlMode: 'human', status: 'open' },
+    });
     const after = await prisma.whatsAppConversation.findUniqueOrThrow({
       where: { id_companyId: { id: conversationId, companyId: tenantId } },
     });
@@ -6749,7 +6770,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       .expect(({ body }) => {
         expect(body).toMatchObject({
           id: created.body.id,
-          displayName: 'Cadastro Emergencial Revisado E2E',
+          displayName: 'Cadastro Emergencial Revisado E2e',
           isTemporary: true,
           version: 2,
         });
@@ -7488,17 +7509,20 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       })
       .expect(201);
     const suffix = randomUUID().slice(0, 8).toUpperCase();
-    const contract = await request(app.getHttpServer())
-      .post('/api/v1/routing/contracts')
-      .set('authorization', `Bearer ${accessToken}`)
-      .send({
+    const routeActor = await prisma.user.findFirstOrThrow({
+      where: { companyId: tenantId, usernameNormalized: 'admin.e2e' },
+      select: { id: true },
+    });
+    const contract = await prisma.routingContract.create({
+      data: {
+        companyId: tenantId,
         routingCompanyId: customer.body.id,
         code: `CTR-${suffix}`,
         name: 'Contrato contínuo E2E',
         operationType: 'Fretamento contínuo',
-        routeType: 'municipal',
-        status: 'active',
-        periodicity: 'daily',
+        routeType: RoutingRouteType.MUNICIPAL,
+        status: 'ACTIVE',
+        periodicity: 'DAILY',
         contractedVehicleCount: 1,
         predictedVehicleName: 'Ônibus E2E',
         predictedVehicleCapacity: 46,
@@ -7507,44 +7531,30 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         requiresDocumentation: false,
         requiredDocumentTypeCodes: [],
         unitName: 'Unidade E2E',
-        origin: {
-          label: 'Garagem E2E',
-          street: 'Rua de Origem',
-          number: '100',
-          district: 'Centro',
-          postalCode: '38400000',
-          city: 'Uberlândia',
-          state: 'MG',
-        },
-        destination: {
-          label: 'Unidade E2E',
-          street: 'Rua de Destino',
-          number: '200',
-          district: 'Distrito Industrial',
-          postalCode: '38408000',
-          city: 'Uberlândia',
-          state: 'MG',
-        },
-        validFrom: '2026-09-01',
-        validUntil: '2026-09-30',
-        costCenters: [{ code: `CC-${suffix}`, name: 'Centro E2E' }],
-        shifts: [
-          {
-            name: 'Manhã',
-            requiredArrivalTime: '08:00',
-            vehicleCount: 1,
-            vehicleCapacity: 46,
-            activeWeekdays: [1, 2, 3, 4, 5],
-          },
-        ],
-        commandId: randomUUID(),
-      })
-      .expect(201);
-    expect(contract.body).toMatchObject({ status: 'active', version: 1 });
+        originLabel: 'Garagem E2E',
+        originStreet: 'Rua de Origem',
+        originNumber: '100',
+        originDistrict: 'Centro',
+        originPostalCode: '38400000',
+        originCity: 'Uberlândia',
+        originState: 'MG',
+        destinationLabel: 'Unidade E2E',
+        destinationStreet: 'Rua de Destino',
+        destinationNumber: '200',
+        destinationDistrict: 'Distrito Industrial',
+        destinationPostalCode: '38408000',
+        destinationCity: 'Uberlândia',
+        destinationState: 'MG',
+        validFrom: new Date('2026-09-01T00:00:00.000Z'),
+        validUntil: new Date('2026-09-30T00:00:00.000Z'),
+        createdByUserId: routeActor.id,
+      },
+    });
+    expect(contract).toMatchObject({ status: 'ACTIVE', version: 1 });
 
     const tripPayload = {
-      contractId: contract.body.id,
-      expectedContractVersion: 1,
+      contractId: contract.id,
+      expectedContractVersion: contract.version,
       code: `TRIP-${suffix}`,
       serviceDate: '2026-09-10',
       legs: [
@@ -7563,7 +7573,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         code: tripPayload.code,
         source: {
           kind: 'continuous-contract',
-          contractId: contract.body.id,
+          contractId: contract.id,
           sourceVersion: 1,
         },
         status: 'draft',
@@ -7574,15 +7584,11 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     const tripId = created.body.trip.id as string;
 
     const routeId = randomUUID();
-    const routeActor = await prisma.user.findFirstOrThrow({
-      where: { companyId: tenantId, usernameNormalized: 'admin.e2e' },
-      select: { id: true },
-    });
     const approvedRouteSnapshot = {
       route: {
         id: routeId,
         companyId: tenantId,
-        contractId: contract.body.id,
+        contractId: contract.id,
         routingCompanyId: customer.body.id,
         code: `ROUTE-${suffix}`,
         name: 'Plano aprovado E2E',
@@ -7608,7 +7614,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         id: routeId,
         companyId: tenantId,
         routingCompanyId: customer.body.id,
-        contractId: contract.body.id,
+        contractId: contract.id,
         code: `ROUTE-${suffix}`,
         name: 'Plano aprovado E2E',
         shift: 'Manhã',

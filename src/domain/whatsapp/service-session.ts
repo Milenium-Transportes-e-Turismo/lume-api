@@ -332,10 +332,13 @@ export function decideServiceContinuity(
     };
   }
 
-  const elapsed = input.now.getTime() - input.previousClosedAt.getTime();
-  if (elapsed < 0) {
+  const rawElapsed = input.now.getTime() - input.previousClosedAt.getTime();
+  if (rawElapsed <= -1_000) {
     throw validationError('A data de fechamento não pode estar no futuro.');
   }
+  // Evolution timestamps have second precision while closedAt preserves
+  // milliseconds. Clamp only that lost sub-second precision to zero.
+  const elapsed = Math.max(0, rawElapsed);
   if (elapsed > CONTINUITY_WINDOW_MS) {
     return {
       action: 'create-new',
