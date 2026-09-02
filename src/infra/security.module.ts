@@ -8,6 +8,7 @@ import {
   PasswordHasher,
   RefreshTokenService,
 } from '../application/contracts/cryptography';
+import { PreAdmissionTokenService } from '../application/contracts/pre-admission-access.repository';
 import {
   PasswordResetNotifier,
   SupportRequestNotifier,
@@ -18,6 +19,7 @@ import {
   OpaqueRefreshTokenService,
 } from './auth/opaque-refresh-token.service';
 import { BcryptPasswordHasher } from './cryptography/bcrypt-password-hasher';
+import { HmacPreAdmissionTokenService } from './cryptography/hmac-pre-admission-token.service';
 import { Ed25519OfflineLicenseVerifier } from './licensing/ed25519-offline-license-verifier';
 import { ResendPasswordResetNotifier } from './notifications/resend-password-reset.notifier';
 import { ResendSupportRequestNotifier } from './notifications/resend-support-request.notifier';
@@ -29,6 +31,10 @@ import { ResendSupportRequestNotifier } from './notifications/resend-support-req
     { provide: PasswordHasher, useClass: BcryptPasswordHasher },
     { provide: AccessTokenService, useClass: JwtAccessTokenService },
     { provide: RefreshTokenService, useClass: OpaqueRefreshTokenService },
+    {
+      provide: PreAdmissionTokenService,
+      useClass: HmacPreAdmissionTokenService,
+    },
     {
       provide: PasswordChangeTokenService,
       useClass: OpaquePasswordChangeTokenService,
@@ -50,6 +56,7 @@ import { ResendSupportRequestNotifier } from './notifications/resend-support-req
     PasswordHasher,
     AccessTokenService,
     RefreshTokenService,
+    PreAdmissionTokenService,
     PasswordChangeTokenService,
     OfflineLicenseVerifier,
     PasswordResetNotifier,

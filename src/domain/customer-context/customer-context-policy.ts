@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import type {
   CustomerContextSummary,
   CustomerProfileKey,
-} from '../../application/contracts/customer-context.repository';
+} from './customer-context';
 import { validationError } from '../../core/errors/app-error';
 
 export const CUSTOMER_CONTEXT_MAX_BYTES = 16 * 1024;

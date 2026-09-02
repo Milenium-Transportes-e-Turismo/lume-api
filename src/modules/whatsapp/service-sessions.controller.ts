@@ -14,6 +14,8 @@ import {
   ManageServiceSessionUseCase,
   QueryServiceSessionsUseCase,
 } from '../../application/use-cases/whatsapp/manage-service-sessions.use-case';
+import { forbidden } from '../../core/errors/app-error';
+import { hasTenantWideAuthority } from '../../domain/access/tenant-authority';
 import { CurrentUser } from '../../shared/http/decorators/current-user.decorator';
 import { RequireAnyPermission } from '../../shared/http/decorators/require-permissions.decorator';
 import {
@@ -147,10 +149,21 @@ export class ServiceSessionsController {
   }
 
   private actor(current: AuthenticatedPrincipal) {
+    if (
+      current.documentAccessMode === 'client' ||
+      current.departments.includes('client-company')
+    ) {
+      throw forbidden(
+        'Perfis de empresa cliente não podem acessar filas internas de atendimento.',
+      );
+    }
+
     return {
       companyId: current.companyId,
       actorUserId: current.id,
-      accessibleDepartments: current.departments,
+      accessibleDepartments: hasTenantWideAuthority(current)
+        ? null
+        : current.departments,
     };
   }
 

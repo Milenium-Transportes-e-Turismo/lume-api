@@ -114,7 +114,10 @@ async function packageWithRows(options: {
   return { root, packagePath };
 }
 
-function readOnlyPrisma(writeAttempt: ReturnType<typeof vi.fn>): PrismaService {
+function readOnlyPrisma(
+  writeAttempt: ReturnType<typeof vi.fn>,
+  departmentCodes: readonly DepartmentCode[] = [DepartmentCode.COMMERCIAL],
+): PrismaService {
   const noRows = vi.fn().mockResolvedValue([]);
   return {
     company: {
@@ -149,7 +152,7 @@ function readOnlyPrisma(writeAttempt: ReturnType<typeof vi.fn>): PrismaService {
     tenantDepartment: {
       findMany: vi
         .fn()
-        .mockResolvedValue([{ code: DepartmentCode.COMMERCIAL }]),
+        .mockResolvedValue(departmentCodes.map((code) => ({ code }))),
       create: writeAttempt,
       update: writeAttempt,
       delete: writeAttempt,
@@ -431,12 +434,37 @@ describe('WhatsAppImportService.validate', () => {
     );
   });
 
-  it('rejeita códigos de departamento fora dos nove publicados', async () => {
-    const row = conversationRow('legacy-1');
-    row[5] = 'information-technology';
-    const fixture = await packageWithRows({ conversations: [row] });
+  it('aceita todas as filas internas atuais no pacote histórico', async () => {
+    const departments = [
+      ['human-resources', DepartmentCode.HUMAN_RESOURCES],
+      ['personnel-department', DepartmentCode.PERSONNEL_DEPARTMENT],
+      ['commercial', DepartmentCode.COMMERCIAL],
+      ['purchasing', DepartmentCode.PURCHASING],
+      ['controlling', DepartmentCode.CONTROLLING],
+      ['maintenance', DepartmentCode.MAINTENANCE],
+      ['monitoring', DepartmentCode.MONITORING],
+      ['management', DepartmentCode.MANAGEMENT],
+      ['directorate', DepartmentCode.DIRECTORATE],
+      ['operations', DepartmentCode.OPERATIONS],
+      ['cleaning', DepartmentCode.CLEANING],
+      ['financial', DepartmentCode.FINANCIAL],
+      ['information-technology', DepartmentCode.INFORMATION_TECHNOLOGY],
+    ] as const;
+    const fixture = await packageWithRows({
+      conversations: departments.map(([department], index) => {
+        const row = conversationRow(
+          `legacy-${department}`,
+          `55349630${String(5_200 + index)}`,
+        );
+        row[5] = department;
+        return row;
+      }),
+    });
     const service = new WhatsAppImportService(
-      readOnlyPrisma(vi.fn()),
+      readOnlyPrisma(
+        vi.fn(),
+        departments.map(([, code]) => code),
+      ),
       fixture.root,
     );
 
@@ -448,9 +476,127 @@ describe('WhatsAppImportService.validate', () => {
       packagePath: fixture.packagePath,
     });
 
+    expect(report.valid).toBe(true);
+    expect(report.issues).not.toContainEqual(
+      expect.objectContaining({ code: 'INVALID_DEPARTMENT' }),
+    );
+  });
+
+  it('rejeita Empresa Cliente como fila de atendimento histórica', async () => {
+    const row = conversationRow('legacy-client-company');
+    row[5] = 'client-company';
+    const fixture = await packageWithRows({ conversations: [row] });
+    const service = new WhatsAppImportService(
+      readOnlyPrisma(vi.fn()),
+      fixture.root,
+    );
+
+    const report = await service.validate({
+      companyId: testCompanyId,
+      channelId: testChannelId,
+      actorUsername: 'admin',
+      batchName: 'batch-client-company',
+      packagePath: fixture.packagePath,
+    });
+
     expect(report.valid).toBe(false);
     expect(report.issues).toContainEqual(
       expect.objectContaining({ code: 'INVALID_DEPARTMENT' }),
+    );
+  });
+
+  it.each([
+    {
+      label: 'Administrador',
+      user: {
+        id: 'owner-admin',
+        usernameNormalized: 'admin-owner',
+        departments: [],
+        permissionCodes: [],
+        isAdministrator: true,
+        documentAccessMode: 'STANDARD',
+        status: UserAccountStatus.ACTIVE,
+        isActive: true,
+      },
+    },
+    {
+      label: 'Diretoria com autoridade do tenant',
+      user: {
+        id: 'owner-director',
+        usernameNormalized: 'director-owner',
+        departments: ['directorate'],
+        permissionCodes: ['tenant:manage'],
+        isAdministrator: false,
+        documentAccessMode: 'STANDARD',
+        status: UserAccountStatus.ACTIVE,
+        isActive: true,
+      },
+    },
+  ])(
+    'aceita $label como responsável por uma fila externa no histórico',
+    async ({ user }) => {
+      const row = conversationRow('legacy-cross-department-owner');
+      row[5] = 'operations';
+      row[6] = user.usernameNormalized;
+      row[7] = 'human-active';
+      row[8] = 'human-service';
+      const fixture = await packageWithRows({ conversations: [row] });
+      const prisma = readOnlyPrisma(vi.fn(), [DepartmentCode.OPERATIONS]);
+      Object.assign(prisma.user, {
+        findMany: vi.fn().mockResolvedValue([user]),
+      });
+      const service = new WhatsAppImportService(prisma, fixture.root);
+
+      const report = await service.validate({
+        companyId: testCompanyId,
+        channelId: testChannelId,
+        actorUsername: 'admin',
+        batchName: 'batch-cross-department-owner',
+        packagePath: fixture.packagePath,
+      });
+
+      expect(report.valid).toBe(true);
+      expect(report.issues).not.toContainEqual(
+        expect.objectContaining({ code: 'OWNER_OUTSIDE_DEPARTMENT' }),
+      );
+    },
+  );
+
+  it('não permite que um acesso ao Portal de Documentos use autoridade legada da Diretoria na importação', async () => {
+    const row = conversationRow('legacy-document-portal-owner');
+    row[5] = 'operations';
+    row[6] = 'portal-owner';
+    row[7] = 'human-active';
+    row[8] = 'human-service';
+    const fixture = await packageWithRows({ conversations: [row] });
+    const prisma = readOnlyPrisma(vi.fn(), [DepartmentCode.OPERATIONS]);
+    Object.assign(prisma.user, {
+      findMany: vi.fn().mockResolvedValue([
+        {
+          id: 'owner-portal',
+          usernameNormalized: 'portal-owner',
+          departments: ['directorate'],
+          permissionCodes: ['tenant:manage'],
+          isAdministrator: false,
+          documentAccessMode: 'DOCUMENT_PORTAL',
+          status: UserAccountStatus.ACTIVE,
+          isActive: true,
+        },
+      ]),
+    });
+    const service = new WhatsAppImportService(prisma, fixture.root);
+
+    const report = await service.validate({
+      companyId: testCompanyId,
+      channelId: testChannelId,
+      actorUsername: 'admin',
+      batchName: 'batch-document-portal-owner',
+      packagePath: fixture.packagePath,
+    });
+
+    expect(report.valid).toBe(false);
+    expect(report.issues).toContainEqual(
+      expect.objectContaining({ code: 'OWNER_OUTSIDE_DEPARTMENT' }),
     );
   });
 
@@ -684,5 +830,5 @@ describe('WhatsAppImportService.apply', () => {
     ).rejects.toBe(transactionError);
 
     expect(transaction).toHaveBeenCalledTimes(8);
-  });
+  }, 15_000);
 });

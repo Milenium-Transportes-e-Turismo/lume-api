@@ -2,6 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { HttpEvolutionOutboundGateway } from '../evolution/evolution-outbound.client';
+import {
+  CommercialQuoteRepository,
+  type QuoteRequestPatch,
+} from '../../../application/contracts/commercial-quote.repository';
 import type { EvolutionOutboundInput } from '../../../application/contracts/evolution-outbound.gateway';
 import { WhatsAppMediaStorage } from '../../../application/contracts/whatsapp-media.storage';
 import {
@@ -17,24 +21,23 @@ import {
 import {
   WhatsAppRepository,
   type CreateOutboundInput,
-  type QuoteRequestPatch,
   type TransitionCommand,
 } from '../../../application/contracts/whatsapp.repository';
 import type { Department } from '../../../domain/access/access.constants';
 import { DEPARTMENTS } from '../../../domain/access/access.constants';
+import { isQuoteRequestStatus } from '../../../domain/commercial/quote-status';
 import { AppError } from '../../../core/errors/app-error';
 import {
   CONVERSATION_STATES,
   FLOW_STEPS,
   MESSAGE_KINDS,
-  REQUEST_STATUSES,
   type MessageKind,
 } from '../../../domain/whatsapp/whatsapp.constants';
 import {
   dateOnlyFromDateTime,
   parseBusinessDateTime,
   parseDateOnly,
-} from '../../../domain/whatsapp/quote-schedule';
+} from '../../../domain/commercial/quote-schedule';
 import {
   QUOTE_CONFIRMATION_MESSAGE,
   aiOutputResolvesConversation,
@@ -117,6 +120,7 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
 
   constructor(
     private readonly repository: WhatsAppRepository,
+    private readonly commercialQuotes: CommercialQuoteRepository,
     private readonly conversationAgent: PlatformWhatsAppConversationAgent,
     private readonly checkpointStore: WhatsAppAutomationCheckpointStore,
     private readonly decisionStore: WhatsAppAutomationDecisionStore,
@@ -610,6 +614,7 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
       await this.repository.getConversation(
         event.companyId,
         payload.conversationId,
+        { departments: null },
       ),
     );
     return (
@@ -669,7 +674,7 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
     const patch = quotePatch(output, aiMode);
     if (Object.keys(patch).length === 0) return conversation;
     const updatedQuote = asQuoteSnapshot(
-      await this.repository.patchQuoteRequest(event.companyId, quote.id, {
+      await this.commercialQuotes.patchQuoteRequest(event.companyId, quote.id, {
         ...patch,
         commandId: deterministicCommandId(event.correlationId, 'quote-patch'),
         expectedVersion: quote.version,
@@ -702,7 +707,7 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
       } else {
         const documentId = requiredString(media.documentId, 'documentId');
         const document = asRecord(
-          await this.repository.getQuoteProposalDocument(
+          await this.commercialQuotes.getQuoteProposalDocument(
             event.companyId,
             documentId,
           ),
@@ -1123,7 +1128,7 @@ function asAutomationConversation(value: unknown): AutomationConversation {
   if (!FLOW_STEPS.includes(flowStep as never)) {
     throw contractInvalid('conversation.flowStep');
   }
-  if (!REQUEST_STATUSES.includes(requestStatus as never)) {
+  if (!isQuoteRequestStatus(requestStatus)) {
     throw contractInvalid('conversation.requestStatus');
   }
   const resumeState = nullableString(
@@ -1143,7 +1148,7 @@ function asAutomationConversation(value: unknown): AutomationConversation {
     conversationState:
       conversationState as AutomationConversation['conversationState'],
     flowStep: flowStep as AutomationConversation['flowStep'],
-    requestStatus: requestStatus as AutomationConversation['requestStatus'],
+    requestStatus,
     resumeState: resumeState as AutomationConversation['resumeState'],
     version: integerValue(row.version, 'conversation.version'),
     currentQuoteRequest: row.currentQuoteRequest
@@ -1155,14 +1160,14 @@ function asAutomationConversation(value: unknown): AutomationConversation {
 function asQuoteSnapshot(value: unknown): QuoteRequestSnapshot {
   const row = asRecord(value);
   const status = requiredString(row.status, 'quote.status');
-  if (!REQUEST_STATUSES.includes(status as never)) {
+  if (!isQuoteRequestStatus(status)) {
     throw contractInvalid('quote.status');
   }
   return {
     ...row,
     id: requiredUuid(row.id, 'quote.id'),
     sequence: integerValue(row.sequence, 'quote.sequence'),
-    status: status as QuoteRequestSnapshot['status'],
+    status,
     version: integerValue(row.version, 'quote.version'),
   };
 }

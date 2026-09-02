@@ -24,6 +24,10 @@ import { ClientsModule } from './modules/clients/clients.module';
 import { RoutePlannerModule } from './modules/route-planner/route-planner.module';
 import { RegistrationsModule } from './modules/registrations/registrations.module';
 import { CustomerContextModule } from './modules/customer-context/customer-context.module';
+import { CommercialModule } from './modules/commercial/commercial.module';
+import { OperationalTripsModule } from './modules/trips/operational-trips.module';
+import { IdentityModule } from './modules/identity/identity.module';
+import { PreAdmissionModule } from './modules/pre-admission/pre-admission.module';
 
 @Module({
   imports: [
@@ -62,6 +66,10 @@ import { CustomerContextModule } from './modules/customer-context/customer-conte
     RoutePlannerModule,
     RegistrationsModule,
     CustomerContextModule,
+    CommercialModule,
+    OperationalTripsModule,
+    IdentityModule,
+    PreAdmissionModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AppErrorFilter },

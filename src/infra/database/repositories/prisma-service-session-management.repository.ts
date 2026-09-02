@@ -8,6 +8,7 @@ import {
   type ListManagedServiceSessionsResult,
   type ManagedServiceSession,
   type MutateManagedServiceSessionInput,
+  type ServiceSessionDepartmentScope,
 } from '../../../application/contracts/service-session-management.repository';
 import {
   conflict,
@@ -85,6 +86,7 @@ const departmentToPrisma: Readonly<Record<Department, DepartmentCode>> = {
   maintenance: DepartmentCode.MAINTENANCE,
   monitoring: DepartmentCode.MONITORING,
   management: DepartmentCode.MANAGEMENT,
+  directorate: DepartmentCode.DIRECTORATE,
   operations: DepartmentCode.OPERATIONS,
   cleaning: DepartmentCode.CLEANING,
   financial: DepartmentCode.FINANCIAL,
@@ -101,6 +103,7 @@ const departmentFromPrisma: Readonly<Record<DepartmentCode, Department>> = {
   MAINTENANCE: 'maintenance',
   MONITORING: 'monitoring',
   MANAGEMENT: 'management',
+  DIRECTORATE: 'directorate',
   OPERATIONS: 'operations',
   CLEANING: 'cleaning',
   FINANCIAL: 'financial',
@@ -287,15 +290,18 @@ function prismaDepartments(
 ): DepartmentCode[] {
   return [
     ...new Set(
-      values.map((value) => departmentToPrisma[normalizeUserDepartment(value)]),
+      values
+        .map((value) => departmentToPrisma[normalizeUserDepartment(value)])
+        .filter((code) => code !== DepartmentCode.CLIENT_COMPANY),
     ),
   ];
 }
 
 function accessWhere(
   companyId: string,
-  accessibleDepartments: readonly PresentedUserDepartment[],
+  accessibleDepartments: ServiceSessionDepartmentScope,
 ): Prisma.ServiceSessionWhereInput {
+  if (accessibleDepartments === null) return { companyId };
   const codes = prismaDepartments(accessibleDepartments);
   if (codes.length === 0) return { companyId, id: '__not-accessible__' };
   return {
@@ -662,6 +668,11 @@ async function assertTargets(
       select: { code: true },
     });
     if (!department) throw validationError('Departamento de destino inválido.');
+    if (department.code === DepartmentCode.CLIENT_COMPANY) {
+      throw validationError(
+        'Empresa cliente não pode receber atendimentos internos.',
+      );
+    }
     departmentCode = department.code;
   }
   if (input.after.queueId) {
@@ -894,7 +905,7 @@ export class PrismaServiceSessionManagementRepository extends ServiceSessionMana
   async getAccessible(input: {
     readonly companyId: string;
     readonly sessionId: string;
-    readonly accessibleDepartments: readonly PresentedUserDepartment[];
+    readonly accessibleDepartments: ServiceSessionDepartmentScope;
   }): Promise<ManagedServiceSession | null> {
     const row = await this.prisma.serviceSession.findFirst({
       where: {
@@ -911,7 +922,10 @@ export class PrismaServiceSessionManagementRepository extends ServiceSessionMana
   async listAssignmentTargets(input: { readonly companyId: string }) {
     const [departments, users] = await Promise.all([
       this.prisma.tenantDepartment.findMany({
-        where: { companyId: input.companyId },
+        where: {
+          companyId: input.companyId,
+          code: { not: DepartmentCode.CLIENT_COMPANY },
+        },
         orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
         select: {
           id: true,

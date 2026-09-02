@@ -1,4 +1,3 @@
-import type { PresentedUserDepartment } from '../../../domain/access/access.constants';
 import {
   createPublicContinuationCode,
   evolveServiceSession,
@@ -15,12 +14,13 @@ import {
   ServiceSessionManagementRepository,
   type ListManagedServiceSessionsInput,
   type MutateManagedServiceSessionInput,
+  type ServiceSessionDepartmentScope,
 } from '../../contracts/service-session-management.repository';
 
-interface ServiceActorContext {
+export interface ServiceActorContext {
   readonly companyId: string;
   readonly actorUserId: string;
-  readonly accessibleDepartments: readonly PresentedUserDepartment[];
+  readonly accessibleDepartments: ServiceSessionDepartmentScope;
 }
 
 interface VersionedServiceCommand extends ServiceActorContext {

@@ -10,8 +10,8 @@ import { FileSystemWhatsAppMediaStorage } from './file-system-whatsapp-media.sto
 const companyId = '00000000-0000-4000-8000-000000000001';
 const conversationId = '00000000-0000-4000-8000-000000000101';
 const messageId = '00000000-0000-4000-8000-000000000501';
-const sha256 = 'a'.repeat(64);
-const storageKey = `v1/${companyId}/${conversationId}/${messageId}/${sha256}`;
+const storageKey = `v1/${companyId}/${conversationId}/${messageId}`;
+const legacyHashedStorageKey = `${storageKey}/${'a'.repeat(64)}`;
 
 const temporaryDirectories: string[] = [];
 
@@ -48,12 +48,33 @@ describe('FileSystemWhatsAppMediaStorage', () => {
     await expect(afterRestart.read(storageKey)).resolves.toEqual(content);
   });
 
+  it('mantém compatibilidade de leitura com a chave histórica contendo SHA', async () => {
+    const instance = await storage();
+    const content = Buffer.from('legacy-hashed-media');
+
+    await instance.write({ storageKey: legacyHashedStorageKey, content });
+
+    await expect(instance.read(legacyHashedStorageKey)).resolves.toEqual(
+      content,
+    );
+  });
+
   it('é idempotente e recusa chaves fora do isolamento esperado', async () => {
     const instance = await storage();
     const content = Buffer.from('same-content');
 
-    await instance.write({ storageKey, content });
-    await instance.write({ storageKey, content });
+    await expect(instance.write({ storageKey, content })).resolves.toEqual({
+      created: true,
+    });
+    await expect(instance.write({ storageKey, content })).resolves.toEqual({
+      created: false,
+    });
+    await expect(
+      instance.write({
+        storageKey,
+        content: Buffer.from('different-content'),
+      }),
+    ).rejects.toThrow('A chave de mídia já contém outro conteúdo.');
     await expect(instance.read(storageKey)).resolves.toEqual(content);
     await expect(instance.read('../../segredo')).rejects.toThrow(
       'Chave de armazenamento',

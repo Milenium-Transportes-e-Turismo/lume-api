@@ -1,7 +1,4 @@
 import {
-  ALL_PERMISSION_CODES,
-  ASSIGNABLE_DEPARTMENTS,
-  SERVICE_PERMISSION_CEILING,
   type PermissionCode,
   presentUserDepartment,
   type PresentedUserDepartment,
@@ -38,6 +35,7 @@ export interface UserOutput {
   permissions: PermissionCode[];
   clientCategory: UserClientCategory | null;
   isActive: boolean;
+  version: number;
   status: UserAccountStatus;
   suspendedUntil: string | null;
   suspensionReason: string | null;
@@ -54,18 +52,18 @@ export interface AuthenticatedPrincipal extends UserOutput {
 
 export function presentUser(record: UserRecord): UserOutput {
   const { user } = record;
-  const configuredPermissionCodes = filterPermissionCodesForDepartments(
-    user.props.departments,
-    user.props.permissionCodes,
-  );
-  const operationalServicePermissions = new Set<PermissionCode>(
-    SERVICE_PERMISSION_CEILING,
-  );
-  const permissionCodes = user.props.isAdministrator
-    ? ALL_PERMISSION_CODES.filter(
-        (permission) => !operationalServicePermissions.has(permission),
-      )
-    : configuredPermissionCodes;
+  const documentPortalOnly =
+    !user.props.isAdministrator &&
+    user.props.documentAccessMode === 'document-portal';
+  const departments = documentPortalOnly ? [] : user.props.departments;
+  const permissionCodes = documentPortalOnly
+    ? []
+    : user.props.isAdministrator
+      ? [...user.props.permissionCodes]
+      : filterPermissionCodesForDepartments(
+          departments,
+          user.props.permissionCodes,
+        );
 
   return {
     id: user.props.id,
@@ -86,18 +84,17 @@ export function presentUser(record: UserRecord): UserOutput {
     maritalStatus: user.props.maritalStatus,
     militaryDocumentStatus: user.props.militaryDocumentStatus,
     dependents: user.props.dependents,
-    departments: user.props.isAdministrator
-      ? [...ASSIGNABLE_DEPARTMENTS]
-      : user.props.departments.map(presentUserDepartment),
+    departments: departments.map(presentUserDepartment),
     permissionCodes,
     permissions: resolveEffectivePermissions(
-      user.props.departments,
-      configuredPermissionCodes,
+      departments,
+      permissionCodes,
       user.props.isAdministrator,
       user.props.documentAccessMode,
     ),
     clientCategory: user.props.clientCategory,
     isActive: user.props.isActive,
+    version: user.props.version,
     status: user.props.status,
     suspendedUntil: user.props.suspendedUntil?.toISOString() ?? null,
     suspensionReason: user.props.suspensionReason,

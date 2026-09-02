@@ -510,7 +510,7 @@ describe('password change flow', () => {
     expect(lookup).not.toHaveBeenCalled();
   });
 
-  it('allows TI to request a reset for another ordinary user but blocks self and administrators', async () => {
+  it('allows TI to reset an ordinary user but blocks self, administrators and tenant-wide Directors', async () => {
     const store = new InMemoryStore();
     const company = Company.create({
       id: '00000000-0000-4000-8000-000000000010',
@@ -551,8 +551,20 @@ describe('password change flow', () => {
       passwordHash: 'hashed:SenhaInicial@2026',
       departments: ['commercial'],
     });
+    const director = User.create({
+      companyId: company.id,
+      name: 'Diretora Protegida',
+      username: 'diretora.protegida',
+      usernameNormalized: 'diretora.protegida',
+      email: 'diretora@example.test',
+      emailNormalized: 'diretora@example.test',
+      cpfNormalized: null,
+      passwordHash: 'hashed:SenhaInicial@2026',
+      departments: ['directorate'],
+      permissionCodes: ['tenant:manage'],
+    });
     store.companies.push(company);
-    store.users.push(administrator, informationTechnology, common);
+    store.users.push(administrator, informationTechnology, common, director);
     const notifier = new RecordingPasswordResetNotifier();
     const useCase = new RequestAdminPasswordResetUseCase(
       new InMemoryUsersRepository(store),
@@ -587,6 +599,13 @@ describe('password change flow', () => {
         companyId: company.id,
         actorUserId: informationTechnology.id,
         userId: administrator.id,
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(
+      useCase.execute({
+        companyId: company.id,
+        actorUserId: informationTechnology.id,
+        userId: director.id,
       }),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
     expect(notifier.notifications).toHaveLength(1);

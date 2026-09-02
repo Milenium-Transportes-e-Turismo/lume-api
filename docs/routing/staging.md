@@ -1,7 +1,7 @@
 # Ativação do Routing Core no lume-staging
 
 Este roteiro pressupõe que a branch de trabalho já foi validada e integrada à
-branch `staging`. Nunca implante diretamente `staging-route-planner` na VPS.
+branch `develop`. Nunca implante diretamente uma branch de trabalho na VPS.
 
 ## 1. Criar as chaves sem expô-las
 

@@ -3,8 +3,10 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 import { formatWhatsAppPhone } from '../../shared/utils/normalization';
+import { hasTenantWideAuthority } from '../../domain/access/tenant-authority';
 
 import {
+  CommercialClosureClassification,
   ConversationState,
   DeliveryStatus,
   DepartmentCode,
@@ -30,12 +32,13 @@ import {
 import {
   dateOnlyFromDateTime,
   presentDateOnly,
-} from '../../domain/whatsapp/quote-schedule';
+} from '../../domain/commercial/quote-schedule';
 import {
   emptyImportCounts,
   IMPORT_DEPARTMENT_CODES,
   type ConversationImportRow,
   type DocumentImportRow,
+  type ImportDepartmentCode,
   type ImportIssue,
   type MessageImportRow,
   type ParsedWhatsAppImportPackage,
@@ -62,17 +65,31 @@ const IMPORT_TRANSACTION_RETRY_BASE_DELAY_MS = 50;
 const IMPORT_CREATE_MANY_CHUNK_SIZE = 1_000;
 const IMPORT_LOOKUP_CHUNK_SIZE = 1_000;
 
-const DEPARTMENT_TO_PRISMA: Record<string, DepartmentCode> = {
+interface ImportUserLookup {
+  id: string;
+  departments: string[];
+  permissionCodes: string[];
+  isAdministrator: boolean;
+  documentAccessMode: string;
+  status: UserAccountStatus;
+  isActive: boolean;
+}
+
+const DEPARTMENT_TO_PRISMA: Readonly<Record<string, DepartmentCode>> = {
+  'human-resources': DepartmentCode.HUMAN_RESOURCES,
+  'personnel-department': DepartmentCode.PERSONNEL_DEPARTMENT,
   commercial: DepartmentCode.COMMERCIAL,
   purchasing: DepartmentCode.PURCHASING,
   controlling: DepartmentCode.CONTROLLING,
-  'personnel-department': DepartmentCode.PERSONNEL_DEPARTMENT,
-  financial: DepartmentCode.FINANCIAL,
-  management: DepartmentCode.MANAGEMENT,
   maintenance: DepartmentCode.MAINTENANCE,
   monitoring: DepartmentCode.MONITORING,
+  management: DepartmentCode.MANAGEMENT,
+  directorate: DepartmentCode.DIRECTORATE,
   operations: DepartmentCode.OPERATIONS,
-};
+  cleaning: DepartmentCode.CLEANING,
+  financial: DepartmentCode.FINANCIAL,
+  'information-technology': DepartmentCode.INFORMATION_TECHNOLOGY,
+} satisfies Readonly<Record<ImportDepartmentCode, DepartmentCode>>;
 
 const STATE_TO_PRISMA: Record<string, ConversationState> = {
   'bot-active': ConversationState.BOT_ACTIVE,
@@ -102,6 +119,18 @@ const REQUEST_TO_PRISMA: Record<string, RequestStatus> = {
   rejected: RequestStatus.REJECTED,
   cancelled: RequestStatus.CANCELLED,
 };
+
+function legacyClosureClassification(
+  status: RequestStatus,
+): CommercialClosureClassification | null {
+  if (status === RequestStatus.REJECTED) {
+    return CommercialClosureClassification.QUOTE_REJECTED;
+  }
+  if (status === RequestStatus.CANCELLED) {
+    return CommercialClosureClassification.LEGACY_UNCLASSIFIED;
+  }
+  return null;
+}
 
 const DIRECTION_TO_PRISMA: Record<string, MessageDirection> = {
   inbound: MessageDirection.INBOUND,
@@ -490,6 +519,7 @@ function selectedQuoteSnapshot(
     confirmedSummary: unknown;
     confirmedVersion: number | null;
     requestedByUserId: string | null;
+    closureClassification: CommercialClosureClassification | null;
     decisionReason: string | null;
     decidedAt: Date | null;
     decidedByUserId: string | null;
@@ -523,6 +553,7 @@ function selectedQuoteSnapshot(
     confirmedSummary: row.confirmedSummary,
     confirmedVersion: row.confirmedVersion,
     requestedByUserId: row.requestedByUserId,
+    closureClassification: row.closureClassification,
     decisionReason: row.decisionReason,
     decidedAt: row.decidedAt?.toISOString() ?? null,
     decidedByUserId: row.decidedByUserId,
@@ -838,6 +869,9 @@ export class WhatsAppImportService {
             id: true,
             usernameNormalized: true,
             departments: true,
+            permissionCodes: true,
+            isAdministrator: true,
+            documentAccessMode: true,
             status: true,
             isActive: true,
           },
@@ -1550,15 +1584,7 @@ export class WhatsAppImportService {
     issues: ImportIssue[],
     channelPhone: string | undefined,
     departments: Set<DepartmentCode>,
-    users: Map<
-      string,
-      {
-        id: string;
-        departments: string[];
-        status: UserAccountStatus;
-        isActive: boolean;
-      }
-    >,
+    users: Map<string, ImportUserLookup>,
     cutoffAt: Date | undefined,
   ): void {
     const required: Array<[string, string]> = [
@@ -1632,7 +1658,7 @@ export class WhatsAppImportService {
     }
     if (
       !IMPORT_DEPARTMENT_CODES.includes(
-        row.departmentCode as (typeof IMPORT_DEPARTMENT_CODES)[number],
+        row.departmentCode as ImportDepartmentCode,
       ) ||
       !departments.has(DEPARTMENT_TO_PRISMA[row.departmentCode])
     ) {
@@ -1640,7 +1666,7 @@ export class WhatsAppImportService {
         issues,
         'Atendimentos',
         'INVALID_DEPARTMENT',
-        'department_code não é um dos nove departamentos publicados no tenant.',
+        'department_code não corresponde a um departamento interno publicado no tenant.',
         row.rowNumber,
       );
     }
@@ -1762,7 +1788,10 @@ export class WhatsAppImportService {
           'owner_username não corresponde a um usuário ativo do tenant.',
           row.rowNumber,
         );
-      } else if (!owner.departments.includes(row.departmentCode)) {
+      } else if (
+        !owner.departments.includes(row.departmentCode) &&
+        !hasTenantWideAuthority(owner)
+      ) {
         issue(
           issues,
           'Atendimentos',
@@ -1874,15 +1903,7 @@ export class WhatsAppImportService {
     row: MessageImportRow,
     conversation: ConversationImportRow | undefined,
     issues: ImportIssue[],
-    users: Map<
-      string,
-      {
-        id: string;
-        departments: string[];
-        status: UserAccountStatus;
-        isActive: boolean;
-      }
-    >,
+    users: Map<string, ImportUserLookup>,
     cutoffAt: Date | undefined,
   ): void {
     for (const [field, value, maxLength] of [
@@ -2977,6 +2998,9 @@ export class WhatsAppImportService {
         : undefined;
       const quoteData = {
         status: REQUEST_TO_PRISMA[row.requestStatus],
+        closureClassification: legacyClosureClassification(
+          REQUEST_TO_PRISMA[row.requestStatus],
+        ),
         contactName: row.quoteContactName ?? null,
         document: row.quoteDocument ?? null,
         email: row.quoteEmail ?? null,
@@ -3792,6 +3816,12 @@ export class WhatsAppImportService {
     const batchConversationIds = new Set(
       records.map((record) => record.conversationId),
     );
+    const latestRecordIdByConversation = new Map<string, string>();
+    for (const record of records) {
+      if (!latestRecordIdByConversation.has(record.conversationId)) {
+        latestRecordIdByConversation.set(record.conversationId, record.id);
+      }
+    }
     const blockers: ImportIssue[] = [];
     for (const record of records) {
       const created =
@@ -3841,16 +3871,19 @@ export class WhatsAppImportService {
         );
       }
       const expectedAfter = record.afterSnapshot as unknown as Snapshot;
+      const isLatestConversationRecord =
+        latestRecordIdByConversation.get(record.conversationId) === record.id;
       if (
-        !snapshotEquals(currentSnapshot.contact, expectedAfter.contact) ||
-        !snapshotEquals(
-          currentSnapshot.conversation,
-          expectedAfter.conversation,
-        ) ||
-        !snapshotEquals(
-          currentSnapshot.quoteRequest,
-          expectedAfter.quoteRequest,
-        )
+        isLatestConversationRecord &&
+        (!snapshotEquals(currentSnapshot.contact, expectedAfter.contact) ||
+          !snapshotEquals(
+            currentSnapshot.conversation,
+            expectedAfter.conversation,
+          ) ||
+          !snapshotEquals(
+            currentSnapshot.quoteRequest,
+            expectedAfter.quoteRequest,
+          ))
       ) {
         issue(
           blockers,
@@ -4305,12 +4338,17 @@ export class WhatsAppImportService {
     companyId: string,
     snapshot: Record<string, unknown>,
   ): Promise<void> {
+    const restoredStatus = snapshot.status as RequestStatus;
     await transaction.quoteRequest.update({
       where: {
         id_companyId: { id: String(snapshot.id), companyId },
       },
       data: {
-        status: snapshot.status as RequestStatus,
+        status: restoredStatus,
+        closureClassification:
+          typeof snapshot.closureClassification === 'string'
+            ? (snapshot.closureClassification as CommercialClosureClassification)
+            : legacyClosureClassification(restoredStatus),
         contactName:
           typeof snapshot.contactName === 'string'
             ? snapshot.contactName

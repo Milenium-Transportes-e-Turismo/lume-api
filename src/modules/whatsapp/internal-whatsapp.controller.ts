@@ -15,12 +15,14 @@ import { ApiBearerAuth, ApiOkResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 
 import {
+  PatchQuoteRequestUseCase,
+  QuoteProposalUseCase,
+} from '../../application/use-cases/commercial/commercial-quotes.use-case';
+import {
   ClaimEvolutionDispatchUseCase,
   CompleteOutboxExecutionUseCase,
   CreateOutboundWhatsAppUseCase,
-  PatchQuoteRequestUseCase,
   QueryWhatsAppUseCase,
-  QuoteProposalUseCase,
   ReconcileAutomationOutboxUseCase,
   RecordEvolutionResultUseCase,
   TransitionWhatsAppConversationUseCase,
@@ -45,7 +47,7 @@ import {
   dateOnlyFromDateTime,
   parseBusinessDateTime,
   parseDateOnly,
-} from '../../domain/whatsapp/quote-schedule';
+} from '../../domain/commercial/quote-schedule';
 
 @ApiTags('WhatsApp interno')
 @ApiBearerAuth('serviceBearer')
@@ -213,7 +215,9 @@ export class InternalWhatsAppController {
     @CurrentService() service: ServicePrincipal,
     @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
   ) {
-    return this.query.getConversation(service.companyId, conversationId);
+    return this.query.getConversation(service.companyId, conversationId, {
+      departments: null,
+    });
   }
 
   @Get('conversations/:conversationId/automation-batch')

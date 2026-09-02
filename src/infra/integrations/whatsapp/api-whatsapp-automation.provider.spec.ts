@@ -1,6 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 import { describe, expect, it, vi } from 'vitest';
 
+import type { CommercialQuoteRepository } from '../../../application/contracts/commercial-quote.repository';
 import {
   WhatsAppContinuityClassificationError,
   type WhatsAppConversationAgentResult,
@@ -218,6 +219,7 @@ function createSubject(input?: {
   };
   const subject = new ApiWhatsAppAutomationProvider(
     repository as unknown as WhatsAppRepository,
+    repository as unknown as CommercialQuoteRepository,
     agent as unknown as PlatformWhatsAppConversationAgent,
     checkpointStore as unknown as WhatsAppAutomationCheckpointStore,
     decisionStore as unknown as WhatsAppAutomationDecisionStore,

@@ -18,12 +18,15 @@ export class LicenseController {
   @Get('status')
   @RequireAnyPermission('license:view')
   @ApiForbiddenResponse({
-    description: 'Disponível somente para Administrador, Diretoria e Gerência.',
+    description: 'Disponível somente para Administrador e Gerência.',
   })
   status(@CurrentUser() current: AuthenticatedPrincipal) {
-    if (!current.departments.includes('management')) {
+    if (
+      !current.isAdministrator &&
+      !current.departments.includes('management')
+    ) {
       throw forbidden(
-        'A licença só pode ser consultada por usuários autorizados da Gerência.',
+        'A licença só pode ser consultada pelo Administrador ou por usuários autorizados da Gerência.',
       );
     }
 

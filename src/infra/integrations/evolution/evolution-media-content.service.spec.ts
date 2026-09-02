@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { WhatsAppMediaStorage } from '../../../application/contracts/whatsapp-media.storage';
 import {
+  DepartmentCode,
   MessageDirection,
   MessageKind,
 } from '../../database/prisma/generated/client';
@@ -35,7 +36,7 @@ function config(
 function prismaWithMessage(message: unknown): PrismaService {
   const prisma = {
     whatsAppMessage: {
-      findUnique: vi.fn().mockResolvedValue(message),
+      findFirst: vi.fn().mockResolvedValue(message),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     mediaAsset: {
@@ -51,6 +52,14 @@ function prismaWithMessage(message: unknown): PrismaService {
   } as unknown as PrismaService;
 }
 
+function findFirstMock(prisma: PrismaService): ReturnType<typeof vi.fn> {
+  return (
+    prisma.whatsAppMessage as unknown as {
+      readonly findFirst: ReturnType<typeof vi.fn>;
+    }
+  ).findFirst;
+}
+
 function mediaStorage(): WhatsAppMediaStorage {
   return {
     write: vi.fn().mockResolvedValue(undefined),
@@ -63,6 +72,102 @@ describe('EvolutionMediaContentService', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it('consulta a mídia somente no departamento atual ou no destino de uma transferência pendente', async () => {
+    const content = Buffer.from('%PDF-local-content');
+    const prisma = prismaWithMessage({
+      id: messageId,
+      providerMessageId: 'provider-pdf-1',
+      direction: MessageDirection.OUTBOUND,
+      kind: MessageKind.DOCUMENT,
+      media: null,
+      proposalDocument: {
+        content,
+        fileName: 'orcamento-final.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: content.byteLength,
+      },
+    });
+    const service = new EvolutionMediaContentService(
+      prisma,
+      mediaStorage(),
+      config(),
+    );
+
+    await expect(
+      service.getContent(companyId, conversationId, messageId, ['operations']),
+    ).resolves.toMatchObject({ content });
+
+    expect(findFirstMock(prisma)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: messageId,
+          companyId,
+          conversationId,
+          conversation: {
+            is: {
+              OR: [
+                { department: { in: [DepartmentCode.OPERATIONS] } },
+                {
+                  pendingTransferDepartment: {
+                    in: [DepartmentCode.OPERATIONS],
+                  },
+                },
+              ],
+            },
+          },
+        }),
+      }),
+    );
+  });
+
+  it('aplica o mesmo escopo departamental ao armazenar uma mídia recebida', async () => {
+    const prisma = prismaWithMessage({
+      id: messageId,
+      companyId,
+      conversationId,
+      providerMessageId: 'large-video',
+      direction: MessageDirection.INBOUND,
+      kind: MessageKind.VIDEO,
+      media: {
+        mimeType: 'video/mp4',
+        fileName: 'video-grande.mp4',
+        size: 10_485_761,
+        retentionStatus: 'too-large',
+      },
+      proposalDocument: null,
+    });
+    const service = new EvolutionMediaContentService(
+      prisma,
+      mediaStorage(),
+      config(),
+    );
+
+    await expect(
+      service.retainInbound(companyId, conversationId, messageId, [
+        'financial',
+      ]),
+    ).resolves.toMatchObject({ status: 'too-large', messageId });
+
+    expect(findFirstMock(prisma)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          conversation: {
+            is: {
+              OR: [
+                { department: { in: [DepartmentCode.FINANCIAL] } },
+                {
+                  pendingTransferDepartment: {
+                    in: [DepartmentCode.FINANCIAL],
+                  },
+                },
+              ],
+            },
+          },
+        }),
+      }),
+    );
   });
 
   it('recupera áudio recebido em formato compatível com o navegador', async () => {
@@ -95,6 +200,7 @@ describe('EvolutionMediaContentService', () => {
       companyId,
       conversationId,
       messageId,
+      null,
     );
 
     expect(result).toMatchObject({
@@ -214,7 +320,7 @@ describe('EvolutionMediaContentService', () => {
     );
 
     await expect(
-      service.getContent(companyId, conversationId, messageId),
+      service.getContent(companyId, conversationId, messageId, null),
     ).resolves.toMatchObject({
       fileName: 'documento.pdf',
       mimeType: 'application/pdf',
@@ -248,6 +354,7 @@ describe('EvolutionMediaContentService', () => {
       companyId,
       conversationId,
       messageId,
+      null,
     );
 
     expect(result.content).toEqual(content);
@@ -290,7 +397,7 @@ describe('EvolutionMediaContentService', () => {
     );
 
     await expect(
-      service.getContent(companyId, conversationId, messageId),
+      service.getContent(companyId, conversationId, messageId, null),
     ).resolves.toMatchObject({
       content,
       fileName: 'historico.zip',
@@ -327,7 +434,7 @@ describe('EvolutionMediaContentService', () => {
     );
 
     await expect(
-      service.getContent(companyId, conversationId, messageId),
+      service.getContent(companyId, conversationId, messageId, null),
     ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
   });
 
@@ -362,7 +469,7 @@ describe('EvolutionMediaContentService', () => {
     );
 
     await expect(
-      service.getContent(companyId, conversationId, messageId),
+      service.getContent(companyId, conversationId, messageId, null),
     ).resolves.toMatchObject({
       content,
       fileName: 'foto.jpg',
@@ -401,7 +508,7 @@ describe('EvolutionMediaContentService', () => {
     );
 
     await expect(
-      service.getContent(companyId, conversationId, messageId),
+      service.getContent(companyId, conversationId, messageId, null),
     ).resolves.toMatchObject({
       content,
       fileName: 'foto-historica.jpg',
@@ -432,13 +539,13 @@ describe('EvolutionMediaContentService', () => {
     );
 
     await expect(
-      service.getContent(companyId, conversationId, messageId),
+      service.getContent(companyId, conversationId, messageId, null),
     ).rejects.toMatchObject({
       code: 'NOT_FOUND',
       message: expect.stringContaining('não está mais disponível'),
     });
     await expect(
-      service.retainInbound(companyId, conversationId, messageId),
+      service.retainInbound(companyId, conversationId, messageId, null),
     ).resolves.toMatchObject({ status: 'unavailable', messageId });
   });
 
@@ -463,7 +570,7 @@ describe('EvolutionMediaContentService', () => {
     );
 
     await expect(
-      service.retainInbound(companyId, conversationId, messageId),
+      service.retainInbound(companyId, conversationId, messageId, null),
     ).rejects.toMatchObject({
       code: 'EXTERNAL_SERVICE_UNAVAILABLE',
     });
@@ -494,10 +601,10 @@ describe('EvolutionMediaContentService', () => {
     );
 
     await expect(
-      service.retainInbound(companyId, conversationId, messageId),
+      service.retainInbound(companyId, conversationId, messageId, null),
     ).resolves.toMatchObject({ status: 'too-large', messageId });
     await expect(
-      service.getContent(companyId, conversationId, messageId),
+      service.getContent(companyId, conversationId, messageId, null),
     ).rejects.toMatchObject({
       code: 'VALIDATION_ERROR',
       message: expect.stringContaining('excede o limite'),

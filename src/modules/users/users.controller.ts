@@ -142,8 +142,9 @@ export class UsersController {
     const role = resolveUserManagementRole(current);
     return this.listUsers.execute(current.companyId, {
       ...query,
+      ...(!current.isAdministrator ? { excludePrivilegedUsers: true } : {}),
       ...(role === 'information-technology'
-        ? { excludeUserId: current.id, excludeAdministrators: true }
+        ? { excludeUserId: current.id }
         : {}),
       department: query.department
         ? normalizeUserDepartment(query.department)
@@ -222,6 +223,8 @@ export class UsersController {
       role === 'administrator' || role === 'information-technology'
         ? body
         : {
+            commandId: body.commandId,
+            expectedVersion: body.expectedVersion,
             name: body.name,
             email: body.email,
             jobTitle: body.jobTitle,
@@ -242,7 +245,11 @@ export class UsersController {
       body.militaryDocumentStatus !== undefined ||
       body.dependents !== undefined
     ) {
-      await this.documents.synchronizeEmployeeDocuments(current, userId);
+      await this.documents.synchronizeEmployeeDocuments(
+        current,
+        userId,
+        body.commandId,
+      );
     }
     return user;
   }

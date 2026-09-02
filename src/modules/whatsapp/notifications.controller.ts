@@ -2,7 +2,8 @@ import { Controller, Get, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOkResponse, ApiTags } from '@nestjs/swagger';
 
 import type { AuthenticatedPrincipal } from '../../application/presenters/user.presenter';
-import { QuoteProposalUseCase } from '../../application/use-cases/whatsapp/whatsapp.use-cases';
+import { QuoteProposalUseCase } from '../../application/use-cases/commercial/commercial-quotes.use-case';
+import { hasTenantWideAuthority } from '../../domain/access/tenant-authority';
 import { CurrentUser } from '../../shared/http/decorators/current-user.decorator';
 
 @ApiTags('Notificações')
@@ -17,7 +18,10 @@ export class NotificationsController {
       'Pendências resumidas e limitadas aos departamentos do usuário autenticado.',
   })
   async list(@CurrentUser() current: AuthenticatedPrincipal) {
-    if (!current.departments.includes('commercial')) {
+    if (
+      !current.departments.includes('commercial') &&
+      !hasTenantWideAuthority(current)
+    ) {
       return { items: [], total: 0, unreadTotal: 0 };
     }
 
@@ -60,7 +64,10 @@ export class NotificationsController {
       'Marca como visualizados todos os orçamentos atualmente pendentes para o usuário autenticado.',
   })
   markCommercialQuotesRead(@CurrentUser() current: AuthenticatedPrincipal) {
-    if (!current.departments.includes('commercial')) {
+    if (
+      !current.departments.includes('commercial') &&
+      !hasTenantWideAuthority(current)
+    ) {
       return {
         notificationId: 'commercial.pending-quote-proposals' as const,
         pendingTotal: 0,

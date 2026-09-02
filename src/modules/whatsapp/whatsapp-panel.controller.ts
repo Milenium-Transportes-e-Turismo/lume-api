@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 
 import {
   Body,
@@ -26,16 +26,19 @@ import {
 } from '@nestjs/swagger';
 import type { Response } from 'express';
 
+import type { ConversationAccessScope } from '../../application/contracts/whatsapp.repository';
 import { WhatsAppMediaStorage } from '../../application/contracts/whatsapp-media.storage';
 import type { AuthenticatedPrincipal } from '../../application/presenters/user.presenter';
+import { QuoteProposalUseCase } from '../../application/use-cases/commercial/commercial-quotes.use-case';
 import {
   CreateHumanOutboundWhatsAppUseCase,
-  EnsureWhatsAppConversationUseCase,
   QueryWhatsAppUseCase,
+  StartHumanWhatsAppConversationUseCase,
   TransitionWhatsAppConversationUseCase,
 } from '../../application/use-cases/whatsapp/whatsapp.use-cases';
 import { forbidden, validationError } from '../../core/errors/app-error';
 import { normalizeUserDepartment } from '../../domain/access/access.constants';
+import { hasTenantWideAuthority } from '../../domain/access/tenant-authority';
 import {
   MAXIMUM_PANEL_ATTACHMENT_BYTES,
   PANEL_ARCHIVE_MIME_TYPES,
@@ -51,6 +54,7 @@ import {
   CreateHumanOutboundMediaDto,
   ForwardConversationDto,
   MessageListQueryDto,
+  RequestConversationTransferDto,
   StartHumanConversationDto,
   TransitionListQueryDto,
   VersionedCommandDto,
@@ -66,17 +70,41 @@ function contentDisposition(fileName: string): string {
   return `inline; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
 }
 
+function deterministicPanelMediaMessageId(
+  companyId: string,
+  conversationId: string,
+  idempotencyKey: string,
+): string {
+  const hash = createHash('sha256')
+    .update(
+      [
+        'whatsapp-panel-media-message',
+        companyId,
+        conversationId,
+        idempotencyKey,
+      ].join('\0'),
+    )
+    .digest('hex')
+    .split('');
+  hash[12] = '5';
+  hash[16] = '8';
+  const value = hash.join('').slice(0, 32);
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+}
+
 @ApiTags('Painel WhatsApp')
 @ApiBearerAuth()
 @RequireAnyPermission(
   'whatsapp-conversations:view',
+  'whatsapp-conversations:attend',
   'whatsapp-conversations:manage',
 )
 @Controller('whatsapp/conversations')
 export class WhatsAppPanelController {
   constructor(
     private readonly queryUseCase: QueryWhatsAppUseCase,
-    private readonly ensureConversation: EnsureWhatsAppConversationUseCase,
+    private readonly commercialQuotes: QuoteProposalUseCase,
+    private readonly startHumanConversation: StartHumanWhatsAppConversationUseCase,
     private readonly transition: TransitionWhatsAppConversationUseCase,
     private readonly createHumanOutbound: CreateHumanOutboundWhatsAppUseCase,
     private readonly mediaContent: EvolutionMediaContentService,
@@ -85,7 +113,10 @@ export class WhatsAppPanelController {
   ) {}
 
   @Post()
-  @RequireAnyPermission('whatsapp-conversations:manage')
+  @RequireAnyPermission(
+    'whatsapp-conversations:attend',
+    'whatsapp-conversations:manage',
+  )
   @ApiCreatedResponse({
     description:
       'Cria ou reutiliza a conversa can\u00f4nica do n\u00famero e inicia o atendimento humano.',
@@ -103,23 +134,12 @@ export class WhatsAppPanelController {
       );
     }
 
-    const conversation = await this.ensureConversation.execute(
-      current.companyId,
-      phoneNormalized,
-    );
-    if (conversation.conversationState === 'human-active') {
-      if (conversation.assignedTo?.id === current.id) return conversation;
-    }
-
-    return this.transition.execute({
+    return this.startHumanConversation.execute({
       companyId: current.companyId,
-      conversationId: conversation.id,
+      phoneNormalized,
       commandId: body.commandId,
-      expectedVersion: conversation.version,
-      name: 'take-over',
-      actorType: 'user',
       actorUserId: current.id,
-      metadata: { source: 'panel-new-conversation' },
+      targetDepartment: body.targetDepartment,
     });
   }
 
@@ -128,11 +148,15 @@ export class WhatsAppPanelController {
     @CurrentUser() current: AuthenticatedPrincipal,
     @Query() query: ConversationListQueryDto,
   ) {
-    return this.queryUseCase.listConversations(current.companyId, query);
+    return this.scopedConversationList(current, query);
   }
 
   @Get('dashboard')
-  @RequireAnyPermission('dashboard:view')
+  @RequireAnyPermission(
+    'whatsapp-conversations:view',
+    'whatsapp-conversations:attend',
+    'whatsapp-conversations:manage',
+  )
   @ApiOkResponse({
     description:
       'Indicadores operacionais limitados aos departamentos atribuídos ao usuário autenticado.',
@@ -141,20 +165,16 @@ export class WhatsAppPanelController {
     @CurrentUser() current: AuthenticatedPrincipal,
     @Query() query: ConversationListQueryDto,
   ) {
-    const assignedDepartments = current.departments.map(
-      normalizeUserDepartment,
-    );
-    const canManageAll = current.permissions.includes(
-      'whatsapp-conversations:manage',
-    );
+    return this.scopedConversationList(current, query);
+  }
 
-    if (assignedDepartments.length === 0) {
-      if (!canManageAll) {
-        throw forbidden(
-          'Seu perfil não possui departamento atribuído para consultar os indicadores operacionais.',
-        );
-      }
-
+  private scopedConversationList(
+    current: AuthenticatedPrincipal,
+    query: ConversationListQueryDto,
+  ) {
+    const { departments: assignedDepartments } =
+      this.conversationAccessScope(current);
+    if (assignedDepartments === null) {
       return this.queryUseCase.listConversations(current.companyId, query);
     }
 
@@ -168,16 +188,33 @@ export class WhatsAppPanelController {
       return this.queryUseCase.listConversations(current.companyId, query);
     }
 
-    if (assignedDepartments.length > 1) {
-      throw validationError(
-        'Informe um dos departamentos atribuídos ao seu perfil.',
+    if (query.requestStatus && !assignedDepartments.includes('commercial')) {
+      throw forbidden(
+        'A situação da solicitação pertence somente à fila Comercial.',
       );
     }
 
     return this.queryUseCase.listConversations(current.companyId, {
       ...query,
-      department: assignedDepartments[0],
+      ...(assignedDepartments.length === 1
+        ? { department: assignedDepartments[0] }
+        : { departments: assignedDepartments }),
     });
+  }
+
+  private conversationAccessScope(
+    current: AuthenticatedPrincipal,
+  ): ConversationAccessScope {
+    const departments = Array.from(
+      new Set(current.departments.map(normalizeUserDepartment)),
+    );
+    if (current.isAdministrator || hasTenantWideAuthority(current)) {
+      return { departments: null };
+    }
+    if (departments.length > 0) return { departments };
+    throw forbidden(
+      'Seu perfil não possui departamento atribuído para consultar esta fila.',
+    );
   }
 
   @Get(':conversationId')
@@ -185,7 +222,11 @@ export class WhatsAppPanelController {
     @CurrentUser() current: AuthenticatedPrincipal,
     @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
   ) {
-    return this.queryUseCase.getConversation(current.companyId, conversationId);
+    return this.queryUseCase.getConversation(
+      current.companyId,
+      conversationId,
+      this.conversationAccessScope(current),
+    );
   }
 
   @Get(':conversationId/messages')
@@ -198,6 +239,7 @@ export class WhatsAppPanelController {
       current.companyId,
       conversationId,
       query,
+      this.conversationAccessScope(current),
     );
   }
 
@@ -216,6 +258,7 @@ export class WhatsAppPanelController {
       current.companyId,
       conversationId,
       messageId,
+      this.conversationAccessScope(current).departments,
     );
     response.setHeader('Content-Type', media.mimeType);
     response.setHeader('Content-Length', String(media.content.byteLength));
@@ -247,6 +290,7 @@ export class WhatsAppPanelController {
       current.companyId,
       conversationId,
       messageId,
+      this.conversationAccessScope(current).departments,
     );
     return {
       available: ['stored', 'already-stored'].includes(result.status),
@@ -271,11 +315,15 @@ export class WhatsAppPanelController {
       current.companyId,
       conversationId,
       query,
+      this.conversationAccessScope(current),
     );
   }
 
   @Post(':conversationId/messages')
-  @RequireAnyPermission('whatsapp-conversations:manage')
+  @RequireAnyPermission(
+    'whatsapp-conversations:attend',
+    'whatsapp-conversations:manage',
+  )
   createMessage(
     @CurrentUser() current: AuthenticatedPrincipal,
     @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
@@ -290,7 +338,10 @@ export class WhatsAppPanelController {
   }
 
   @Post(':conversationId/media-messages')
-  @RequireAnyPermission('whatsapp-conversations:manage')
+  @RequireAnyPermission(
+    'whatsapp-conversations:attend',
+    'whatsapp-conversations:manage',
+  )
   @ApiConsumes('multipart/form-data')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -350,14 +401,17 @@ export class WhatsAppPanelController {
       .join('')
       .replace(/[<>:"|?*]/g, '_')
       .slice(0, 200);
-    const messageId = randomUUID();
+    const messageId = deterministicPanelMediaMessageId(
+      current.companyId,
+      conversationId,
+      body.idempotencyKey,
+    );
     const sha256 = createHash('sha256').update(file.buffer).digest('hex');
     const storageKey = [
       'v1',
       current.companyId,
       conversationId,
       messageId,
-      sha256,
     ].join('/');
     if (body.mediaKind === 'sticker' && mimeType !== 'image/webp') {
       throw validationError('Figurinhas devem ser enviadas no formato WebP.');
@@ -375,30 +429,27 @@ export class WhatsAppPanelController {
                 ? 'contact'
                 : 'document';
 
+    const command = {
+      commandId: body.commandId,
+      idempotencyKey: body.idempotencyKey,
+      expectedVersion: body.expectedVersion,
+      companyId: current.companyId,
+      conversationId,
+      actorUserId: current.id,
+      text: body.caption,
+      attachment: {
+        messageId,
+        kind,
+        fileName,
+        mimeType,
+        sizeBytes: file.size,
+        sha256,
+        storageKey,
+      },
+    } as const;
+    await this.createHumanOutbound.authorize(command);
     await this.mediaStorage.write({ storageKey, content: file.buffer });
-    try {
-      return await this.createHumanOutbound.execute({
-        commandId: body.commandId,
-        idempotencyKey: body.idempotencyKey,
-        expectedVersion: body.expectedVersion,
-        companyId: current.companyId,
-        conversationId,
-        actorUserId: current.id,
-        text: body.caption,
-        attachment: {
-          messageId,
-          kind,
-          fileName,
-          mimeType,
-          sizeBytes: file.size,
-          sha256,
-          storageKey,
-        },
-      });
-    } catch (error) {
-      await this.mediaStorage.delete(storageKey).catch(() => undefined);
-      throw error;
-    }
+    return this.createHumanOutbound.execute(command);
   }
 
   @Get(':conversationId/quote-request')
@@ -406,14 +457,18 @@ export class WhatsAppPanelController {
     @CurrentUser() current: AuthenticatedPrincipal,
     @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
   ) {
-    return this.queryUseCase.getCurrentQuoteRequest(
+    return this.commercialQuotes.currentForConversation(
       current.companyId,
       conversationId,
+      this.conversationAccessScope(current),
     );
   }
 
   @Post(':conversationId/actions/take-over')
-  @RequireAnyPermission('whatsapp-conversations:manage')
+  @RequireAnyPermission(
+    'whatsapp-conversations:attend',
+    'whatsapp-conversations:manage',
+  )
   takeOver(
     @CurrentUser() current: AuthenticatedPrincipal,
     @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
@@ -423,7 +478,10 @@ export class WhatsAppPanelController {
   }
 
   @Post(':conversationId/actions/return-to-bot')
-  @RequireAnyPermission('whatsapp-conversations:manage')
+  @RequireAnyPermission(
+    'whatsapp-conversations:attend',
+    'whatsapp-conversations:manage',
+  )
   returnToBot(
     @CurrentUser() current: AuthenticatedPrincipal,
     @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
@@ -433,19 +491,86 @@ export class WhatsAppPanelController {
   }
 
   @Post(':conversationId/actions/forward')
-  @RequireAnyPermission('whatsapp-conversations:manage')
+  @RequireAnyPermission(
+    'whatsapp-conversations:attend',
+    'whatsapp-conversations:manage',
+  )
   forward(
     @CurrentUser() current: AuthenticatedPrincipal,
     @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
     @Body() body: ForwardConversationDto,
   ) {
-    return this.panelTransition(current, conversationId, body, 'forward', {
-      targetDepartment: body.targetDepartment,
-    });
+    return this.panelTransition(
+      current,
+      conversationId,
+      body,
+      'request-transfer',
+      {
+        targetDepartment: body.targetDepartment,
+        metadata: {
+          source: 'panel-legacy-forward',
+          reason: body.reason,
+        },
+      },
+    );
+  }
+
+  @Post(':conversationId/actions/request-transfer')
+  @RequireAnyPermission(
+    'whatsapp-conversations:attend',
+    'whatsapp-conversations:manage',
+  )
+  @ApiCreatedResponse({
+    description:
+      'Registra uma transferência pendente na fila do destino, mantendo a origem responsável até o aceite.',
+  })
+  requestTransfer(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
+    @Body() body: RequestConversationTransferDto,
+  ) {
+    return this.panelTransition(
+      current,
+      conversationId,
+      body,
+      'request-transfer',
+      {
+        targetDepartment: body.targetDepartment,
+        metadata: {
+          source: 'panel-transfer-request',
+          reason: body.reason,
+        },
+      },
+    );
+  }
+
+  @Post(':conversationId/actions/accept-transfer')
+  @RequireAnyPermission(
+    'whatsapp-conversations:attend',
+    'whatsapp-conversations:manage',
+  )
+  @ApiCreatedResponse({
+    description:
+      'Aceita uma transferência pendente e atribui a conversa ao usuário autenticado do departamento de destino.',
+  })
+  acceptTransfer(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
+    @Body() body: VersionedCommandDto,
+  ) {
+    return this.panelTransition(
+      current,
+      conversationId,
+      body,
+      'accept-transfer',
+    );
   }
 
   @Post(':conversationId/actions/change-department')
-  @RequireAnyPermission('whatsapp-conversations:manage')
+  @RequireAnyPermission(
+    'whatsapp-conversations:attend',
+    'whatsapp-conversations:manage',
+  )
   changeDepartment(
     @CurrentUser() current: AuthenticatedPrincipal,
     @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
@@ -458,13 +583,19 @@ export class WhatsAppPanelController {
       'change-department',
       {
         targetDepartment: body.targetDepartment,
-        metadata: { source: 'panel-department-change' },
+        metadata: {
+          source: 'panel-department-change',
+          reason: body.reason,
+        },
       },
     );
   }
 
   @Post(':conversationId/actions/archive')
-  @RequireAnyPermission('whatsapp-conversations:manage')
+  @RequireAnyPermission(
+    'whatsapp-conversations:attend',
+    'whatsapp-conversations:manage',
+  )
   archive(
     @CurrentUser() current: AuthenticatedPrincipal,
     @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
@@ -474,7 +605,10 @@ export class WhatsAppPanelController {
   }
 
   @Post(':conversationId/actions/unarchive')
-  @RequireAnyPermission('whatsapp-conversations:manage')
+  @RequireAnyPermission(
+    'whatsapp-conversations:attend',
+    'whatsapp-conversations:manage',
+  )
   unarchive(
     @CurrentUser() current: AuthenticatedPrincipal,
     @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
@@ -484,7 +618,10 @@ export class WhatsAppPanelController {
   }
 
   @Post(':conversationId/actions/mark-read')
-  @RequireAnyPermission('whatsapp-conversations:manage')
+  @RequireAnyPermission(
+    'whatsapp-conversations:attend',
+    'whatsapp-conversations:manage',
+  )
   @ApiOkResponse({ description: 'Contador zerado com concorrência otimista.' })
   markRead(
     @CurrentUser() current: AuthenticatedPrincipal,
@@ -495,7 +632,10 @@ export class WhatsAppPanelController {
   }
 
   @Post(':conversationId/actions/close')
-  @RequireAnyPermission('whatsapp-conversations:manage')
+  @RequireAnyPermission(
+    'whatsapp-conversations:attend',
+    'whatsapp-conversations:manage',
+  )
   @ApiCreatedResponse({
     description:
       'Encerra uma conversa sem proposta ativa e registra motivo, ator e data na transição e na auditoria.',
@@ -511,7 +651,10 @@ export class WhatsAppPanelController {
   }
 
   @Post(':conversationId/actions/close-after-rejection')
-  @RequireAnyPermission('whatsapp-conversations:manage')
+  @RequireAnyPermission(
+    'whatsapp-conversations:attend',
+    'whatsapp-conversations:manage',
+  )
   @ApiOperation({
     deprecated: true,
     summary: 'Alias compatível da ação canônica de encerramento',
@@ -536,6 +679,8 @@ export class WhatsAppPanelController {
     body: VersionedCommandDto,
     name:
       | 'take-over'
+      | 'request-transfer'
+      | 'accept-transfer'
       | 'return-to-bot'
       | 'forward'
       | 'change-department'

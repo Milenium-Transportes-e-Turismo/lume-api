@@ -12,6 +12,7 @@ export type AppErrorCode =
   | 'INVALID_COORDINATES'
   | 'INVALID_FUEL_CONSUMPTION'
   | 'INVALID_PASSWORD_CHANGE_TOKEN'
+  | 'INVALID_PREADMISSION_TOKEN'
   | 'INVALID_REFRESH_TOKEN'
   | 'INVALID_VEHICLE_CONFIGURATION'
   | 'LICENSE_UNAVAILABLE'
@@ -58,6 +59,13 @@ export function notFound(resource: string): AppError {
 
 export function validationError(message: string): AppError {
   return new AppError('VALIDATION_ERROR', message);
+}
+
+export function invalidPreAdmissionToken(): AppError {
+  return new AppError(
+    'INVALID_PREADMISSION_TOKEN',
+    'O acesso de pré-admissão é inválido ou não está mais disponível.',
+  );
 }
 
 export function unsupportedFileFormat(

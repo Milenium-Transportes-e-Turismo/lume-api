@@ -55,6 +55,7 @@ export interface UserProps {
   suspendedUntil: Date | null;
   suspensionReason: string | null;
   isActive: boolean;
+  version: number;
   tokenVersion: number;
   lastLoginAt: Date | null;
   createdAt: Date;
@@ -70,6 +71,7 @@ export class User {
       | 'id'
       | 'routingCompanyId'
       | 'isActive'
+      | 'version'
       | 'tokenVersion'
       | 'lastLoginAt'
       | 'mustChangePassword'
@@ -113,6 +115,7 @@ export class User {
       id: randomUUID(),
       routingCompanyId: input.routingCompanyId ?? null,
       isActive: true,
+      version: 1,
       tokenVersion: 1,
       mustChangePassword: input.mustChangePassword ?? false,
       profilePicture: null,
@@ -145,6 +148,7 @@ export class User {
       | 'militaryDocumentStatus'
       | 'dependents'
       | 'routingCompanyId'
+      | 'version'
     > & {
       documentAccessMode?: DocumentAccessMode;
       clientCategory?: UserClientCategory | null;
@@ -153,11 +157,13 @@ export class User {
       militaryDocumentStatus?: MilitaryDocumentStatus;
       dependents?: UserDependent[];
       routingCompanyId?: string | null;
+      version?: number;
     },
   ): User {
     return new User({
       ...props,
       routingCompanyId: props.routingCompanyId ?? null,
+      version: props.version ?? 1,
       documentAccessMode: props.documentAccessMode ?? 'standard',
       clientCategory: props.clientCategory ?? null,
       jobTitle: props.jobTitle ?? null,

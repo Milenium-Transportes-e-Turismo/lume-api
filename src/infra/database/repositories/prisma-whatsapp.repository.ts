@@ -4,17 +4,26 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import {
+  CommercialQuoteRepository,
+  type CreateQuoteProposalInput,
+  type DecideQuoteProposalInput,
+  type QuoteProposalListQuery,
+  type QuoteRequestPatch,
+  type SendQuoteProposalInput,
+  type UpdateQuoteProposalStatusInput,
+  type UploadQuoteProposalDocumentInput,
+} from '../../../application/contracts/commercial-quote.repository';
+import {
   WhatsAppRepository,
   type ApplyContinuityClassificationInput,
   type ApplyContinuityClassificationResult,
   type ClaimEvolutionDispatchInput,
   type CompleteOutboxExecutionInput,
   type ContinuityClassificationCandidate,
+  type ConversationAccessScope,
   type ConversationListQuery,
   type CreateHumanOutboundInput,
   type CreateOutboundInput,
-  type CreateQuoteProposalInput,
-  type DecideQuoteProposalInput,
   type EvolutionResultInput,
   type EnsureWhatsAppConversationResult,
   type MarkEvolutionDispatchUnknownInput,
@@ -25,15 +34,11 @@ import {
   type PersistWebhookGroupMessageResult,
   type ProcessServiceSessionLifecycleInput,
   type ProcessServiceSessionLifecycleResult,
-  type QuoteProposalListQuery,
-  type QuoteRequestPatch,
   type ReconcileAutomationOutboxInput,
-  type SendQuoteProposalInput,
   type SyncWebhookGroupInput,
+  type StartHumanWhatsAppConversationInput,
   type TransitionCommand,
   type TransitionListQuery,
-  type UpdateQuoteProposalStatusInput,
-  type UploadQuoteProposalDocumentInput,
   type WebhookChannelConfiguration,
 } from '../../../application/contracts/whatsapp.repository';
 import {
@@ -42,7 +47,22 @@ import {
   notFound,
   validationError,
 } from '../../../core/errors/app-error';
-import type { Department } from '../../../domain/access/access.constants';
+import {
+  isPermissionCode,
+  type Department,
+  type SupportedUserDepartment,
+} from '../../../domain/access/access.constants';
+import { resolveEffectivePermissions } from '../../../domain/access/resolve-permissions';
+import {
+  canExercisePermission,
+  hasTenantWideAuthority,
+} from '../../../domain/access/tenant-authority';
+import {
+  assertManualQuoteCancellationTransition,
+  normalizeManualQuoteCancellation,
+  type CommercialClosureClassification as CanonicalCommercialClosureClassification,
+} from '../../../domain/commercial/quote-closure';
+import type { QuoteRequestStatus as CanonicalRequestStatus } from '../../../domain/commercial/quote-status';
 import {
   buildConversationClosureMessage,
   buildDepartmentContactClosureMessage,
@@ -55,7 +75,7 @@ import {
   assertTransitionActor,
   resolveConversationTransition,
 } from '../../../domain/whatsapp/conversation-transition.matrix';
-import { validateQuoteProposalPdf } from '../../../domain/whatsapp/quote-proposal-pdf';
+import { validateQuoteProposalPdf } from '../../../domain/commercial/quote-proposal-pdf';
 import {
   AI_CLOSING_WAIT_MS,
   LUME_AI_CLOSING_QUESTION,
@@ -76,7 +96,7 @@ import {
   assertQuoteScheduleConsistency,
   dateOnlyFromDateTime,
   presentDateOnly,
-} from '../../../domain/whatsapp/quote-schedule';
+} from '../../../domain/commercial/quote-schedule';
 import { deterministicCommandId } from '../../../domain/whatsapp/whatsapp-automation-flow';
 import type {
   ConversationSnapshot,
@@ -84,19 +104,20 @@ import type {
   DeliveryStatus as CanonicalDeliveryStatus,
   FlowStep as CanonicalFlowStep,
   MessageKind as CanonicalMessageKind,
-  RequestStatus as CanonicalRequestStatus,
 } from '../../../domain/whatsapp/whatsapp.constants';
 import { UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT } from '../../../domain/whatsapp/whatsapp.constants';
 import { sanitizeLogText } from '../../../shared/utils/sensitive-data';
 import { formatWhatsAppPhone } from '../../../shared/utils/normalization';
 import {
   AgentExecutionStatus,
+  CommercialClosureClassification,
   ConversationState,
   ConversationParticipantRole,
   ContinuityClassification,
   ContinuityFallbackAction,
   DeliveryStatus,
   DepartmentCode,
+  DocumentAccessMode,
   EvolutionDispatchState,
   FlowStep,
   IntegrationOutboxStatus,
@@ -115,6 +136,7 @@ import {
   ServiceSessionPrioritySource,
   ServiceSessionStatus,
   TransitionActorType,
+  UserAccountStatus,
   WhatsAppAutomationExecutionStatus,
   WhatsAppAutomationProvider,
   WhatsAppGroupAiMode,
@@ -137,6 +159,7 @@ const departmentToPrisma: Readonly<Record<Department, DepartmentCode>> = {
   maintenance: DepartmentCode.MAINTENANCE,
   monitoring: DepartmentCode.MONITORING,
   management: DepartmentCode.MANAGEMENT,
+  directorate: DepartmentCode.DIRECTORATE,
   operations: DepartmentCode.OPERATIONS,
   cleaning: DepartmentCode.CLEANING,
   financial: DepartmentCode.FINANCIAL,
@@ -153,11 +176,98 @@ const departmentFromPrisma: Readonly<Record<DepartmentCode, Department>> = {
   MAINTENANCE: 'maintenance',
   MONITORING: 'monitoring',
   MANAGEMENT: 'management',
+  DIRECTORATE: 'directorate',
   OPERATIONS: 'operations',
   CLEANING: 'cleaning',
   FINANCIAL: 'financial',
   INFORMATION_TECHNOLOGY: 'information-technology',
 };
+
+function userBelongsToDepartment(
+  departments: readonly string[],
+  department: Department,
+): boolean {
+  return departments.some(
+    (assignedDepartment) =>
+      assignedDepartment === department ||
+      (assignedDepartment === 'controllership' && department === 'controlling'),
+  );
+}
+
+function internalActorDepartments(
+  departments: readonly string[],
+): Department[] {
+  return Array.from(
+    new Set(
+      departments
+        .map((department) =>
+          department === 'controllership' ? 'controlling' : department,
+        )
+        .filter(
+          (department): department is Department =>
+            department !== 'client-company' &&
+            Object.prototype.hasOwnProperty.call(
+              departmentToPrisma,
+              department,
+            ),
+        ),
+    ),
+  );
+}
+
+function resolveInitialConversationDepartment(
+  actor: {
+    readonly departments: readonly string[];
+    readonly hasTenantWideAuthority: boolean;
+  },
+  targetDepartment?: Department,
+): Department {
+  if (targetDepartment === 'client-company') {
+    throw validationError(
+      'Empresa cliente não pode ser a fila inicial de um atendimento interno.',
+    );
+  }
+  if (targetDepartment) {
+    if (
+      !actor.hasTenantWideAuthority &&
+      !userBelongsToDepartment(actor.departments, targetDepartment)
+    ) {
+      throw forbidden(
+        'A fila inicial deve pertencer a um departamento atribuído ao atendente.',
+      );
+    }
+    return targetDepartment;
+  }
+
+  const departments = internalActorDepartments(actor.departments);
+  if (departments.length === 1) return departments[0];
+  if (departments.length > 1) {
+    throw validationError(
+      'Informe a fila inicial porque o atendente pertence a mais de um departamento.',
+    );
+  }
+  throw validationError(
+    'Informe a fila interna inicial para este atendimento.',
+  );
+}
+
+function conversationDepartmentWhere(
+  scope: ConversationAccessScope,
+): Prisma.WhatsAppConversationWhereInput {
+  if (scope.departments === null) return {};
+
+  const departments = Array.from(
+    new Set(
+      scope.departments.map((department) => departmentToPrisma[department]),
+    ),
+  );
+  return {
+    OR: [
+      { department: { in: departments } },
+      { pendingTransferDepartment: { in: departments } },
+    ],
+  };
+}
 
 const departmentContactLabels: Readonly<Partial<Record<Department, string>>> = {
   purchasing: 'Compras (Fornecedores)',
@@ -287,6 +397,32 @@ function restorablePriorityStatus(
   }
 }
 
+const closureToPrisma: Readonly<
+  Record<
+    CanonicalCommercialClosureClassification,
+    CommercialClosureClassification
+  >
+> = {
+  'opportunity-abandoned':
+    CommercialClosureClassification.OPPORTUNITY_ABANDONED,
+  'quote-rejected': CommercialClosureClassification.QUOTE_REJECTED,
+  'acceptance-cancelled': CommercialClosureClassification.ACCEPTANCE_CANCELLED,
+  superseded: CommercialClosureClassification.SUPERSEDED,
+  'legacy-unclassified': CommercialClosureClassification.LEGACY_UNCLASSIFIED,
+};
+
+const closureFromPrisma: Readonly<
+  Record<
+    CommercialClosureClassification,
+    CanonicalCommercialClosureClassification
+  >
+> = {
+  OPPORTUNITY_ABANDONED: 'opportunity-abandoned',
+  QUOTE_REJECTED: 'quote-rejected',
+  ACCEPTANCE_CANCELLED: 'acceptance-cancelled',
+  SUPERSEDED: 'superseded',
+  LEGACY_UNCLASSIFIED: 'legacy-unclassified',
+};
 const COMMERCIAL_PENDING_QUOTES_NOTIFICATION =
   'commercial.pending-quote-proposals' as const;
 
@@ -494,6 +630,7 @@ const conversationInclude = {
   contact: true,
   channel: { select: { id: true, name: true, phoneNumber: true } },
   assignedTo: { select: { id: true, name: true } },
+  pendingTransferRequestedBy: { select: { id: true, name: true } },
   quoteRequests: { orderBy: { sequence: 'desc' as const }, take: 1 },
   _count: {
     select: {
@@ -1037,6 +1174,7 @@ function presentQuote(row: {
   confirmedSummary: unknown;
   confirmedVersion: number | null;
   requestedByUserId: string | null;
+  closureClassification: CommercialClosureClassification | null;
   decisionReason: string | null;
   decidedAt: Date | null;
   decidedByUserId: string | null;
@@ -1092,13 +1230,19 @@ function presentQuote(row: {
             : row.status === RequestStatus.CANCELLED
               ? 'cancelled'
               : 'pending',
+      classification: row.closureClassification
+        ? closureFromPrisma[row.closureClassification]
+        : row.status === RequestStatus.CANCELLED
+          ? 'legacy-unclassified'
+          : row.status === RequestStatus.REJECTED
+            ? 'quote-rejected'
+            : null,
       reason:
         row.decisionReason ??
-        (row.status === RequestStatus.CANCELLED
-          ? 'Substituído por uma nova solicitação de orçamento.'
-          : row.status === RequestStatus.REJECTED
-            ? 'Motivo não informado (registro legado).'
-            : null),
+        (row.status === RequestStatus.CANCELLED ||
+        row.status === RequestStatus.REJECTED
+          ? 'Motivo não informado (registro legado).'
+          : null),
       decidedAt: row.decidedAt?.toISOString() ?? null,
       decidedBy: row.decidedByUser
         ? { id: row.decidedByUser.id, name: row.decidedByUser.name }
@@ -1167,6 +1311,14 @@ function presentConversation(row: ConversationWithRelations) {
     },
     ...snapshot(row),
     assignedTo: row.assignedTo,
+    pendingTransfer: row.pendingTransferDepartment
+      ? {
+          targetDepartment: departmentFromPrisma[row.pendingTransferDepartment],
+          reason: row.pendingTransferReason,
+          requestedAt: row.pendingTransferRequestedAt?.toISOString() ?? null,
+          requestedBy: row.pendingTransferRequestedBy,
+        }
+      : null,
     unreadCount: row.unreadCount,
     version: row.version,
     mainMenuPresentedAt: row.mainMenuPresentedAt?.toISOString() ?? null,
@@ -1247,7 +1399,10 @@ function isPrismaUniqueError(error: unknown): boolean {
 }
 
 @Injectable()
-export class PrismaWhatsAppRepository extends WhatsAppRepository {
+export class PrismaWhatsAppRepository
+  extends WhatsAppRepository
+  implements CommercialQuoteRepository
+{
   private readonly dispatchLeaseMs: number;
   private readonly followUpInactivityMs: number;
   private readonly automationRetryBaseDelayMs: number;
@@ -4103,7 +4258,181 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
     });
   }
 
+  async startHumanConversation(
+    input: StartHumanWhatsAppConversationInput,
+  ): Promise<
+    EnsureWhatsAppConversationResult & { readonly idempotent: boolean }
+  > {
+    const fingerprint = commandFingerprint(input);
+    try {
+      return await this.prisma.$transaction(async (transaction) => {
+        await this.lockCommand(
+          transaction,
+          input.companyId,
+          'panel.start-conversation',
+          input.commandId,
+        );
+        const actor = await this.assertCurrentWhatsAppAttendant(
+          transaction,
+          input.companyId,
+          input.actorUserId,
+        );
+
+        const duplicate = await transaction.integrationInbox.findUnique({
+          where: {
+            companyId_source_externalEventId: {
+              companyId: input.companyId,
+              source: 'panel.start-conversation',
+              externalEventId: input.commandId,
+            },
+          },
+        });
+        if (duplicate) {
+          assertSameFingerprint(
+            duplicate.payloadHash,
+            fingerprint,
+            'commandId',
+          );
+          if (!duplicate.resultSnapshot) {
+            throw new AppError(
+              'CONFLICT',
+              'O comando de abertura da conversa está incompleto.',
+            );
+          }
+          return {
+            ...(duplicate.resultSnapshot as unknown as EnsureWhatsAppConversationResult),
+            idempotent: true,
+          };
+        }
+
+        const initialDepartment = resolveInitialConversationDepartment(
+          actor,
+          input.targetDepartment,
+        );
+
+        const channel = await transaction.whatsAppChannel.findFirst({
+          where: {
+            companyId: input.companyId,
+            enabled: true,
+            provider: { enabled: true },
+          },
+          orderBy: { createdAt: 'asc' },
+          select: { id: true },
+        });
+        if (!channel) {
+          throw validationError(
+            'Nenhum canal de WhatsApp est\u00e1 dispon\u00edvel para iniciar a conversa.',
+          );
+        }
+
+        const contact = await transaction.whatsAppContact.upsert({
+          where: {
+            companyId_phoneNormalized: {
+              companyId: input.companyId,
+              phoneNormalized: input.phoneNormalized,
+            },
+          },
+          create: {
+            companyId: input.companyId,
+            phoneNormalized: input.phoneNormalized,
+            phoneDisplay: formatWhatsAppPhone(input.phoneNormalized),
+            displayName: formatWhatsAppPhone(input.phoneNormalized),
+          },
+          update: {},
+          select: { id: true },
+        });
+
+        const conversation = await transaction.whatsAppConversation.upsert({
+          where: {
+            companyId_channelId_contactId: {
+              companyId: input.companyId,
+              channelId: channel.id,
+              contactId: contact.id,
+            },
+          },
+          create: {
+            companyId: input.companyId,
+            channelId: channel.id,
+            contactId: contact.id,
+            department: departmentToPrisma[initialDepartment],
+          },
+          update: {},
+          select: { id: true },
+        });
+
+        const current = await this.findConversationOrThrow(
+          transaction,
+          input.companyId,
+          conversation.id,
+        );
+        const result =
+          current.conversationState === ConversationState.HUMAN_ACTIVE &&
+          current.assignedToUserId === input.actorUserId
+            ? presentConversation(current)
+            : await this.transition(
+                {
+                  companyId: input.companyId,
+                  conversationId: current.id,
+                  commandId: input.commandId,
+                  expectedVersion: current.version,
+                  name: 'take-over',
+                  actorType: 'user',
+                  actorUserId: input.actorUserId,
+                  metadata: { source: 'panel-new-conversation' },
+                },
+                transaction,
+              );
+        const resultSnapshot = {
+          ...(result as EnsureWhatsAppConversationResult),
+          idempotent: false,
+        };
+        await transaction.integrationInbox.create({
+          data: {
+            companyId: input.companyId,
+            channelId: channel.id,
+            source: 'panel.start-conversation',
+            externalEventId: input.commandId,
+            payloadHash: fingerprint,
+            correlationId: correlation(
+              'panel-start-conversation',
+              input.commandId,
+            ),
+            resultSnapshot: payload(resultSnapshot),
+            processedAt: new Date(),
+          },
+        });
+        return resultSnapshot;
+      });
+    } catch (error) {
+      if (!isPrismaUniqueError(error)) throw error;
+      return (await this.replayInbox(
+        input.companyId,
+        'panel.start-conversation',
+        input.commandId,
+        fingerprint,
+        'commandId',
+      )) as EnsureWhatsAppConversationResult & {
+        readonly idempotent: boolean;
+      };
+    }
+  }
+
   async persistWebhookMessage(
+    input: PersistWebhookMessageInput,
+  ): Promise<PersistWebhookMessageResult> {
+    try {
+      return await this.persistWebhookMessageOnce(input);
+    } catch (error) {
+      if (!isPrismaUniqueError(error)) throw error;
+
+      // Dois primeiros eventos do mesmo telefone podem disputar a criação do
+      // contato ou da conversa. A transação perdedora foi revertida; repetir
+      // uma vez permite que ela reutilize o registro confirmado pela vencedora.
+      return this.persistWebhookMessageOnce(input);
+    }
+  }
+
+  private async persistWebhookMessageOnce(
     input: PersistWebhookMessageInput,
   ): Promise<PersistWebhookMessageResult> {
     try {
@@ -4894,1135 +5223,1342 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
     }
   }
 
-  async transition(input: TransitionCommand): Promise<unknown> {
+  async transition(
+    input: TransitionCommand,
+    existingTransaction?: Prisma.TransactionClient,
+  ): Promise<unknown> {
     assertTransitionActor(input.name, input.actorType);
     const fingerprint = commandFingerprint(input);
-    try {
-      return await this.prisma.$transaction(async (transaction) => {
-        await this.lockCommand(
-          transaction,
-          input.companyId,
-          'transition',
-          input.commandId,
+    const operation = async (transaction: Prisma.TransactionClient) => {
+      await this.lockCommand(
+        transaction,
+        input.companyId,
+        'transition',
+        input.commandId,
+      );
+      if (input.actorType === 'user' && !input.actorUserId) {
+        throw validationError(
+          'Uma transição humana exige um usuário autenticado.',
         );
-        const duplicate =
-          await transaction.whatsAppConversationTransition.findUnique({
-            where: {
-              companyId_commandId: {
-                companyId: input.companyId,
-                commandId: input.commandId,
-              },
+      }
+      const currentActor =
+        input.actorType === 'user' && input.actorUserId
+          ? await this.assertCurrentWhatsAppAttendant(
+              transaction,
+              input.companyId,
+              input.actorUserId,
+            )
+          : null;
+      const duplicate =
+        await transaction.whatsAppConversationTransition.findUnique({
+          where: {
+            companyId_commandId: {
+              companyId: input.companyId,
+              commandId: input.commandId,
             },
-          });
+          },
+        });
 
-        if (duplicate) {
-          assertSameFingerprint(
-            duplicate.commandFingerprint,
-            fingerprint,
-            'commandId',
-          );
-          return {
-            ...(duplicate.resultSnapshot as Record<string, unknown>),
-            idempotent: true,
-          };
-        }
-
-        await this.lockCommand(
-          transaction,
-          input.companyId,
-          'whatsapp-conversation',
-          input.conversationId,
+      if (duplicate) {
+        assertSameFingerprint(
+          duplicate.commandFingerprint,
+          fingerprint,
+          'commandId',
         );
-        const conversation = await this.findConversationOrThrow(
-          transaction,
-          input.companyId,
-          input.conversationId,
-        );
-        if (conversation.version !== input.expectedVersion) {
-          throw currentVersionConflict(conversation.version);
-        }
-        const closing = isClosingTransition(input.name);
-        let resolvedClosingReason: string | null = null;
-        if (closing) {
-          const rawReason = input.metadata?.reason;
-          if (
-            rawReason !== undefined &&
-            rawReason !== null &&
-            typeof rawReason !== 'string'
-          ) {
-            throw validationError(
-              'O motivo do encerramento deve ser um texto.',
-            );
-          }
-          const providedReason =
-            typeof rawReason === 'string' ? rawReason.trim() || null : null;
-          if (providedReason && providedReason.length < 3) {
-            throw validationError(
-              'O motivo do encerramento deve possuir pelo menos 3 caracteres.',
-            );
-          }
-          if (providedReason && providedReason.length > 500) {
-            throw validationError(
-              'O motivo do encerramento deve possuir no máximo 500 caracteres.',
-            );
-          }
+        return {
+          ...(duplicate.resultSnapshot as Record<string, unknown>),
+          idempotent: true,
+        };
+      }
 
-          const latestQuote = conversation.quoteRequests[0];
-          const rejected =
-            conversation.requestStatus === RequestStatus.REJECTED ||
-            latestQuote?.status === RequestStatus.REJECTED;
-          const decisionReason =
-            latestQuote?.status === RequestStatus.REJECTED
-              ? latestQuote.decisionReason?.trim() || null
-              : null;
-          resolvedClosingReason = providedReason ?? decisionReason;
-          if (rejected && !resolvedClosingReason) {
-            throw validationError(
-              'Informe o motivo do encerramento da proposta recusada.',
-            );
-          }
-        }
+      await this.lockCommand(
+        transaction,
+        input.companyId,
+        'whatsapp-conversation',
+        input.conversationId,
+      );
+      const conversation = await this.findConversationOrThrow(
+        transaction,
+        input.companyId,
+        input.conversationId,
+      );
+      if (conversation.version !== input.expectedVersion) {
+        throw currentVersionConflict(conversation.version);
+      }
+      const transferReason =
+        typeof input.metadata?.reason === 'string'
+          ? input.metadata.reason.trim()
+          : '';
+      if (
+        input.actorType === 'user' &&
+        (input.name === 'request-transfer' ||
+          input.name === 'change-department') &&
+        (transferReason.length < 3 || transferReason.length > 500)
+      ) {
+        throw validationError(
+          'Informe o motivo da transferência, entre 3 e 500 caracteres.',
+        );
+      }
+      if (
+        input.name === 'request-transfer' &&
+        conversation.pendingTransferDepartment !== null
+      ) {
+        throw new AppError(
+          'CONFLICT',
+          'A conversa já possui uma transferência aguardando aceite.',
+        );
+      }
+      if (
+        input.name === 'accept-transfer' &&
+        conversation.pendingTransferDepartment === null
+      ) {
+        throw new AppError(
+          'CONFLICT',
+          'A conversa não possui transferência aguardando aceite.',
+        );
+      }
+      if (
+        input.name === 'change-department' &&
+        conversation.assignedToUserId !== null
+      ) {
+        throw new AppError(
+          'CONFLICT',
+          'Uma conversa atribuída deve usar solicitação e aceite de transferência.',
+        );
+      }
+      const closing = isClosingTransition(input.name);
+      let resolvedClosingReason: string | null = null;
+      if (closing) {
+        const rawReason = input.metadata?.reason;
         if (
-          [
-            'take-over',
-            'return-to-bot',
-            'forward',
-            'new-quote-request',
-          ].includes(input.name)
+          rawReason !== undefined &&
+          rawReason !== null &&
+          typeof rawReason !== 'string'
         ) {
-          const queuedProposal =
-            await transaction.quoteProposalDocument.findFirst({
-              where: {
-                companyId: input.companyId,
-                conversationId: input.conversationId,
-                status: QuoteProposalDocumentStatus.QUEUED,
-              },
-              select: { id: true },
-            });
-          if (queuedProposal) {
-            throw new AppError(
-              'CONFLICT',
-              'A proposta está sendo enviada. Aguarde a confirmação do provedor antes de alterar a condução.',
-              { proposalDocumentId: queuedProposal.id },
-            );
-          }
+          throw validationError('O motivo do encerramento deve ser um texto.');
         }
-
-        if (input.actorType === 'user' && !input.actorUserId) {
+        const providedReason =
+          typeof rawReason === 'string' ? rawReason.trim() || null : null;
+        if (providedReason && providedReason.length < 3) {
           throw validationError(
-            'Uma transição humana exige um usuário autenticado.',
+            'O motivo do encerramento deve possuir pelo menos 3 caracteres.',
           );
         }
-        let actorUser: { id: string; name: string } | null = null;
-        if (input.actorUserId) {
-          const actor = await transaction.user.findUnique({
+        if (providedReason && providedReason.length > 500) {
+          throw validationError(
+            'O motivo do encerramento deve possuir no máximo 500 caracteres.',
+          );
+        }
+
+        const latestQuote = conversation.quoteRequests[0];
+        const rejected =
+          conversation.requestStatus === RequestStatus.REJECTED ||
+          latestQuote?.status === RequestStatus.REJECTED;
+        const decisionReason =
+          latestQuote?.status === RequestStatus.REJECTED
+            ? latestQuote.decisionReason?.trim() || null
+            : null;
+        resolvedClosingReason = providedReason ?? decisionReason;
+        if (rejected && !resolvedClosingReason) {
+          throw validationError(
+            'Informe o motivo do encerramento da proposta recusada.',
+          );
+        }
+      }
+      if (
+        [
+          'take-over',
+          'request-transfer',
+          'accept-transfer',
+          'return-to-bot',
+          'forward',
+          'new-quote-request',
+        ].includes(input.name)
+      ) {
+        const queuedProposal =
+          await transaction.quoteProposalDocument.findFirst({
+            where: {
+              companyId: input.companyId,
+              conversationId: input.conversationId,
+              status: QuoteProposalDocumentStatus.QUEUED,
+            },
+            select: { id: true },
+          });
+        if (queuedProposal) {
+          throw new AppError(
+            'CONFLICT',
+            'A proposta está sendo enviada. Aguarde a confirmação do provedor antes de alterar a condução.',
+            { proposalDocumentId: queuedProposal.id },
+          );
+        }
+      }
+
+      let actorUser: { id: string; name: string } | null = null;
+      if (input.actorUserId) {
+        const actor =
+          currentActor ??
+          (await transaction.user.findUnique({
             where: {
               id_companyId: {
                 id: input.actorUserId,
                 companyId: input.companyId,
               },
             },
-            select: { id: true, name: true, isActive: true },
-          });
-          if (!actor?.isActive) {
-            throw forbidden('O ator informado não pertence ao tenant.');
-          }
-          actorUser = { id: actor.id, name: actor.name };
-        }
-
-        if (
-          input.automaticHumanHandoff &&
-          (input.name !== 'forward' || input.actorType !== 'system')
-        ) {
-          throw validationError(
-            'Handoff automático é permitido somente em forward executado pelo sistema.',
-          );
-        }
-        const automaticHandoffMessage =
-          input.automaticHumanHandoff?.customerMessage.trim() ?? null;
-        if (
-          input.automaticHumanHandoff &&
-          (!automaticHandoffMessage || automaticHandoffMessage.length > 4096)
-        ) {
-          throw validationError(
-            'A mensagem contextual do handoff deve possuir entre 1 e 4096 caracteres.',
-          );
-        }
-        if (
-          input.automaticHumanHandoff &&
-          !Number.isFinite(input.automaticHumanHandoff.occurredAt.valueOf())
-        ) {
-          throw validationError('O instante do handoff é inválido.');
-        }
-        if (
-          input.automaticHumanHandoff &&
-          Boolean(input.automaticHumanHandoff.actorAgentId) !==
-            Boolean(input.automaticHumanHandoff.agentExecutionId)
-        ) {
-          throw validationError(
-            'A autoria de IA do handoff exige agente e execução correspondentes.',
-          );
-        }
-        const automaticPriorityReason =
-          input.automaticHumanHandoff?.sessionPriority?.reason.trim() ?? null;
-        if (
-          input.automaticHumanHandoff?.sessionPriority &&
-          (!automaticPriorityReason || automaticPriorityReason.length > 500)
-        ) {
-          throw validationError(
-            'O motivo da prioridade de IA deve possuir entre 1 e 500 caracteres.',
-          );
-        }
-        if (
-          input.automaticHumanHandoff?.sessionPriority &&
-          !input.automaticHumanHandoff.actorAgentId
-        ) {
-          throw validationError(
-            'A prioridade de IA exige autoria de agente auditável.',
-          );
-        }
-
-        let resolvedTargetDepartment = input.targetDepartment;
-        let automaticHandoff: {
-          readonly occurredAt: Date;
-          readonly humanServiceOpen: boolean;
-          readonly scheduleSource: 'tenant' | 'department' | 'always-open';
-          readonly targetDepartmentId: string;
-          readonly targetDepartmentCode: DepartmentCode;
-          readonly queueId: string;
-          readonly customerMessage: string;
-        } | null = null;
-        if (input.automaticHumanHandoff && automaticHandoffMessage) {
-          const departmentSelect = {
-            id: true,
-            code: true,
-            humanServiceHoursOverride: true,
-            serviceQueues: {
-              where: { enabled: true },
-              orderBy: [{ priorityWeight: 'desc' }, { name: 'asc' }],
-              take: 1,
-              select: { id: true },
-            },
-          } satisfies Prisma.TenantDepartmentSelect;
-          const requestedDepartment = input.targetDepartment
-            ? await transaction.tenantDepartment.findUnique({
-                where: {
-                  companyId_code: {
-                    companyId: input.companyId,
-                    code: departmentToPrisma[input.targetDepartment],
-                  },
-                },
-                select: departmentSelect,
-              })
-            : null;
-          const currentDepartment = requestedDepartment
-            ? null
-            : await transaction.tenantDepartment.findUnique({
-                where: {
-                  companyId_code: {
-                    companyId: input.companyId,
-                    code: conversation.department,
-                  },
-                },
-                select: departmentSelect,
-              });
-          const channelOwnerId =
-            requestedDepartment || currentDepartment
-              ? null
-              : await transaction.whatsAppChannel.findUnique({
-                  where: {
-                    id_companyId: {
-                      id: conversation.channelId,
-                      companyId: input.companyId,
-                    },
-                  },
-                  select: { departmentId: true },
-                });
-          const channelOwner = channelOwnerId?.departmentId
-            ? await transaction.tenantDepartment.findUnique({
-                where: {
-                  id_companyId: {
-                    id: channelOwnerId.departmentId,
-                    companyId: input.companyId,
-                  },
-                },
-                select: departmentSelect,
-              })
-            : null;
-          const department =
-            requestedDepartment ?? currentDepartment ?? channelOwner;
-          if (!department) {
-            throw validationError(
-              'Configure um departamento proprietário no canal para o handoff humano.',
-            );
-          }
-          const queue =
-            department.serviceQueues[0] ??
-            (await transaction.serviceQueue.upsert({
-              where: {
-                companyId_departmentId_name: {
-                  companyId: input.companyId,
-                  departmentId: department.id,
-                  name: 'Atendimento',
-                },
-              },
-              create: {
-                companyId: input.companyId,
-                departmentId: department.id,
-                name: 'Atendimento',
-              },
-              update: { enabled: true },
-              select: { id: true },
-            }));
-          const company = await transaction.company.findUnique({
-            where: { id: input.companyId },
             select: {
-              humanServiceHours: true,
-              offHoursHandoffMessage: true,
+              id: true,
+              name: true,
+              isActive: true,
+              departments: true,
             },
-          });
-          if (!company) throw notFound('Tenant');
-          const tenantSchedule = parseHumanServiceHours(
-            company.humanServiceHours,
-            'Horário padrão do tenant',
-          );
-          const departmentSchedule = parseHumanServiceHours(
-            department.humanServiceHoursOverride,
-            'Horário do departamento',
-          );
-          const humanServiceOpen = isHumanServiceOpen({
-            at: input.automaticHumanHandoff.occurredAt,
-            tenantDefault: tenantSchedule,
-            departmentOverride: departmentSchedule,
-          });
-          const offHoursMessage = company.offHoursHandoffMessage.trim();
-          if (!humanServiceOpen && !offHoursMessage) {
-            throw validationError(
-              'Configure a mensagem de encaminhamento fora do horário.',
-            );
-          }
-          resolvedTargetDepartment = departmentFromPrisma[department.code];
-          automaticHandoff = {
-            occurredAt: input.automaticHumanHandoff.occurredAt,
-            humanServiceOpen,
-            scheduleSource: departmentSchedule
-              ? 'department'
-              : tenantSchedule
-                ? 'tenant'
-                : 'always-open',
-            targetDepartmentId: department.id,
-            targetDepartmentCode: department.code,
-            queueId: queue.id,
-            customerMessage: humanServiceOpen
-              ? automaticHandoffMessage
-              : offHoursMessage,
-          };
+          }));
+        if (!actor?.isActive) {
+          throw forbidden('O ator informado não pertence ao tenant.');
         }
-
-        const from = snapshot(conversation);
-        const to = resolveConversationTransition({
-          current: from,
-          name: input.name,
-          targetDepartment: resolvedTargetDepartment,
-          departmentOption:
-            typeof input.metadata?.departmentOption === 'string'
-              ? input.metadata.departmentOption
-              : undefined,
-          policy: {
-            preventCloseWithApprovedQuote: this.preventCloseWithApprovedQuote,
-          },
-        });
-        const transitionedAt = automaticHandoff?.occurredAt ?? new Date();
-        const foundation = await this.ensureFoundationForConversation(
-          transaction,
-          conversation,
-          {
-            commandSeed: input.commandId,
-            occurredAt: transitionedAt,
-            desiredConversationState: stateToPrisma[to.conversationState],
-          },
+        actorUser = { id: actor.id, name: actor.name };
+        const currentDepartment = departmentFromPrisma[conversation.department];
+        const tenantWide = currentActor?.hasTenantWideAuthority ?? false;
+        const belongsToCurrentDepartment = userBelongsToDepartment(
+          actor.departments,
+          currentDepartment,
         );
-        const automaticAgentAttribution =
-          input.automaticHumanHandoff?.actorAgentId &&
-          input.automaticHumanHandoff.agentExecutionId
-            ? await transaction.agentExecution.findFirst({
-                where: {
-                  id: input.automaticHumanHandoff.agentExecutionId,
-                  companyId: input.companyId,
-                  agentId: input.automaticHumanHandoff.actorAgentId,
-                  serviceSessionId: foundation.session.id,
-                  status: AgentExecutionStatus.SUCCEEDED,
-                },
-                select: { id: true, agentId: true },
-              })
-            : null;
         if (
-          input.automaticHumanHandoff?.actorAgentId &&
-          input.automaticHumanHandoff.agentExecutionId &&
-          !automaticAgentAttribution
+          input.name === 'take-over' &&
+          !tenantWide &&
+          !belongsToCurrentDepartment
         ) {
           throw forbidden(
-            'A execução de IA do handoff não pertence à sessão ou ainda não foi concluída.',
+            'Somente um usuário do departamento responsável pode assumir a conversa.',
           );
         }
-        const nextVersion = conversation.version + 1;
-        const transitionId = randomUUID();
-        const departmentContactCompleted =
-          input.name === 'return-to-main-menu' &&
-          input.metadata?.reason === 'department-contact-forwarded';
-        const closureMessageText = departmentContactCompleted
-          ? buildDepartmentContactClosureMessage(
-              departmentContactLabels[
-                input.targetDepartment ??
-                  departmentFromPrisma[conversation.department]
-              ] ?? 'responsável',
-            )
-          : closing
-            ? buildConversationClosureMessage(transitionedAt)
-            : null;
-        const finalizationPurpose = departmentContactCompleted
-          ? 'department-contact-finalization'
-          : 'conversation-closure';
-        const closureMessage = closureMessageText
-          ? await transaction.whatsAppMessage.create({
-              data: {
-                companyId: input.companyId,
-                conversationId: input.conversationId,
-                channelId: conversation.channelId,
-                contactId: conversation.contactId,
-                actorUserId: input.actorUserId,
-                threadId: foundation.threadId,
-                serviceSessionId: foundation.session.id,
-                actorType:
-                  input.actorType === 'user'
-                    ? WhatsAppMessageActorType.HUMAN_USER
-                    : WhatsAppMessageActorType.SYSTEM,
-                source:
-                  input.actorType === 'user'
-                    ? WhatsAppMessageSource.LUME_WEB
-                    : WhatsAppMessageSource.AUTOMATION,
-                direction: MessageDirection.OUTBOUND,
-                deliveryStatus: DeliveryStatus.PENDING,
-                kind: MessageKind.TEXT,
-                text: closureMessageText,
-                automationPurpose: departmentContactCompleted
-                  ? finalizationPurpose
-                  : null,
-                recipientPhone: conversation.contact.phoneNormalized,
-                correlationId: correlation(
-                  `${finalizationPurpose}-outbound`,
-                  input.commandId,
-                ),
-                occurredAt: transitionedAt,
-              },
-            })
-          : null;
-        const closureAttempt = closureMessage
-          ? await transaction.whatsAppMessageAttempt.create({
-              data: {
-                companyId: input.companyId,
-                messageId: closureMessage.id,
-                attemptNumber: 1,
-                status: MessageAttemptStatus.PENDING,
-              },
-            })
-          : null;
-        const offHoursNotificationClaimed = Boolean(
-          automaticHandoff &&
-          !automaticHandoff.humanServiceOpen &&
-          foundation.session.offHoursHandoffNotifiedAt === null,
-        );
-        const handoffMessageText =
-          automaticHandoff &&
-          (automaticHandoff.humanServiceOpen || offHoursNotificationClaimed)
-            ? automaticHandoff.customerMessage
-            : null;
-        const handoffMessage = handoffMessageText
-          ? await transaction.whatsAppMessage.create({
-              data: {
-                companyId: input.companyId,
-                conversationId: input.conversationId,
-                channelId: conversation.channelId,
-                contactId: conversation.contactId,
-                actorAgentId: automaticAgentAttribution?.agentId,
-                agentExecutionId: automaticAgentAttribution?.id,
-                threadId: foundation.threadId,
-                serviceSessionId: foundation.session.id,
-                actorType: automaticAgentAttribution
-                  ? WhatsAppMessageActorType.AI_AGENT
-                  : WhatsAppMessageActorType.SYSTEM,
-                source: WhatsAppMessageSource.AUTOMATION,
-                direction: MessageDirection.OUTBOUND,
-                deliveryStatus: DeliveryStatus.PENDING,
-                kind: MessageKind.TEXT,
-                text: handoffMessageText,
-                automationPurpose: automaticHandoff?.humanServiceOpen
-                  ? 'human-handoff'
-                  : 'off-hours-handoff',
-                recipientPhone: conversation.contact.phoneNormalized,
-                correlationId: correlation(
-                  'human-handoff-outbound',
-                  input.commandId,
-                ),
-                occurredAt: transitionedAt,
-              },
-            })
-          : null;
-        const handoffAttempt = handoffMessage
-          ? await transaction.whatsAppMessageAttempt.create({
-              data: {
-                companyId: input.companyId,
-                messageId: handoffMessage.id,
-                attemptNumber: 1,
-                status: MessageAttemptStatus.PENDING,
-              },
-            })
-          : null;
-
-        let quote = conversation.quoteRequests[0];
-        let supersededQuote: {
-          id: string;
-          previousVersion: number;
-          resultingVersion: number;
-        } | null = null;
         if (
-          input.name === 'new-quote-request' &&
-          quote?.status === RequestStatus.UNDER_REVIEW
-        ) {
-          const previousVersion = quote.version;
-          const cancelled = await transaction.quoteRequest.updateMany({
-            where: {
-              id: quote.id,
-              companyId: input.companyId,
-              conversationId: input.conversationId,
-              status: RequestStatus.UNDER_REVIEW,
-              version: previousVersion,
-            },
-            data: {
-              status: RequestStatus.CANCELLED,
-              decisionReason:
-                'Substituído por uma nova solicitação de orçamento.',
-              decidedAt: new Date(),
-              version: { increment: 1 },
-            },
-          });
-          if (cancelled.count !== 1) {
-            const latest = await transaction.quoteRequest.findUniqueOrThrow({
-              where: {
-                id_companyId: {
-                  id: quote.id,
-                  companyId: input.companyId,
-                },
-              },
-              select: { version: true },
-            });
-            throw new AppError(
-              'CONFLICT',
-              'A solicitação anterior foi alterada durante a abertura do novo ciclo.',
-              { currentVersion: latest.version },
-            );
-          }
-          supersededQuote = {
-            id: quote.id,
-            previousVersion,
-            resultingVersion: previousVersion + 1,
-          };
-        }
-        if (
-          input.name === 'new-quote-request' ||
-          input.name === 'start-quote'
-        ) {
-          const latest = await transaction.quoteRequest.aggregate({
-            where: {
-              companyId: input.companyId,
-              conversationId: input.conversationId,
-            },
-            _max: { sequence: true },
-          });
-          quote = await transaction.quoteRequest.create({
-            data: {
-              companyId: input.companyId,
-              conversationId: input.conversationId,
-              threadId: foundation.threadId,
-              serviceSessionId: foundation.session.id,
-              sequence: (latest._max.sequence ?? 0) + 1,
-              status: RequestStatus.COLLECTING_INFORMATION,
-            },
-          });
-        }
-        if (
-          ['present-quote-summary', 'correct-quote', 'confirm-quote'].includes(
-            input.name,
+          input.name === 'accept-transfer' &&
+          !tenantWide &&
+          !userBelongsToDepartment(
+            actor.departments,
+            departmentFromPrisma[conversation.pendingTransferDepartment!],
           )
         ) {
-          if (!quote) {
-            throw validationError(
-              'A conversa não possui uma solicitação de orçamento ativa.',
-            );
-          }
-          if (
-            input.name === 'present-quote-summary' ||
-            input.name === 'confirm-quote'
-          ) {
-            assertQuoteComplete(quote);
-          }
-          quote = await transaction.quoteRequest.update({
-            where: {
-              id_companyId: { id: quote.id, companyId: input.companyId },
-            },
-            data: {
-              threadId: foundation.threadId,
-              serviceSessionId: foundation.session.id,
-              status: requestToPrisma[to.requestStatus],
-              ...(input.name === 'confirm-quote'
-                ? {
-                    confirmedAt: new Date(),
-                    confirmedVersion: quote.version + 1,
-                    confirmedSummary: payload({
-                      contactName: quote.contactName,
-                      document: quote.document,
-                      email: quote.email,
-                      serviceType: quote.serviceType,
-                      origin: quote.origin,
-                      destination: quote.destination,
-                      departureDate: presentDateOnly(quote.departureDate),
-                      departureAt: quote.departureAt?.toISOString() ?? null,
-                      returnDate: presentDateOnly(quote.returnDate),
-                      returnAt: quote.returnAt?.toISOString() ?? null,
-                      passengerCount: quote.passengerCount,
-                      vehicleType: quote.vehicleType,
-                      vehicleAtDisposal: quote.vehicleAtDisposal,
-                      localTransfers: quote.localTransfers,
-                      notes: quote.notes,
-                      structuredData: quote.structuredData,
-                    }),
-                  }
-                : {}),
-              version: { increment: 1 },
-            },
-          });
-        }
-
-        const clearsDepartmentContactOption =
-          [
-            'present-main-menu',
-            'select-commercial',
-            'return-to-main-menu',
-            'take-over',
-            'return-to-bot',
-            'forward',
-          ].includes(input.name) || closing;
-        const nextAssignedToUserId =
-          to.conversationState === 'human-active'
-            ? input.name === 'take-over'
-              ? input.actorUserId
-              : conversation.assignedToUserId
-            : null;
-        if (to.conversationState === 'human-active' && !nextAssignedToUserId) {
-          throw validationError(
-            'Assuma a conversa antes de executar esta ação.',
+          throw forbidden(
+            'Somente um usuário do departamento de destino pode aceitar a transferência.',
           );
         }
-        const update = await transaction.whatsAppConversation.updateMany({
-          where: {
-            id: input.conversationId,
-            companyId: input.companyId,
-            version: input.expectedVersion,
+        if (
+          [
+            'forward',
+            'request-transfer',
+            'return-to-bot',
+            'change-department',
+            'mark-read',
+            'archive',
+            'unarchive',
+            'close',
+            'close-after-rejection',
+          ].includes(input.name) &&
+          !tenantWide &&
+          !belongsToCurrentDepartment
+        ) {
+          throw forbidden(
+            'Somente um usuário do departamento responsável pode executar esta ação.',
+          );
+        }
+        if (
+          ['forward', 'request-transfer', 'change-department'].includes(
+            input.name,
+          ) &&
+          input.targetDepartment === 'client-company'
+        ) {
+          throw validationError(
+            'Empresa cliente não pode ser o departamento responsável por um atendimento interno.',
+          );
+        }
+      }
+
+      if (
+        input.automaticHumanHandoff &&
+        (input.name !== 'forward' || input.actorType !== 'system')
+      ) {
+        throw validationError(
+          'Handoff automático é permitido somente em forward executado pelo sistema.',
+        );
+      }
+      const automaticHandoffMessage =
+        input.automaticHumanHandoff?.customerMessage.trim() ?? null;
+      if (
+        input.automaticHumanHandoff &&
+        (!automaticHandoffMessage || automaticHandoffMessage.length > 4096)
+      ) {
+        throw validationError(
+          'A mensagem contextual do handoff deve possuir entre 1 e 4096 caracteres.',
+        );
+      }
+      if (
+        input.automaticHumanHandoff &&
+        !Number.isFinite(input.automaticHumanHandoff.occurredAt.valueOf())
+      ) {
+        throw validationError('O instante do handoff é inválido.');
+      }
+      if (
+        input.automaticHumanHandoff &&
+        Boolean(input.automaticHumanHandoff.actorAgentId) !==
+          Boolean(input.automaticHumanHandoff.agentExecutionId)
+      ) {
+        throw validationError(
+          'A autoria de IA do handoff exige agente e execução correspondentes.',
+        );
+      }
+      const automaticPriorityReason =
+        input.automaticHumanHandoff?.sessionPriority?.reason.trim() ?? null;
+      if (
+        input.automaticHumanHandoff?.sessionPriority &&
+        (!automaticPriorityReason || automaticPriorityReason.length > 500)
+      ) {
+        throw validationError(
+          'O motivo da prioridade de IA deve possuir entre 1 e 500 caracteres.',
+        );
+      }
+      if (
+        input.automaticHumanHandoff?.sessionPriority &&
+        !input.automaticHumanHandoff.actorAgentId
+      ) {
+        throw validationError(
+          'A prioridade de IA exige autoria de agente auditável.',
+        );
+      }
+
+      let resolvedTargetDepartment = input.targetDepartment;
+      let automaticHandoff: {
+        readonly occurredAt: Date;
+        readonly humanServiceOpen: boolean;
+        readonly scheduleSource: 'tenant' | 'department' | 'always-open';
+        readonly targetDepartmentId: string;
+        readonly targetDepartmentCode: DepartmentCode;
+        readonly queueId: string;
+        readonly customerMessage: string;
+      } | null = null;
+      if (input.automaticHumanHandoff && automaticHandoffMessage) {
+        const departmentSelect = {
+          id: true,
+          code: true,
+          humanServiceHoursOverride: true,
+          serviceQueues: {
+            where: { enabled: true },
+            orderBy: [{ priorityWeight: 'desc' }, { name: 'asc' }],
+            take: 1,
+            select: { id: true },
           },
-          data: {
-            department: departmentToPrisma[to.department],
-            conversationState: stateToPrisma[to.conversationState],
-            flowStep: flowToPrisma[to.flowStep],
-            requestStatus: requestToPrisma[to.requestStatus],
-            resumeState: to.resumeState ? stateToPrisma[to.resumeState] : null,
-            resumeFlowStep: to.resumeFlowStep
-              ? flowToPrisma[to.resumeFlowStep]
-              : null,
-            departmentContactOption:
-              input.name === 'start-department-contact'
-                ? (input.metadata?.departmentOption as string)
-                : clearsDepartmentContactOption
-                  ? null
-                  : conversation.departmentContactOption,
-            followUpMenuPresentedAt: closing
-              ? null
-              : input.name === 'confirm-quote' ||
-                  ([
-                    'return-to-bot',
-                    'resume-contextual-contact',
-                    'select-commercial',
-                  ].includes(input.name) &&
-                    to.flowStep === 'commercial-follow-up-menu')
-                ? null
-                : conversation.followUpMenuPresentedAt,
-            contextualFollowUpAt:
-              input.name === 'confirm-quote'
-                ? new Date(Date.now() + this.followUpInactivityMs)
-                : closing
-                  ? null
-                  : input.name === 'return-to-bot' &&
-                      to.flowStep === 'commercial-follow-up-menu'
-                    ? new Date(0)
-                    : input.name === 'resume-contextual-contact'
-                      ? null
-                      : conversation.contextualFollowUpAt,
-            mainMenuPresentedAt: closing
-              ? null
-              : conversation.mainMenuPresentedAt,
-            assignedToUserId: nextAssignedToUserId,
-            ...(input.name === 'archive'
-              ? {
-                  archivedAt: transitionedAt,
-                  archiveReason: 'manual',
-                  archivedByUserId: input.actorUserId,
-                  archiveExemptedAt: null,
-                }
-              : input.name === 'unarchive' || input.name === 'take-over'
-                ? {
-                    archivedAt: null,
-                    archiveReason: null,
-                    archivedByUserId: null,
-                    archiveExemptedAt: transitionedAt,
-                  }
-                : {}),
-            unreadCount:
-              input.name === 'mark-read' ||
-              closing ||
-              departmentContactCompleted
-                ? 0
-                : conversation.unreadCount,
-            ...(closureMessageText || handoffMessageText
-              ? {
-                  lastMessagePreview: (
-                    closureMessageText ??
-                    handoffMessageText ??
-                    ''
-                  ).slice(0, 240),
-                  lastOutboundAt: transitionedAt,
-                }
-              : {}),
-            closedAt:
-              input.name === 'take-over'
-                ? null
-                : closing
-                  ? transitionedAt
-                  : conversation.closedAt,
-            version: { increment: 1 },
-          },
-        });
-        if (update.count !== 1) {
-          const latest =
-            await transaction.whatsAppConversation.findUniqueOrThrow({
+        } satisfies Prisma.TenantDepartmentSelect;
+        const requestedDepartment = input.targetDepartment
+          ? await transaction.tenantDepartment.findUnique({
               where: {
-                id_companyId: {
-                  id: input.conversationId,
+                companyId_code: {
                   companyId: input.companyId,
+                  code: departmentToPrisma[input.targetDepartment],
                 },
               },
-              select: { version: true },
-            });
-          throw currentVersionConflict(latest.version);
-        }
-
-        const updated = await this.findConversationOrThrow(
-          transaction,
-          input.companyId,
-          input.conversationId,
-        );
-        const targetDepartment = automaticHandoff
-          ? { id: automaticHandoff.targetDepartmentId }
+              select: departmentSelect,
+            })
+          : null;
+        const currentDepartment = requestedDepartment
+          ? null
           : await transaction.tenantDepartment.findUnique({
               where: {
                 companyId_code: {
                   companyId: input.companyId,
-                  code: updated.department,
+                  code: conversation.department,
                 },
               },
-              select: { id: true },
+              select: departmentSelect,
             });
-        const targetSessionState = serviceSessionStateForConversation(
-          updated.conversationState,
+        const channelOwnerId =
+          requestedDepartment || currentDepartment
+            ? null
+            : await transaction.whatsAppChannel.findUnique({
+                where: {
+                  id_companyId: {
+                    id: conversation.channelId,
+                    companyId: input.companyId,
+                  },
+                },
+                select: { departmentId: true },
+              });
+        const channelOwner = channelOwnerId?.departmentId
+          ? await transaction.tenantDepartment.findUnique({
+              where: {
+                id_companyId: {
+                  id: channelOwnerId.departmentId,
+                  companyId: input.companyId,
+                },
+              },
+              select: departmentSelect,
+            })
+          : null;
+        const department =
+          requestedDepartment ?? currentDepartment ?? channelOwner;
+        if (!department) {
+          throw validationError(
+            'Configure um departamento proprietário no canal para o handoff humano.',
+          );
+        }
+        const queue =
+          department.serviceQueues[0] ??
+          (await transaction.serviceQueue.upsert({
+            where: {
+              companyId_departmentId_name: {
+                companyId: input.companyId,
+                departmentId: department.id,
+                name: 'Atendimento',
+              },
+            },
+            create: {
+              companyId: input.companyId,
+              departmentId: department.id,
+              name: 'Atendimento',
+            },
+            update: { enabled: true },
+            select: { id: true },
+          }));
+        const company = await transaction.company.findUnique({
+          where: { id: input.companyId },
+          select: {
+            humanServiceHours: true,
+            offHoursHandoffMessage: true,
+          },
+        });
+        if (!company) throw notFound('Tenant');
+        const tenantSchedule = parseHumanServiceHours(
+          company.humanServiceHours,
+          'Horário padrão do tenant',
         );
-        const synchronizedSession = await this.updateFoundationSession(
-          transaction,
-          {
-            companyId: input.companyId,
-            session: foundation.session,
-            commandId: input.commandId,
-            name: `legacy-${input.name}`,
-            actorType:
-              automaticAgentAttribution !== null
-                ? MutationActorType.AI_AGENT
-                : input.actorType === 'user'
-                  ? MutationActorType.HUMAN_USER
-                  : input.actorType === 'system'
-                    ? MutationActorType.SYSTEM
-                    : MutationActorType.SERVICE,
-            actorUserId: input.actorUserId,
-            actorAgentId: automaticAgentAttribution?.agentId,
-            status: targetSessionState.status,
-            controlMode: targetSessionState.controlMode,
-            isForeground: targetSessionState.isForeground,
-            responsibleUserId:
-              targetSessionState.controlMode === ServiceSessionControlMode.HUMAN
-                ? updated.assignedToUserId
+        const departmentSchedule = parseHumanServiceHours(
+          department.humanServiceHoursOverride,
+          'Horário do departamento',
+        );
+        const humanServiceOpen = isHumanServiceOpen({
+          at: input.automaticHumanHandoff.occurredAt,
+          tenantDefault: tenantSchedule,
+          departmentOverride: departmentSchedule,
+        });
+        const offHoursMessage = company.offHoursHandoffMessage.trim();
+        if (!humanServiceOpen && !offHoursMessage) {
+          throw validationError(
+            'Configure a mensagem de encaminhamento fora do horário.',
+          );
+        }
+        resolvedTargetDepartment = departmentFromPrisma[department.code];
+        automaticHandoff = {
+          occurredAt: input.automaticHumanHandoff.occurredAt,
+          humanServiceOpen,
+          scheduleSource: departmentSchedule
+            ? 'department'
+            : tenantSchedule
+              ? 'tenant'
+              : 'always-open',
+          targetDepartmentId: department.id,
+          targetDepartmentCode: department.code,
+          queueId: queue.id,
+          customerMessage: humanServiceOpen
+            ? automaticHandoffMessage
+            : offHoursMessage,
+        };
+      }
+
+      const from = snapshot(conversation);
+      const pendingTransferBefore =
+        conversation.pendingTransferDepartment === null
+          ? null
+          : {
+              targetDepartment:
+                departmentFromPrisma[conversation.pendingTransferDepartment],
+              reason: conversation.pendingTransferReason,
+              requestedByUserId: conversation.pendingTransferRequestedByUserId,
+              requestedAt:
+                conversation.pendingTransferRequestedAt?.toISOString() ?? null,
+            };
+      if (input.name === 'accept-transfer' && pendingTransferBefore) {
+        resolvedTargetDepartment = pendingTransferBefore.targetDepartment;
+      }
+      const to = resolveConversationTransition({
+        current: from,
+        name: input.name,
+        targetDepartment: resolvedTargetDepartment,
+        departmentOption:
+          typeof input.metadata?.departmentOption === 'string'
+            ? input.metadata.departmentOption
+            : undefined,
+        policy: {
+          preventCloseWithApprovedQuote: this.preventCloseWithApprovedQuote,
+        },
+      });
+      const transitionedAt = automaticHandoff?.occurredAt ?? new Date();
+      const foundation = await this.ensureFoundationForConversation(
+        transaction,
+        conversation,
+        {
+          commandSeed: input.commandId,
+          occurredAt: transitionedAt,
+          desiredConversationState: stateToPrisma[to.conversationState],
+        },
+      );
+      const automaticAgentAttribution =
+        input.automaticHumanHandoff?.actorAgentId &&
+        input.automaticHumanHandoff.agentExecutionId
+          ? await transaction.agentExecution.findFirst({
+              where: {
+                id: input.automaticHumanHandoff.agentExecutionId,
+                companyId: input.companyId,
+                agentId: input.automaticHumanHandoff.actorAgentId,
+                serviceSessionId: foundation.session.id,
+                status: AgentExecutionStatus.SUCCEEDED,
+              },
+              select: { id: true, agentId: true },
+            })
+          : null;
+      if (
+        input.automaticHumanHandoff?.actorAgentId &&
+        input.automaticHumanHandoff.agentExecutionId &&
+        !automaticAgentAttribution
+      ) {
+        throw forbidden(
+          'A execução de IA do handoff não pertence à sessão ou ainda não foi concluída.',
+        );
+      }
+      const nextVersion = conversation.version + 1;
+      const transitionId = randomUUID();
+      const departmentContactCompleted =
+        input.name === 'return-to-main-menu' &&
+        input.metadata?.reason === 'department-contact-forwarded';
+      const closureMessageText = departmentContactCompleted
+        ? buildDepartmentContactClosureMessage(
+            departmentContactLabels[
+              input.targetDepartment ??
+                departmentFromPrisma[conversation.department]
+            ] ?? 'responsável',
+          )
+        : closing
+          ? buildConversationClosureMessage(transitionedAt)
+          : null;
+      const finalizationPurpose = departmentContactCompleted
+        ? 'department-contact-finalization'
+        : 'conversation-closure';
+      const closureMessage = closureMessageText
+        ? await transaction.whatsAppMessage.create({
+            data: {
+              companyId: input.companyId,
+              conversationId: input.conversationId,
+              channelId: conversation.channelId,
+              contactId: conversation.contactId,
+              actorUserId: input.actorUserId,
+              threadId: foundation.threadId,
+              serviceSessionId: foundation.session.id,
+              actorType:
+                input.actorType === 'user'
+                  ? WhatsAppMessageActorType.HUMAN_USER
+                  : WhatsAppMessageActorType.SYSTEM,
+              source:
+                input.actorType === 'user'
+                  ? WhatsAppMessageSource.LUME_WEB
+                  : WhatsAppMessageSource.AUTOMATION,
+              direction: MessageDirection.OUTBOUND,
+              deliveryStatus: DeliveryStatus.PENDING,
+              kind: MessageKind.TEXT,
+              text: closureMessageText,
+              automationPurpose: departmentContactCompleted
+                ? finalizationPurpose
                 : null,
-            currentDepartmentId: targetDepartment?.id ?? null,
+              recipientPhone: conversation.contact.phoneNormalized,
+              correlationId: correlation(
+                `${finalizationPurpose}-outbound`,
+                input.commandId,
+              ),
+              occurredAt: transitionedAt,
+            },
+          })
+        : null;
+      const closureAttempt = closureMessage
+        ? await transaction.whatsAppMessageAttempt.create({
+            data: {
+              companyId: input.companyId,
+              messageId: closureMessage.id,
+              attemptNumber: 1,
+              status: MessageAttemptStatus.PENDING,
+            },
+          })
+        : null;
+      const offHoursNotificationClaimed = Boolean(
+        automaticHandoff &&
+        !automaticHandoff.humanServiceOpen &&
+        foundation.session.offHoursHandoffNotifiedAt === null,
+      );
+      const handoffMessageText =
+        automaticHandoff &&
+        (automaticHandoff.humanServiceOpen || offHoursNotificationClaimed)
+          ? automaticHandoff.customerMessage
+          : null;
+      const handoffMessage = handoffMessageText
+        ? await transaction.whatsAppMessage.create({
+            data: {
+              companyId: input.companyId,
+              conversationId: input.conversationId,
+              channelId: conversation.channelId,
+              contactId: conversation.contactId,
+              actorAgentId: automaticAgentAttribution?.agentId,
+              agentExecutionId: automaticAgentAttribution?.id,
+              threadId: foundation.threadId,
+              serviceSessionId: foundation.session.id,
+              actorType: automaticAgentAttribution
+                ? WhatsAppMessageActorType.AI_AGENT
+                : WhatsAppMessageActorType.SYSTEM,
+              source: WhatsAppMessageSource.AUTOMATION,
+              direction: MessageDirection.OUTBOUND,
+              deliveryStatus: DeliveryStatus.PENDING,
+              kind: MessageKind.TEXT,
+              text: handoffMessageText,
+              automationPurpose: automaticHandoff?.humanServiceOpen
+                ? 'human-handoff'
+                : 'off-hours-handoff',
+              recipientPhone: conversation.contact.phoneNormalized,
+              correlationId: correlation(
+                'human-handoff-outbound',
+                input.commandId,
+              ),
+              occurredAt: transitionedAt,
+            },
+          })
+        : null;
+      const handoffAttempt = handoffMessage
+        ? await transaction.whatsAppMessageAttempt.create({
+            data: {
+              companyId: input.companyId,
+              messageId: handoffMessage.id,
+              attemptNumber: 1,
+              status: MessageAttemptStatus.PENDING,
+            },
+          })
+        : null;
+
+      let quote = conversation.quoteRequests[0];
+      let supersededQuote: {
+        id: string;
+        previousVersion: number;
+        resultingVersion: number;
+      } | null = null;
+      if (
+        input.name === 'new-quote-request' &&
+        quote?.status === RequestStatus.UNDER_REVIEW
+      ) {
+        const previousVersion = quote.version;
+        const cancelled = await transaction.quoteRequest.updateMany({
+          where: {
+            id: quote.id,
+            companyId: input.companyId,
+            conversationId: input.conversationId,
+            status: RequestStatus.UNDER_REVIEW,
+            version: previousVersion,
+          },
+          data: {
+            status: RequestStatus.CANCELLED,
+            closureClassification: CommercialClosureClassification.SUPERSEDED,
+            decisionReason:
+              'Substituído por uma nova solicitação de orçamento.',
+            decidedAt: new Date(),
+            version: { increment: 1 },
+          },
+        });
+        if (cancelled.count !== 1) {
+          const latest = await transaction.quoteRequest.findUniqueOrThrow({
+            where: {
+              id_companyId: {
+                id: quote.id,
+                companyId: input.companyId,
+              },
+            },
+            select: { version: true },
+          });
+          throw new AppError(
+            'CONFLICT',
+            'A solicitação anterior foi alterada durante a abertura do novo ciclo.',
+            { currentVersion: latest.version },
+          );
+        }
+        supersededQuote = {
+          id: quote.id,
+          previousVersion,
+          resultingVersion: previousVersion + 1,
+        };
+      }
+      if (input.name === 'new-quote-request' || input.name === 'start-quote') {
+        const latest = await transaction.quoteRequest.aggregate({
+          where: {
+            companyId: input.companyId,
+            conversationId: input.conversationId,
+          },
+          _max: { sequence: true },
+        });
+        quote = await transaction.quoteRequest.create({
+          data: {
+            companyId: input.companyId,
+            conversationId: input.conversationId,
+            threadId: foundation.threadId,
+            serviceSessionId: foundation.session.id,
+            sequence: (latest._max.sequence ?? 0) + 1,
+            status: RequestStatus.COLLECTING_INFORMATION,
+          },
+        });
+      }
+      if (
+        ['present-quote-summary', 'correct-quote', 'confirm-quote'].includes(
+          input.name,
+        )
+      ) {
+        if (!quote) {
+          throw validationError(
+            'A conversa não possui uma solicitação de orçamento ativa.',
+          );
+        }
+        if (
+          input.name === 'present-quote-summary' ||
+          input.name === 'confirm-quote'
+        ) {
+          assertQuoteComplete(quote);
+        }
+        quote = await transaction.quoteRequest.update({
+          where: {
+            id_companyId: { id: quote.id, companyId: input.companyId },
+          },
+          data: {
+            threadId: foundation.threadId,
+            serviceSessionId: foundation.session.id,
+            status: requestToPrisma[to.requestStatus],
+            ...(input.name === 'confirm-quote'
+              ? {
+                  confirmedAt: new Date(),
+                  confirmedVersion: quote.version + 1,
+                  confirmedSummary: payload({
+                    contactName: quote.contactName,
+                    document: quote.document,
+                    email: quote.email,
+                    serviceType: quote.serviceType,
+                    origin: quote.origin,
+                    destination: quote.destination,
+                    departureDate: presentDateOnly(quote.departureDate),
+                    departureAt: quote.departureAt?.toISOString() ?? null,
+                    returnDate: presentDateOnly(quote.returnDate),
+                    returnAt: quote.returnAt?.toISOString() ?? null,
+                    passengerCount: quote.passengerCount,
+                    vehicleType: quote.vehicleType,
+                    vehicleAtDisposal: quote.vehicleAtDisposal,
+                    localTransfers: quote.localTransfers,
+                    notes: quote.notes,
+                    structuredData: quote.structuredData,
+                  }),
+                }
+              : {}),
+            version: { increment: 1 },
+          },
+        });
+      }
+
+      const clearsDepartmentContactOption =
+        [
+          'present-main-menu',
+          'select-commercial',
+          'return-to-main-menu',
+          'take-over',
+          'request-transfer',
+          'accept-transfer',
+          'return-to-bot',
+          'forward',
+        ].includes(input.name) || closing;
+      const nextAssignedToUserId =
+        to.conversationState === 'human-active'
+          ? input.name === 'take-over' || input.name === 'accept-transfer'
+            ? input.actorUserId
+            : conversation.assignedToUserId
+          : null;
+      if (to.conversationState === 'human-active' && !nextAssignedToUserId) {
+        throw validationError('Assuma a conversa antes de executar esta ação.');
+      }
+      const update = await transaction.whatsAppConversation.updateMany({
+        where: {
+          id: input.conversationId,
+          companyId: input.companyId,
+          version: input.expectedVersion,
+        },
+        data: {
+          department: departmentToPrisma[to.department],
+          conversationState: stateToPrisma[to.conversationState],
+          flowStep: flowToPrisma[to.flowStep],
+          requestStatus: requestToPrisma[to.requestStatus],
+          resumeState: to.resumeState ? stateToPrisma[to.resumeState] : null,
+          resumeFlowStep: to.resumeFlowStep
+            ? flowToPrisma[to.resumeFlowStep]
+            : null,
+          departmentContactOption:
+            input.name === 'start-department-contact'
+              ? (input.metadata?.departmentOption as string)
+              : clearsDepartmentContactOption
+                ? null
+                : conversation.departmentContactOption,
+          followUpMenuPresentedAt: closing
+            ? null
+            : input.name === 'confirm-quote' ||
+                ([
+                  'return-to-bot',
+                  'resume-contextual-contact',
+                  'select-commercial',
+                ].includes(input.name) &&
+                  to.flowStep === 'commercial-follow-up-menu')
+              ? null
+              : conversation.followUpMenuPresentedAt,
+          contextualFollowUpAt:
+            input.name === 'confirm-quote'
+              ? new Date(Date.now() + this.followUpInactivityMs)
+              : closing
+                ? null
+                : input.name === 'return-to-bot' &&
+                    to.flowStep === 'commercial-follow-up-menu'
+                  ? new Date(0)
+                  : input.name === 'resume-contextual-contact'
+                    ? null
+                    : conversation.contextualFollowUpAt,
+          mainMenuPresentedAt: closing
+            ? null
+            : conversation.mainMenuPresentedAt,
+          assignedToUserId: nextAssignedToUserId,
+          ...(input.name === 'request-transfer'
+            ? {
+                pendingTransferDepartment:
+                  departmentToPrisma[input.targetDepartment!],
+                pendingTransferReason: transferReason,
+                pendingTransferRequestedByUserId: input.actorUserId,
+                pendingTransferRequestedAt: transitionedAt,
+              }
+            : input.name === 'accept-transfer' ||
+                input.name === 'return-to-bot' ||
+                closing
+              ? {
+                  pendingTransferDepartment: null,
+                  pendingTransferReason: null,
+                  pendingTransferRequestedByUserId: null,
+                  pendingTransferRequestedAt: null,
+                }
+              : {}),
+          ...(input.name === 'archive'
+            ? {
+                archivedAt: transitionedAt,
+                archiveReason: 'manual',
+                archivedByUserId: input.actorUserId,
+                archiveExemptedAt: null,
+              }
+            : input.name === 'unarchive' || input.name === 'take-over'
+              ? {
+                  archivedAt: null,
+                  archiveReason: null,
+                  archivedByUserId: null,
+                  archiveExemptedAt: transitionedAt,
+                }
+              : {}),
+          unreadCount:
+            input.name === 'mark-read' || closing || departmentContactCompleted
+              ? 0
+              : conversation.unreadCount,
+          ...(closureMessageText || handoffMessageText
+            ? {
+                lastMessagePreview: (
+                  closureMessageText ??
+                  handoffMessageText ??
+                  ''
+                ).slice(0, 240),
+                lastOutboundAt: transitionedAt,
+              }
+            : {}),
+          closedAt:
+            input.name === 'take-over'
+              ? null
+              : closing
+                ? transitionedAt
+                : conversation.closedAt,
+          version: { increment: 1 },
+        },
+      });
+      if (update.count !== 1) {
+        const latest = await transaction.whatsAppConversation.findUniqueOrThrow(
+          {
+            where: {
+              id_companyId: {
+                id: input.conversationId,
+                companyId: input.companyId,
+              },
+            },
+            select: { version: true },
+          },
+        );
+        throw currentVersionConflict(latest.version);
+      }
+
+      const updated = await this.findConversationOrThrow(
+        transaction,
+        input.companyId,
+        input.conversationId,
+      );
+      const targetDepartment = automaticHandoff
+        ? { id: automaticHandoff.targetDepartmentId }
+        : await transaction.tenantDepartment.findUnique({
+            where: {
+              companyId_code: {
+                companyId: input.companyId,
+                code: updated.department,
+              },
+            },
+            select: { id: true },
+          });
+      const targetSessionState = serviceSessionStateForConversation(
+        updated.conversationState,
+      );
+      const synchronizedSession = await this.updateFoundationSession(
+        transaction,
+        {
+          companyId: input.companyId,
+          session: foundation.session,
+          commandId: input.commandId,
+          name: `legacy-${input.name}`,
+          actorType:
+            automaticAgentAttribution !== null
+              ? MutationActorType.AI_AGENT
+              : input.actorType === 'user'
+                ? MutationActorType.HUMAN_USER
+                : input.actorType === 'system'
+                  ? MutationActorType.SYSTEM
+                  : MutationActorType.SERVICE,
+          actorUserId: input.actorUserId,
+          actorAgentId: automaticAgentAttribution?.agentId,
+          status: targetSessionState.status,
+          controlMode: targetSessionState.controlMode,
+          isForeground: targetSessionState.isForeground,
+          responsibleUserId:
+            targetSessionState.controlMode === ServiceSessionControlMode.HUMAN
+              ? updated.assignedToUserId
+              : null,
+          currentDepartmentId: targetDepartment?.id ?? null,
+          ...(automaticHandoff
+            ? {
+                queueId: automaticHandoff.queueId,
+                offHoursHandoffNotifiedAt: offHoursNotificationClaimed
+                  ? transitionedAt
+                  : undefined,
+                ...(input.automaticHumanHandoff?.sessionPriority &&
+                automaticPriorityReason
+                  ? {
+                      priority:
+                        servicePriorityToPrisma[
+                          input.automaticHumanHandoff.sessionPriority.priority
+                        ],
+                      priorityReason: automaticPriorityReason,
+                      prioritySource: ServiceSessionPrioritySource.AI_AGENT,
+                    }
+                  : {}),
+              }
+            : {}),
+          occurredAt: transitionedAt,
+          metadata: {
+            conversationId: input.conversationId,
+            transitionName: input.name,
             ...(automaticHandoff
               ? {
+                  humanServiceOpen: automaticHandoff.humanServiceOpen,
+                  scheduleSource: automaticHandoff.scheduleSource,
+                  targetDepartmentId: automaticHandoff.targetDepartmentId,
                   queueId: automaticHandoff.queueId,
-                  offHoursHandoffNotifiedAt: offHoursNotificationClaimed
-                    ? transitionedAt
-                    : undefined,
-                  ...(input.automaticHumanHandoff?.sessionPriority &&
-                  automaticPriorityReason
+                  offHoursNotificationClaimed,
+                  handoffMessageId: handoffMessage?.id ?? null,
+                  ...(input.automaticHumanHandoff?.sessionPriority
                     ? {
                         priority:
-                          servicePriorityToPrisma[
-                            input.automaticHumanHandoff.sessionPriority.priority
-                          ],
+                          input.automaticHumanHandoff.sessionPriority.priority,
                         priorityReason: automaticPriorityReason,
-                        prioritySource: ServiceSessionPrioritySource.AI_AGENT,
+                        prioritySource: 'ai-agent',
+                        agentExecutionId: automaticAgentAttribution?.id ?? null,
                       }
                     : {}),
                 }
               : {}),
-            occurredAt: transitionedAt,
-            metadata: {
-              conversationId: input.conversationId,
-              transitionName: input.name,
-              ...(automaticHandoff
-                ? {
-                    humanServiceOpen: automaticHandoff.humanServiceOpen,
-                    scheduleSource: automaticHandoff.scheduleSource,
-                    targetDepartmentId: automaticHandoff.targetDepartmentId,
-                    queueId: automaticHandoff.queueId,
-                    offHoursNotificationClaimed,
-                    handoffMessageId: handoffMessage?.id ?? null,
-                    ...(input.automaticHumanHandoff?.sessionPriority
-                      ? {
-                          priority:
-                            input.automaticHumanHandoff.sessionPriority
-                              .priority,
-                          priorityReason: automaticPriorityReason,
-                          prioritySource: 'ai-agent',
-                          agentExecutionId:
-                            automaticAgentAttribution?.id ?? null,
-                        }
-                      : {}),
-                  }
-                : {}),
-            },
           },
-        );
-        if (automaticHandoff) {
-          const previousAssignment =
-            await transaction.serviceSessionAssignment.findFirst({
-              where: {
-                companyId: input.companyId,
-                serviceSessionId: synchronizedSession.id,
-                status: ServiceAssignmentStatus.ACTIVE,
-              },
-              orderBy: [{ startedAt: 'desc' }, { id: 'desc' }],
-              select: { id: true },
-            });
-          await transaction.serviceSessionAssignment.updateMany({
+        },
+      );
+      if (automaticHandoff) {
+        const previousAssignment =
+          await transaction.serviceSessionAssignment.findFirst({
             where: {
               companyId: input.companyId,
               serviceSessionId: synchronizedSession.id,
               status: ServiceAssignmentStatus.ACTIVE,
             },
-            data: {
-              status: ServiceAssignmentStatus.RETURNED_TO_QUEUE,
-              endedAt: transitionedAt,
-            },
+            orderBy: [{ startedAt: 'desc' }, { id: 'desc' }],
+            select: { id: true },
           });
-          await transaction.serviceSessionAssignment.create({
-            data: {
-              companyId: input.companyId,
-              serviceSessionId: synchronizedSession.id,
-              departmentId: automaticHandoff.targetDepartmentId,
-              assignedUserId: null,
-              queueId: automaticHandoff.queueId,
-              previousAssignmentId: previousAssignment?.id ?? null,
-              status: ServiceAssignmentStatus.ACTIVE,
-              source: ServiceAssignmentSource.AUTOMATIC,
-              reason:
-                typeof input.metadata?.reason === 'string'
-                  ? input.metadata.reason.slice(0, 500)
-                  : 'automatic-human-handoff',
-              startedAt: transitionedAt,
-            },
-          });
-        }
-        if (closureMessage && closureAttempt && closureMessageText) {
-          await this.createOrderedOutbox(transaction, {
+        await transaction.serviceSessionAssignment.updateMany({
+          where: {
             companyId: input.companyId,
-            topic: 'whatsapp.outbound.requested',
-            aggregateType: 'whatsapp-conversation',
-            aggregateId: input.conversationId,
-            correlationId: correlation(
-              `${finalizationPurpose}-request`,
-              input.commandId,
-            ),
-            payload: {
-              eventId: closureMessage.id,
-              commandId: closureMessage.id,
-              messageId: closureMessage.id,
-              attemptId: closureAttempt.id,
-              conversationId: input.conversationId,
-              threadId: foundation.threadId,
-              serviceSessionId: synchronizedSession.id,
-              channelId: conversation.channelId,
-              companyId: input.companyId,
-              contact: {
-                id: conversation.contact.id,
-                phone: conversation.contact.phoneNormalized,
-                displayName: conversation.contact.displayName,
-              },
-              message: {
-                providerMessageId: null,
-                direction: 'outbound',
-                deliveryStatus: 'pending',
-                kind: 'text',
-                text: closureMessageText,
-                media: null,
-                occurredAt: closureMessage.occurredAt.toISOString(),
-              },
-              conversation: {
-                id: updated.id,
-                ...snapshot(updated),
-                version: updated.version,
-              },
-              automatic: departmentContactCompleted,
-              automationAllowed: false,
-              canGenerateReply: false,
-              canSendReply: true,
-              contextualTransition: false,
-              isFirstContact: false,
-            },
-          });
-        }
-        if (handoffMessage && handoffAttempt && handoffMessageText) {
-          await this.createOrderedOutbox(transaction, {
+            serviceSessionId: synchronizedSession.id,
+            status: ServiceAssignmentStatus.ACTIVE,
+          },
+          data: {
+            status: ServiceAssignmentStatus.RETURNED_TO_QUEUE,
+            endedAt: transitionedAt,
+          },
+        });
+        await transaction.serviceSessionAssignment.create({
+          data: {
             companyId: input.companyId,
-            topic: 'whatsapp.outbound.requested',
-            aggregateType: 'whatsapp-conversation',
-            aggregateId: input.conversationId,
-            correlationId: correlation(
-              'human-handoff-request',
-              input.commandId,
-            ),
-            payload: {
-              eventId: handoffMessage.id,
-              commandId: handoffMessage.id,
-              messageId: handoffMessage.id,
-              attemptId: handoffAttempt.id,
-              conversationId: input.conversationId,
-              threadId: foundation.threadId,
-              serviceSessionId: synchronizedSession.id,
-              channelId: conversation.channelId,
-              companyId: input.companyId,
-              contact: {
-                id: conversation.contact.id,
-                phone: conversation.contact.phoneNormalized,
-                displayName: conversation.contact.displayName,
-              },
-              message: {
-                providerMessageId: null,
-                direction: 'outbound',
-                deliveryStatus: 'pending',
-                kind: 'text',
-                text: handoffMessageText,
-                media: null,
-                occurredAt: handoffMessage.occurredAt.toISOString(),
-              },
-              conversation: {
-                id: updated.id,
-                ...snapshot(updated),
-                version: updated.version,
-              },
-              automatic: true,
-              automationAllowed: false,
-              canGenerateReply: false,
-              canSendReply: true,
-              contextualTransition: false,
-              isFirstContact: false,
+            serviceSessionId: synchronizedSession.id,
+            departmentId: automaticHandoff.targetDepartmentId,
+            assignedUserId: null,
+            queueId: automaticHandoff.queueId,
+            previousAssignmentId: previousAssignment?.id ?? null,
+            status: ServiceAssignmentStatus.ACTIVE,
+            source: ServiceAssignmentSource.AUTOMATIC,
+            reason:
+              typeof input.metadata?.reason === 'string'
+                ? input.metadata.reason.slice(0, 500)
+                : 'automatic-human-handoff',
+            startedAt: transitionedAt,
+          },
+        });
+      }
+      if (closureMessage && closureAttempt && closureMessageText) {
+        await this.createOrderedOutbox(transaction, {
+          companyId: input.companyId,
+          topic: 'whatsapp.outbound.requested',
+          aggregateType: 'whatsapp-conversation',
+          aggregateId: input.conversationId,
+          correlationId: correlation(
+            `${finalizationPurpose}-request`,
+            input.commandId,
+          ),
+          payload: {
+            eventId: closureMessage.id,
+            commandId: closureMessage.id,
+            messageId: closureMessage.id,
+            attemptId: closureAttempt.id,
+            conversationId: input.conversationId,
+            threadId: foundation.threadId,
+            serviceSessionId: synchronizedSession.id,
+            channelId: conversation.channelId,
+            companyId: input.companyId,
+            contact: {
+              id: conversation.contact.id,
+              phone: conversation.contact.phoneNormalized,
+              displayName: conversation.contact.displayName,
             },
-          });
-        }
-        const closure = closing
+            message: {
+              providerMessageId: null,
+              direction: 'outbound',
+              deliveryStatus: 'pending',
+              kind: 'text',
+              text: closureMessageText,
+              media: null,
+              occurredAt: closureMessage.occurredAt.toISOString(),
+            },
+            conversation: {
+              id: updated.id,
+              ...snapshot(updated),
+              version: updated.version,
+            },
+            automatic: departmentContactCompleted,
+            automationAllowed: false,
+            canGenerateReply: false,
+            canSendReply: true,
+            contextualTransition: false,
+            isFirstContact: false,
+          },
+        });
+      }
+      if (handoffMessage && handoffAttempt && handoffMessageText) {
+        await this.createOrderedOutbox(transaction, {
+          companyId: input.companyId,
+          topic: 'whatsapp.outbound.requested',
+          aggregateType: 'whatsapp-conversation',
+          aggregateId: input.conversationId,
+          correlationId: correlation('human-handoff-request', input.commandId),
+          payload: {
+            eventId: handoffMessage.id,
+            commandId: handoffMessage.id,
+            messageId: handoffMessage.id,
+            attemptId: handoffAttempt.id,
+            conversationId: input.conversationId,
+            threadId: foundation.threadId,
+            serviceSessionId: synchronizedSession.id,
+            channelId: conversation.channelId,
+            companyId: input.companyId,
+            contact: {
+              id: conversation.contact.id,
+              phone: conversation.contact.phoneNormalized,
+              displayName: conversation.contact.displayName,
+            },
+            message: {
+              providerMessageId: null,
+              direction: 'outbound',
+              deliveryStatus: 'pending',
+              kind: 'text',
+              text: handoffMessageText,
+              media: null,
+              occurredAt: handoffMessage.occurredAt.toISOString(),
+            },
+            conversation: {
+              id: updated.id,
+              ...snapshot(updated),
+              version: updated.version,
+            },
+            automatic: true,
+            automationAllowed: false,
+            canGenerateReply: false,
+            canSendReply: true,
+            contextualTransition: false,
+            isFirstContact: false,
+          },
+        });
+      }
+      const closure = closing
+        ? {
+            transitionId,
+            transitionName: input.name,
+            occurredAt: transitionedAt.toISOString(),
+            reason: resolvedClosingReason,
+            actor: {
+              type: input.actorType,
+              user: actorUser,
+            },
+            messageId: closureMessage?.id ?? null,
+          }
+        : null;
+      const humanHandoff = automaticHandoff
+        ? {
+            serviceSessionId: synchronizedSession.id,
+            targetDepartmentId: automaticHandoff.targetDepartmentId,
+            queueId: automaticHandoff.queueId,
+            humanServiceOpen: automaticHandoff.humanServiceOpen,
+            scheduleSource: automaticHandoff.scheduleSource,
+            offHoursNotificationClaimed,
+            messageId: handoffMessage?.id ?? null,
+            occurredAt: transitionedAt.toISOString(),
+          }
+        : null;
+      const transferLifecycle =
+        input.name === 'request-transfer'
           ? {
-              transitionId,
-              transitionName: input.name,
-              occurredAt: transitionedAt.toISOString(),
-              reason: resolvedClosingReason,
-              actor: {
-                type: input.actorType,
-                user: actorUser,
-              },
-              messageId: closureMessage?.id ?? null,
+              status: 'requested',
+              sourceDepartment: from.department,
+              targetDepartment: input.targetDepartment!,
+              reason: transferReason,
+              requestedByUserId: input.actorUserId,
+              requestedAt: transitionedAt.toISOString(),
+            }
+          : input.name === 'accept-transfer'
+            ? {
+                status: 'accepted',
+                sourceDepartment: from.department,
+                targetDepartment: pendingTransferBefore!.targetDepartment,
+                reason: pendingTransferBefore!.reason,
+                requestedByUserId: pendingTransferBefore!.requestedByUserId,
+                requestedAt: pendingTransferBefore!.requestedAt,
+                acceptedByUserId: input.actorUserId,
+                acceptedAt: transitionedAt.toISOString(),
+              }
+            : pendingTransferBefore &&
+                (input.name === 'return-to-bot' || closing)
+              ? {
+                  status: 'cancelled',
+                  sourceDepartment: from.department,
+                  targetDepartment: pendingTransferBefore.targetDepartment,
+                  reason: pendingTransferBefore.reason,
+                  requestedByUserId: pendingTransferBefore.requestedByUserId,
+                  requestedAt: pendingTransferBefore.requestedAt,
+                  cancelledByUserId: input.actorUserId,
+                  cancelledAt: transitionedAt.toISOString(),
+                  cancellationCause: input.name,
+                }
+              : null;
+      const assignmentLifecycle =
+        conversation.assignedToUserId !== nextAssignedToUserId
+          ? {
+              previousAssignedToUserId: conversation.assignedToUserId,
+              resultingAssignedToUserId: nextAssignedToUserId,
+              changedByUserId: input.actorUserId ?? null,
+              cause: input.name,
             }
           : null;
-        const humanHandoff = automaticHandoff
+      const persistedResult = {
+        ...presentConversation(updated),
+        ...(closing ? { closure } : {}),
+        ...(humanHandoff ? { humanHandoff } : {}),
+      };
+      const transitionMetadata = {
+        ...(input.metadata ?? {}),
+        ...(closing ? { reason: resolvedClosingReason } : {}),
+        ...(transferLifecycle ? { transfer: transferLifecycle } : {}),
+        ...(assignmentLifecycle ? { assignment: assignmentLifecycle } : {}),
+        quoteRequestId: quote?.id ?? null,
+        ...(humanHandoff ? { humanHandoff } : {}),
+        ...(supersededQuote
           ? {
-              serviceSessionId: synchronizedSession.id,
+              supersededQuoteRequest: {
+                id: supersededQuote.id,
+                fromStatus: 'under-review',
+                toStatus: 'cancelled',
+                previousVersion: supersededQuote.previousVersion,
+                resultingVersion: supersededQuote.resultingVersion,
+              },
+            }
+          : {}),
+      };
+      await transaction.whatsAppConversationTransition.create({
+        data: {
+          id: transitionId,
+          companyId: input.companyId,
+          conversationId: input.conversationId,
+          threadId: foundation.threadId,
+          serviceSessionId: synchronizedSession.id,
+          commandId: input.commandId,
+          commandFingerprint: fingerprint,
+          name: input.name,
+          expectedVersion: input.expectedVersion,
+          resultingVersion: nextVersion,
+          actorType: actorToPrisma[input.actorType],
+          actorUserId: input.actorUserId,
+          fromDepartment: conversation.department,
+          toDepartment: departmentToPrisma[to.department],
+          fromState: conversation.conversationState,
+          toState: stateToPrisma[to.conversationState],
+          fromFlowStep: conversation.flowStep,
+          toFlowStep: flowToPrisma[to.flowStep],
+          fromRequestStatus: conversation.requestStatus,
+          toRequestStatus: requestToPrisma[to.requestStatus],
+          metadata: payload(transitionMetadata),
+          resultSnapshot: payload(persistedResult),
+          createdAt: transitionedAt,
+        },
+      });
+      if (assignmentLifecycle) {
+        await transaction.tenantAuditLog.create({
+          data: {
+            companyId: input.companyId,
+            actorUserId: input.actorUserId,
+            action: 'whatsapp.conversation.assignment.changed',
+            targetType: 'whatsapp-conversation',
+            targetId: input.conversationId,
+            metadata: payload({
+              ...assignmentLifecycle,
+              transitionId,
+              commandId: input.commandId,
+              expectedVersion: input.expectedVersion,
+              resultingVersion: nextVersion,
+            }),
+            createdAt: transitionedAt,
+          },
+        });
+      }
+      if (automaticHandoff) {
+        await transaction.tenantAuditLog.create({
+          data: {
+            companyId: input.companyId,
+            action: 'whatsapp.service-session.handoff',
+            targetType: 'service-session',
+            targetId: synchronizedSession.id,
+            metadata: payload({
+              transitionId,
+              commandId: input.commandId,
+              conversationId: input.conversationId,
+              expectedConversationVersion: input.expectedVersion,
+              resultingConversationVersion: nextVersion,
+              resultingServiceSessionVersion: synchronizedSession.version,
               targetDepartmentId: automaticHandoff.targetDepartmentId,
               queueId: automaticHandoff.queueId,
               humanServiceOpen: automaticHandoff.humanServiceOpen,
               scheduleSource: automaticHandoff.scheduleSource,
               offHoursNotificationClaimed,
-              messageId: handoffMessage?.id ?? null,
+              handoffMessageId: handoffMessage?.id ?? null,
+              actorAgentId: automaticAgentAttribution?.agentId ?? null,
+              agentExecutionId: automaticAgentAttribution?.id ?? null,
+              priority:
+                input.automaticHumanHandoff?.sessionPriority?.priority ?? null,
+              priorityReason: automaticPriorityReason,
               occurredAt: transitionedAt.toISOString(),
-            }
-          : null;
-        const persistedResult = {
-          ...presentConversation(updated),
-          ...(closing ? { closure } : {}),
-          ...(humanHandoff ? { humanHandoff } : {}),
-        };
-        const transitionMetadata = {
-          ...(input.metadata ?? {}),
-          ...(closing ? { reason: resolvedClosingReason } : {}),
-          quoteRequestId: quote?.id ?? null,
-          ...(humanHandoff ? { humanHandoff } : {}),
-          ...(supersededQuote
-            ? {
-                supersededQuoteRequest: {
-                  id: supersededQuote.id,
-                  fromStatus: 'under-review',
-                  toStatus: 'cancelled',
-                  previousVersion: supersededQuote.previousVersion,
-                  resultingVersion: supersededQuote.resultingVersion,
-                },
-              }
-            : {}),
-        };
-        await transaction.whatsAppConversationTransition.create({
-          data: {
-            id: transitionId,
-            companyId: input.companyId,
-            conversationId: input.conversationId,
-            threadId: foundation.threadId,
-            serviceSessionId: synchronizedSession.id,
-            commandId: input.commandId,
-            commandFingerprint: fingerprint,
-            name: input.name,
-            expectedVersion: input.expectedVersion,
-            resultingVersion: nextVersion,
-            actorType: actorToPrisma[input.actorType],
-            actorUserId: input.actorUserId,
-            fromDepartment: conversation.department,
-            toDepartment: departmentToPrisma[to.department],
-            fromState: conversation.conversationState,
-            toState: stateToPrisma[to.conversationState],
-            fromFlowStep: conversation.flowStep,
-            toFlowStep: flowToPrisma[to.flowStep],
-            fromRequestStatus: conversation.requestStatus,
-            toRequestStatus: requestToPrisma[to.requestStatus],
-            metadata: payload(transitionMetadata),
-            resultSnapshot: payload(persistedResult),
+            }),
             createdAt: transitionedAt,
           },
         });
-        if (automaticHandoff) {
-          await transaction.tenantAuditLog.create({
-            data: {
-              companyId: input.companyId,
-              action: 'whatsapp.service-session.handoff',
-              targetType: 'service-session',
-              targetId: synchronizedSession.id,
-              metadata: payload({
-                transitionId,
-                commandId: input.commandId,
-                conversationId: input.conversationId,
-                expectedConversationVersion: input.expectedVersion,
-                resultingConversationVersion: nextVersion,
-                resultingServiceSessionVersion: synchronizedSession.version,
-                targetDepartmentId: automaticHandoff.targetDepartmentId,
-                queueId: automaticHandoff.queueId,
-                humanServiceOpen: automaticHandoff.humanServiceOpen,
-                scheduleSource: automaticHandoff.scheduleSource,
-                offHoursNotificationClaimed,
-                handoffMessageId: handoffMessage?.id ?? null,
-                actorAgentId: automaticAgentAttribution?.agentId ?? null,
-                agentExecutionId: automaticAgentAttribution?.id ?? null,
-                priority:
-                  input.automaticHumanHandoff?.sessionPriority?.priority ??
-                  null,
-                priorityReason: automaticPriorityReason,
-                occurredAt: transitionedAt.toISOString(),
-              }),
-              createdAt: transitionedAt,
-            },
-          });
-        }
-        if (closing) {
-          await transaction.tenantAuditLog.create({
-            data: {
-              companyId: input.companyId,
-              actorUserId: input.actorUserId,
-              action: 'whatsapp.conversation.close',
-              targetType: 'whatsapp-conversation',
-              targetId: input.conversationId,
-              metadata: payload({
-                transitionId,
-                transitionName: input.name,
-                commandId: input.commandId,
-                expectedVersion: input.expectedVersion,
-                resultingVersion: nextVersion,
-                reason: resolvedClosingReason,
-                occurredAt: transitionedAt.toISOString(),
-              }),
-              createdAt: transitionedAt,
-            },
-          });
-        }
-        if (input.name === 'archive' || input.name === 'unarchive') {
-          await transaction.tenantAuditLog.create({
-            data: {
-              companyId: input.companyId,
-              actorUserId: input.actorUserId,
-              action: `whatsapp.conversation.${input.name}`,
-              targetType: 'whatsapp-conversation',
-              targetId: input.conversationId,
-              metadata: payload({
-                transitionId,
-                commandId: input.commandId,
-                expectedVersion: input.expectedVersion,
-                resultingVersion: nextVersion,
-                occurredAt: transitionedAt.toISOString(),
-              }),
-            },
-          });
-        }
-        if (supersededQuote && quote) {
-          await transaction.tenantAuditLog.create({
-            data: {
-              companyId: input.companyId,
-              actorUserId: input.actorUserId,
-              action: 'whatsapp.quote-request.superseded',
-              targetType: 'quote-request',
-              targetId: supersededQuote.id,
-              metadata: payload({
-                conversationId: input.conversationId,
-                newQuoteRequestId: quote.id,
-                transitionId,
-                commandId: input.commandId,
-                fromStatus: 'under-review',
-                toStatus: 'cancelled',
-                previousVersion: supersededQuote.previousVersion,
-                resultingVersion: supersededQuote.resultingVersion,
-                occurredAt: transitionedAt.toISOString(),
-              }),
-              createdAt: transitionedAt,
-            },
-          });
-        }
-        return { ...persistedResult, idempotent: false };
-      });
+      }
+      if (closing) {
+        await transaction.tenantAuditLog.create({
+          data: {
+            companyId: input.companyId,
+            actorUserId: input.actorUserId,
+            action: 'whatsapp.conversation.close',
+            targetType: 'whatsapp-conversation',
+            targetId: input.conversationId,
+            metadata: payload({
+              transitionId,
+              transitionName: input.name,
+              commandId: input.commandId,
+              expectedVersion: input.expectedVersion,
+              resultingVersion: nextVersion,
+              reason: resolvedClosingReason,
+              occurredAt: transitionedAt.toISOString(),
+            }),
+            createdAt: transitionedAt,
+          },
+        });
+      }
+      if (input.name === 'archive' || input.name === 'unarchive') {
+        await transaction.tenantAuditLog.create({
+          data: {
+            companyId: input.companyId,
+            actorUserId: input.actorUserId,
+            action: `whatsapp.conversation.${input.name}`,
+            targetType: 'whatsapp-conversation',
+            targetId: input.conversationId,
+            metadata: payload({
+              transitionId,
+              commandId: input.commandId,
+              expectedVersion: input.expectedVersion,
+              resultingVersion: nextVersion,
+              occurredAt: transitionedAt.toISOString(),
+            }),
+          },
+        });
+      }
+      if (supersededQuote && quote) {
+        await transaction.tenantAuditLog.create({
+          data: {
+            companyId: input.companyId,
+            actorUserId: input.actorUserId,
+            action: 'whatsapp.quote-request.superseded',
+            targetType: 'quote-request',
+            targetId: supersededQuote.id,
+            metadata: payload({
+              conversationId: input.conversationId,
+              newQuoteRequestId: quote.id,
+              transitionId,
+              commandId: input.commandId,
+              fromStatus: 'under-review',
+              toStatus: 'cancelled',
+              previousVersion: supersededQuote.previousVersion,
+              resultingVersion: supersededQuote.resultingVersion,
+              occurredAt: transitionedAt.toISOString(),
+            }),
+            createdAt: transitionedAt,
+          },
+        });
+      }
+      return { ...persistedResult, idempotent: false };
+    };
+    try {
+      return existingTransaction
+        ? await operation(existingTransaction)
+        : await this.prisma.$transaction(operation);
     } catch (error) {
       if (isPrismaUniqueError(error)) {
+        if (existingTransaction) throw error;
         return this.replayTransition(input, fingerprint);
       }
       throw error;
@@ -6550,6 +7086,96 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
     }
   }
 
+  private async inspectHumanOutboundCommand(
+    transaction: Prisma.TransactionClient,
+    input: CreateHumanOutboundInput,
+    normalizedText: string,
+    inputHash: string,
+  ) {
+    await this.lockCommand(
+      transaction,
+      input.companyId,
+      'panel.outbound-command',
+      input.idempotencyKey,
+    );
+    const currentActor = await this.assertCurrentWhatsAppAttendant(
+      transaction,
+      input.companyId,
+      input.actorUserId,
+    );
+    if (!normalizedText && !input.attachment) {
+      throw validationError('A mensagem humana não pode estar vazia.');
+    }
+
+    const duplicate = await transaction.integrationInbox.findUnique({
+      where: {
+        companyId_source_externalEventId: {
+          companyId: input.companyId,
+          source: 'panel.outbound-command',
+          externalEventId: input.idempotencyKey,
+        },
+      },
+    });
+    if (duplicate) {
+      assertSameFingerprint(duplicate.payloadHash, inputHash, 'idempotencyKey');
+      if (!duplicate.resultSnapshot) {
+        throw new AppError('CONFLICT', 'Comando humano incompleto.');
+      }
+      return {
+        kind: 'duplicate' as const,
+        result: {
+          ...(duplicate.resultSnapshot as Record<string, unknown>),
+          idempotent: true,
+        },
+      };
+    }
+
+    await this.lockCommand(
+      transaction,
+      input.companyId,
+      'whatsapp-conversation',
+      input.conversationId,
+    );
+    const conversation = await this.findConversationOrThrow(
+      transaction,
+      input.companyId,
+      input.conversationId,
+    );
+    if (conversation.version !== input.expectedVersion) {
+      throw currentVersionConflict(conversation.version);
+    }
+    if (conversation.conversationState !== ConversationState.HUMAN_ACTIVE) {
+      throw forbidden(
+        'A resposta exige uma conversa com atendimento humano ativo.',
+      );
+    }
+    if (
+      !currentActor.hasTenantWideAuthority &&
+      !userBelongsToDepartment(
+        currentActor.departments,
+        departmentFromPrisma[conversation.department],
+      )
+    ) {
+      throw forbidden(
+        'A resposta exige vínculo com o departamento responsável pela conversa.',
+      );
+    }
+    return { kind: 'new' as const, conversation, currentActor };
+  }
+
+  async authorizeHumanOutbound(input: CreateHumanOutboundInput): Promise<void> {
+    const normalizedText = input.text?.trim() ?? '';
+    const inputHash = commandFingerprint({ ...input, text: normalizedText });
+    await this.prisma.$transaction(async (transaction) => {
+      await this.inspectHumanOutboundCommand(
+        transaction,
+        input,
+        normalizedText,
+        inputHash,
+      );
+    });
+  }
+
   async createHumanOutbound(input: CreateHumanOutboundInput): Promise<unknown> {
     const normalizedText = input.text?.trim() ?? '';
     const inputHash = commandFingerprint({
@@ -6558,16 +7184,14 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
     });
     try {
       return await this.prisma.$transaction(async (transaction) => {
-        await this.lockCommand(
+        const inspection = await this.inspectHumanOutboundCommand(
           transaction,
-          input.companyId,
-          'panel.outbound-command',
-          input.idempotencyKey,
+          input,
+          normalizedText,
+          inputHash,
         );
-        if (!normalizedText && !input.attachment) {
-          throw validationError('A mensagem humana não pode estar vazia.');
-        }
-
+        if (inspection.kind === 'duplicate') return inspection.result;
+        const { conversation, currentActor } = inspection;
         const inboxKey = {
           companyId_source_externalEventId: {
             companyId: input.companyId,
@@ -6579,46 +7203,6 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           'human-outbound',
           input.idempotencyKey,
         );
-        const duplicate = await transaction.integrationInbox.findUnique({
-          where: inboxKey,
-        });
-        if (duplicate) {
-          assertSameFingerprint(
-            duplicate.payloadHash,
-            inputHash,
-            'idempotencyKey',
-          );
-          if (!duplicate.resultSnapshot) {
-            throw new AppError('CONFLICT', 'Comando humano incompleto.');
-          }
-          return {
-            ...(duplicate.resultSnapshot as Record<string, unknown>),
-            idempotent: true,
-          };
-        }
-
-        await this.lockCommand(
-          transaction,
-          input.companyId,
-          'whatsapp-conversation',
-          input.conversationId,
-        );
-        const conversation = await this.findConversationOrThrow(
-          transaction,
-          input.companyId,
-          input.conversationId,
-        );
-        if (conversation.version !== input.expectedVersion) {
-          throw currentVersionConflict(conversation.version);
-        }
-        if (
-          conversation.conversationState !== ConversationState.HUMAN_ACTIVE ||
-          conversation.assignedToUserId !== input.actorUserId
-        ) {
-          throw forbidden(
-            'A resposta exige atendimento humano ativo atribuído ao usuário.',
-          );
-        }
         const humanOccurredAt = new Date();
         let foundation = await this.ensureFoundationForConversation(
           transaction,
@@ -6816,6 +7400,9 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               conversationId: input.conversationId,
               commandId: input.commandId,
               idempotencyKey: input.idempotencyKey,
+              assignedToUserIdAtSend: conversation.assignedToUserId,
+              responderWasAssigned:
+                conversation.assignedToUserId === input.actorUserId,
             }),
           },
         });
@@ -6823,7 +7410,10 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           message: this.presentMessage(
             {
               ...message,
-              actorUser: conversation.assignedTo,
+              actorUser: {
+                id: currentActor.id,
+                name: currentActor.name,
+              },
               attempts: [attempt],
             },
             false,
@@ -8606,6 +9196,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
       sentTotal,
       approvedTotal,
       cancelledTotal,
+      rejectedTotal,
+      commercialClosureTotal,
       cancellationReasonRows,
     ] = await this.prisma.$transaction([
       this.prisma.quoteRequest.findMany({
@@ -8638,24 +9230,43 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
       this.prisma.quoteRequest.count({ where: stageWhere('sent') }),
       this.prisma.quoteRequest.count({ where: stageWhere('approved') }),
       this.prisma.quoteRequest.count({ where: stageWhere('cancelled') }),
+      this.prisma.quoteRequest.count({
+        where: {
+          AND: [stageWhere('cancelled'), { status: RequestStatus.REJECTED }],
+        },
+      }),
+      this.prisma.quoteRequest.count({
+        where: {
+          AND: [stageWhere('cancelled'), { status: RequestStatus.CANCELLED }],
+        },
+      }),
       this.prisma.quoteRequest.groupBy({
-        by: ['status', 'decisionReason'],
+        by: ['status', 'closureClassification', 'decisionReason'],
         where: stageWhere('cancelled'),
-        orderBy: [{ status: 'asc' }, { decisionReason: 'asc' }],
+        orderBy: [
+          { status: 'asc' },
+          { closureClassification: 'asc' },
+          { decisionReason: 'asc' },
+        ],
         _count: { _all: true },
       }),
     ]);
     const cancellationReasonCounts = new Map<string, number>();
+    const closureClassificationCounts = new Map<string, number>();
     for (const row of cancellationReasonRows) {
       const reason =
-        row.decisionReason?.trim() ||
-        (row.status === RequestStatus.CANCELLED
-          ? 'Substituído por uma nova solicitação de orçamento.'
-          : 'Motivo não informado (registro legado).');
+        row.decisionReason?.trim() || 'Motivo não informado (registro legado).';
+      const count = typeof row._count === 'object' ? (row._count._all ?? 0) : 0;
+      const classification = row.closureClassification
+        ? closureFromPrisma[row.closureClassification]
+        : 'legacy-unclassified';
       cancellationReasonCounts.set(
         reason,
-        (cancellationReasonCounts.get(reason) ?? 0) +
-          (typeof row._count === 'object' ? (row._count._all ?? 0) : 0),
+        (cancellationReasonCounts.get(reason) ?? 0) + count,
+      );
+      closureClassificationCounts.set(
+        classification,
+        (closureClassificationCounts.get(classification) ?? 0) + count,
       );
     }
     return {
@@ -8678,6 +9289,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         sent: sentTotal,
         approved: approvedTotal,
         cancelled: cancelledTotal,
+        rejected: rejectedTotal,
+        commercialClosures: commercialClosureTotal,
         cancellationReasons: Array.from(
           cancellationReasonCounts,
           ([reason, count]) => ({ reason, count }),
@@ -8685,6 +9298,14 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           (left, right) =>
             right.count - left.count ||
             left.reason.localeCompare(right.reason, 'pt-BR'),
+        ),
+        closureClassifications: Array.from(
+          closureClassificationCounts,
+          ([classification, count]) => ({ classification, count }),
+        ).sort(
+          (left, right) =>
+            right.count - left.count ||
+            left.classification.localeCompare(right.classification, 'pt-BR'),
         ),
       },
       filters: {
@@ -8847,6 +9468,11 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           'panel.quote-proposal-create',
           input.commandId,
         );
+        await this.assertCurrentCommercialOperator(
+          transaction,
+          input.companyId,
+          input.actorUserId,
+        );
         const inboxKey = {
           companyId_source_externalEventId: {
             companyId: input.companyId,
@@ -8903,12 +9529,6 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         }
         if (conversation.version !== input.expectedVersion) {
           throw currentVersionConflict(conversation.version);
-        }
-        if (
-          conversation.assignedToUserId &&
-          conversation.assignedToUserId !== input.actorUserId
-        ) {
-          throw forbidden('A conversa está atribuída a outro atendente.');
         }
         const pendingQuote =
           conversation.quoteRequests[0]?.status === RequestStatus.UNDER_REVIEW
@@ -9118,6 +9738,16 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               metadata: payload({
                 source: 'quote-proposal-create',
                 quoteRequestId: quote.id,
+                ...(conversation.assignedToUserId !== actor.id
+                  ? {
+                      assignment: {
+                        previousAssignedToUserId: conversation.assignedToUserId,
+                        resultingAssignedToUserId: actor.id,
+                        changedByUserId: actor.id,
+                        cause: 'quote-proposal-create',
+                      },
+                    }
+                  : {}),
               }),
               resultSnapshot: payload(presentConversation(updatedConversation)),
             },
@@ -9137,6 +9767,16 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               sequence: nextSequence,
               commandId: input.commandId,
               reusedPendingQuote: Boolean(pendingQuote),
+              ...(conversation.assignedToUserId !== actor.id
+                ? {
+                    assignment: {
+                      previousAssignedToUserId: conversation.assignedToUserId,
+                      resultingAssignedToUserId: actor.id,
+                      changedByUserId: actor.id,
+                      cause: 'quote-proposal-create',
+                    },
+                  }
+                : {}),
             }),
           },
         });
@@ -9186,6 +9826,11 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           input.companyId,
           'panel.quote-proposal-decision',
           input.commandId,
+        );
+        await this.assertCurrentCommercialOperator(
+          transaction,
+          input.companyId,
+          input.actorUserId,
         );
         const inboxKey = {
           companyId_source_externalEventId: {
@@ -9275,7 +9920,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         }
         if (
           quote.status === RequestStatus.APPROVED ||
-          quote.status === RequestStatus.REJECTED
+          quote.status === RequestStatus.REJECTED ||
+          quote.status === RequestStatus.CANCELLED
         ) {
           throw new AppError(
             'CONFLICT',
@@ -9324,6 +9970,10 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           },
           data: {
             status: decisionStatus,
+            closureClassification:
+              input.decision === 'rejected'
+                ? CommercialClosureClassification.QUOTE_REJECTED
+                : null,
             decisionReason: input.decision === 'rejected' ? reason : null,
             decidedAt,
             decidedByUserId: actor.id,
@@ -9383,6 +10033,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             metadata: payload({
               conversationId: quote.conversationId,
               commandId: input.commandId,
+              closureClassification:
+                input.decision === 'rejected' ? 'quote-rejected' : null,
               reason: input.decision === 'rejected' ? reason : null,
             }),
           },
@@ -9420,13 +10072,24 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
   async updateQuoteProposalStatus(
     input: UpdateQuoteProposalStatusInput,
   ): Promise<unknown> {
-    const reason = input.reason?.trim() || null;
-    if (input.status === 'cancelled' && (!reason || reason.length < 3)) {
+    if (input.status === 'approved' || input.status === 'rejected') {
       throw validationError(
-        'Informe um breve motivo, com pelo menos 3 caracteres, para cancelar o orçamento.',
+        'Aprovação ou recusa deve usar a decisão comercial auditada.',
       );
     }
-    const fingerprint = commandFingerprint({ ...input, reason });
+    const cancellation =
+      input.status === 'cancelled'
+        ? normalizeManualQuoteCancellation({
+            classification: input.closureClassification,
+            reason: input.reason,
+          })
+        : null;
+    const reason = cancellation?.reason ?? input.reason?.trim() ?? null;
+    const fingerprint = commandFingerprint({
+      ...input,
+      closureClassification: cancellation?.classification ?? null,
+      reason,
+    });
 
     try {
       return await this.prisma.$transaction(async (transaction) => {
@@ -9435,6 +10098,11 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           input.companyId,
           'panel.quote-proposal-status',
           input.commandId,
+        );
+        await this.assertCurrentCommercialOperator(
+          transaction,
+          input.companyId,
+          input.actorUserId,
         );
         const inboxKey = {
           companyId_source_externalEventId: {
@@ -9524,19 +10192,39 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         if (quote.conversation.version !== input.expectedVersion) {
           throw currentVersionConflict(quote.conversation.version);
         }
-        if (quote.conversation.assignedToUserId !== input.actorUserId) {
-          throw forbidden(
-            'Assuma o atendimento antes de alterar o status comercial.',
-          );
-        }
         if (
-          quote.status === RequestStatus.APPROVED ||
           quote.status === RequestStatus.REJECTED ||
-          quote.status === RequestStatus.CANCELLED
+          quote.status === RequestStatus.CANCELLED ||
+          (quote.status === RequestStatus.APPROVED && !cancellation)
         ) {
           throw new AppError(
             'CONFLICT',
             'O status final deste orçamento não pode ser alterado.',
+          );
+        }
+        if (cancellation) {
+          const confirmedService = await transaction.confirmedService.findFirst(
+            {
+              where: {
+                companyId: input.companyId,
+                sourceQuoteRequestId: quote.id,
+              },
+              select: { id: true },
+            },
+          );
+          if (confirmedService) {
+            throw new AppError(
+              'CONFLICT',
+              'Este orçamento já originou um Serviço Confirmado e não pode ser reclassificado como cancelamento de aceite.',
+              {
+                confirmedServiceId: confirmedService.id,
+                requiredFlow: 'confirmed-service-cancellation',
+              },
+            );
+          }
+          assertManualQuoteCancellationTransition(
+            requestFromPrisma[quote.status],
+            cancellation.classification,
           );
         }
         if (requestFromPrisma[quote.status] === input.status) {
@@ -9589,10 +10277,12 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           },
           data: {
             status: targetStatus,
-            decisionReason: input.status === 'cancelled' ? reason : null,
-            decidedAt: input.status === 'cancelled' ? changedAt : null,
-            decidedByUserId:
-              input.status === 'cancelled' ? input.actorUserId : null,
+            closureClassification: cancellation
+              ? closureToPrisma[cancellation.classification]
+              : null,
+            decisionReason: cancellation ? reason : null,
+            decidedAt: cancellation ? changedAt : null,
+            decidedByUserId: cancellation ? input.actorUserId : null,
             version: { increment: 1 },
           },
         });
@@ -9676,6 +10366,7 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               commandId: input.commandId,
               fromStatus: requestFromPrisma[quote.status],
               toStatus: input.status,
+              closureClassification: cancellation?.classification ?? null,
               reason,
               occurredAt: changedAt.toISOString(),
             }),
@@ -9741,6 +10432,11 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           input.companyId,
           'panel.quote-proposal-upload',
           input.commandId,
+        );
+        await this.assertCurrentCommercialOperator(
+          transaction,
+          input.companyId,
+          input.actorUserId,
         );
         const inboxKey = {
           companyId_source_externalEventId: {
@@ -9977,6 +10673,11 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           'panel.quote-proposal-send',
           input.commandId,
         );
+        await this.assertCurrentCommercialOperator(
+          transaction,
+          input.companyId,
+          input.actorUserId,
+        );
         const inboxKey = {
           companyId_source_externalEventId: {
             companyId: input.companyId,
@@ -10065,12 +10766,6 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           throw validationError(
             'A proposta só pode ser enviada pela fila comercial Aguardando proposta.',
           );
-        }
-        if (
-          conversation.assignedToUserId &&
-          conversation.assignedToUserId !== input.actorUserId
-        ) {
-          throw forbidden('A conversa está atribuída a outro atendente.');
         }
         if (conversation.version !== input.expectedVersion) {
           throw currentVersionConflict(conversation.version);
@@ -10401,6 +11096,16 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
                 source: 'quote-proposal-send',
                 quoteRequestId: quote.id,
                 proposalDocumentId: document.id,
+                ...(conversation.assignedToUserId !== input.actorUserId
+                  ? {
+                      assignment: {
+                        previousAssignedToUserId: conversation.assignedToUserId,
+                        resultingAssignedToUserId: input.actorUserId,
+                        changedByUserId: input.actorUserId,
+                        cause: 'quote-proposal-send',
+                      },
+                    }
+                  : {}),
               }),
               resultSnapshot: payload(presentConversation(updatedConversation)),
             },
@@ -10465,6 +11170,16 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               messageId: message.id,
               commandId: input.commandId,
               sha256: document.sha256,
+              ...(conversation.assignedToUserId !== input.actorUserId
+                ? {
+                    assignment: {
+                      previousAssignedToUserId: conversation.assignedToUserId,
+                      resultingAssignedToUserId: input.actorUserId,
+                      changedByUserId: input.actorUserId,
+                      cause: 'quote-proposal-send',
+                    },
+                  }
+                : {}),
             }),
           },
         });
@@ -10543,11 +11258,28 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         'O status da solicitação pertence somente à fila Comercial.',
       );
     }
-    const department = query.requestStatus
-      ? DepartmentCode.COMMERCIAL
-      : query.department
-        ? departmentToPrisma[query.department]
-        : undefined;
+    if (
+      query.requestStatus &&
+      query.departments &&
+      !query.departments.includes('commercial')
+    ) {
+      throw validationError(
+        'O status da solicitação pertence somente à fila Comercial.',
+      );
+    }
+    const departments = query.requestStatus
+      ? [DepartmentCode.COMMERCIAL]
+      : query.departments && query.departments.length > 0
+        ? Array.from(
+            new Set(
+              query.departments.map(
+                (assignedDepartment) => departmentToPrisma[assignedDepartment],
+              ),
+            ),
+          )
+        : query.department
+          ? [departmentToPrisma[query.department]]
+          : [];
     const state = query.state ? stateToPrisma[query.state] : undefined;
     const controlStates = query.control
       ? query.control === 'bot'
@@ -10565,6 +11297,33 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
       ? requestToPrisma[query.requestStatus]
       : undefined;
     const search = query.search?.trim();
+    const scopedFilters: Prisma.WhatsAppConversationWhereInput[] = [];
+    if (departments.length > 0) {
+      scopedFilters.push({
+        OR: [
+          { department: { in: departments } },
+          { pendingTransferDepartment: { in: departments } },
+        ],
+      });
+    }
+    if (search) {
+      scopedFilters.push({
+        OR: [
+          {
+            contact: {
+              displayName: { contains: search, mode: 'insensitive' },
+            },
+          },
+          { contact: { phoneNormalized: { contains: search } } },
+          {
+            lastMessagePreview: {
+              contains: search,
+              mode: 'insensitive',
+            },
+          },
+        ],
+      });
+    }
     const where: Prisma.WhatsAppConversationWhereInput = {
       companyId,
       ...(query.archive === 'all'
@@ -10572,28 +11331,10 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         : query.archive === 'archived'
           ? { archivedAt: { not: null } }
           : { archivedAt: null }),
-      ...(department ? { department } : {}),
+      ...(scopedFilters.length > 0 ? { AND: scopedFilters } : {}),
       ...(state ? { conversationState: state } : {}),
       ...(controlStates ? { conversationState: { in: controlStates } } : {}),
       ...(requestStatus ? { requestStatus } : {}),
-      ...(search
-        ? {
-            OR: [
-              {
-                contact: {
-                  displayName: { contains: search, mode: 'insensitive' },
-                },
-              },
-              { contact: { phoneNormalized: { contains: search } } },
-              {
-                lastMessagePreview: {
-                  contains: search,
-                  mode: 'insensitive',
-                },
-              },
-            ],
-          }
-        : {}),
     };
     const [
       rows,
@@ -10672,13 +11413,13 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
   async getConversation(
     companyId: string,
     conversationId: string,
+    scope: ConversationAccessScope,
   ): Promise<unknown> {
-    const conversation = await this.prisma.whatsAppConversation.findUnique({
+    const conversation = await this.prisma.whatsAppConversation.findFirst({
       where: {
-        id_companyId: {
-          id: conversationId,
-          companyId,
-        },
+        id: conversationId,
+        companyId,
+        ...conversationDepartmentWhere(scope),
       },
       include: conversationDetailInclude,
     });
@@ -10811,9 +11552,15 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
     companyId: string,
     conversationId: string,
     query: MessageListQuery,
+    scope: ConversationAccessScope,
   ): Promise<unknown> {
-    const conversation = await this.prisma.whatsAppConversation.findUnique({
-      where: { id_companyId: { id: conversationId, companyId } },
+    const conversationWhere: Prisma.WhatsAppConversationWhereInput = {
+      id: conversationId,
+      companyId,
+      ...conversationDepartmentWhere(scope),
+    };
+    const conversation = await this.prisma.whatsAppConversation.findFirst({
+      where: conversationWhere,
       select: { id: true },
     });
     if (!conversation) throw notFound('Conversa');
@@ -10821,7 +11568,14 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
     const where: Prisma.WhatsAppMessageWhereInput = {
       companyId,
       conversationId,
+      conversation: { is: conversationWhere },
       AND: [
+        {
+          OR: [
+            { automationPurpose: null },
+            { automationPurpose: { not: 'department-notification' } },
+          ],
+        },
         ...(search
           ? [
               {
@@ -10868,13 +11622,23 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
     companyId: string,
     conversationId: string,
     query: TransitionListQuery,
+    scope: ConversationAccessScope,
   ): Promise<unknown> {
-    const conversation = await this.prisma.whatsAppConversation.findUnique({
-      where: { id_companyId: { id: conversationId, companyId } },
+    const conversationWhere: Prisma.WhatsAppConversationWhereInput = {
+      id: conversationId,
+      companyId,
+      ...conversationDepartmentWhere(scope),
+    };
+    const conversation = await this.prisma.whatsAppConversation.findFirst({
+      where: conversationWhere,
       select: { id: true },
     });
     if (!conversation) throw notFound('Conversa');
-    const where = { companyId, conversationId };
+    const where: Prisma.WhatsAppConversationTransitionWhereInput = {
+      companyId,
+      conversationId,
+      conversation: { is: conversationWhere },
+    };
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.whatsAppConversationTransition.findMany({
         where,
@@ -10929,14 +11693,24 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
   async getCurrentQuoteRequest(
     companyId: string,
     conversationId: string,
+    scope: ConversationAccessScope,
   ): Promise<unknown> {
-    const conversation = await this.prisma.whatsAppConversation.findUnique({
-      where: { id_companyId: { id: conversationId, companyId } },
+    const conversationWhere: Prisma.WhatsAppConversationWhereInput = {
+      id: conversationId,
+      companyId,
+      ...conversationDepartmentWhere(scope),
+    };
+    const conversation = await this.prisma.whatsAppConversation.findFirst({
+      where: conversationWhere,
       select: { id: true },
     });
     if (!conversation) throw notFound('Conversa');
     const quote = await this.prisma.quoteRequest.findFirst({
-      where: { companyId, conversationId },
+      where: {
+        companyId,
+        conversationId,
+        conversation: { is: conversationWhere },
+      },
       orderBy: { sequence: 'desc' },
     });
     if (!quote) throw notFound('Solicitação de orçamento');
@@ -11187,6 +11961,150 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         hashtext(${`${companyId}:${namespace}:${key}`})
       )
     `;
+  }
+
+  private async assertCurrentWhatsAppAttendant(
+    transaction: Prisma.TransactionClient,
+    companyId: string,
+    actorUserId: string,
+  ) {
+    const lockedActor = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT id
+      FROM users
+      WHERE id = CAST(${actorUserId} AS uuid)
+        AND company_id = CAST(${companyId} AS uuid)
+      FOR SHARE
+    `;
+    if (lockedActor.length !== 1) {
+      throw new AppError(
+        'FORBIDDEN',
+        'O usuário não está autorizado a atender conversas deste tenant.',
+        { reasonCode: 'WHATSAPP_ATTENDANCE_PERMISSION_REQUIRED' },
+      );
+    }
+
+    const actor = await transaction.user.findUnique({
+      where: { id_companyId: { id: actorUserId, companyId } },
+      select: {
+        id: true,
+        name: true,
+        isActive: true,
+        status: true,
+        deletedAt: true,
+        isAdministrator: true,
+        documentAccessMode: true,
+        departments: true,
+        permissionCodes: true,
+      },
+    });
+    if (
+      !actor ||
+      !actor.isActive ||
+      actor.status !== UserAccountStatus.ACTIVE ||
+      actor.deletedAt !== null
+    ) {
+      throw new AppError(
+        'FORBIDDEN',
+        'O usuário não está autorizado a atender conversas deste tenant.',
+        { reasonCode: 'WHATSAPP_ATTENDANCE_PERMISSION_REQUIRED' },
+      );
+    }
+
+    const permissionCodes = actor.permissionCodes.filter(isPermissionCode);
+    const documentAccessMode =
+      actor.documentAccessMode === DocumentAccessMode.DOCUMENT_PORTAL
+        ? 'document-portal'
+        : actor.documentAccessMode === DocumentAccessMode.CLIENT
+          ? 'client'
+          : 'standard';
+    const permissions = resolveEffectivePermissions(
+      actor.departments as SupportedUserDepartment[],
+      permissionCodes,
+      actor.isAdministrator,
+      documentAccessMode,
+    );
+    const authority = {
+      isAdministrator: actor.isAdministrator,
+      departments: actor.departments,
+      permissionCodes,
+      permissions,
+      documentAccessMode,
+    };
+    if (
+      !canExercisePermission(authority, 'whatsapp-conversations:attend') &&
+      !canExercisePermission(authority, 'whatsapp-conversations:manage')
+    ) {
+      throw new AppError(
+        'FORBIDDEN',
+        'O usuário não possui a capacidade individual de atendimento.',
+        { reasonCode: 'WHATSAPP_ATTENDANCE_PERMISSION_REQUIRED' },
+      );
+    }
+
+    return {
+      ...actor,
+      permissionCodes,
+      permissions,
+      hasTenantWideAuthority: hasTenantWideAuthority(authority),
+    };
+  }
+
+  private async assertCurrentCommercialOperator(
+    transaction: Prisma.TransactionClient,
+    companyId: string,
+    actorUserId: string,
+  ): Promise<void> {
+    const lockedActor = await transaction.$queryRaw<Array<{ id: string }>>`
+      SELECT id
+      FROM users
+      WHERE id = CAST(${actorUserId} AS uuid)
+        AND company_id = CAST(${companyId} AS uuid)
+      FOR SHARE
+    `;
+    if (lockedActor.length !== 1) {
+      throw forbidden('O usuário não está autorizado a operar propostas.');
+    }
+
+    const actor = await transaction.user.findUnique({
+      where: { id_companyId: { id: actorUserId, companyId } },
+      select: {
+        isActive: true,
+        status: true,
+        deletedAt: true,
+        isAdministrator: true,
+        documentAccessMode: true,
+        departments: true,
+        permissionCodes: true,
+      },
+    });
+    if (
+      !actor ||
+      !actor.isActive ||
+      actor.status !== UserAccountStatus.ACTIVE ||
+      actor.deletedAt !== null
+    ) {
+      throw forbidden('O usuário não está autorizado a operar propostas.');
+    }
+
+    const authority = {
+      isAdministrator: actor.isAdministrator,
+      departments: actor.departments,
+      permissionCodes: actor.permissionCodes,
+      permissions: actor.permissionCodes,
+      documentAccessMode: actor.documentAccessMode,
+    };
+    const tenantWide = hasTenantWideAuthority(authority);
+    const canManageProposal =
+      canExercisePermission(authority, 'commercial:manage') ||
+      canExercisePermission(authority, 'whatsapp-conversations:manage');
+    if (
+      !canManageProposal ||
+      (!tenantWide && !actor.departments.includes('commercial'))
+    ) {
+      throw forbidden(
+        'A operação exige acesso comercial vigente dentro deste tenant.',
+      );
+    }
   }
 
   private async createOrderedOutbox(

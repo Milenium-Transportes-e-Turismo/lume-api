@@ -10,8 +10,26 @@ const administrator = {
   username: 'admin',
   isAdministrator: true,
   departments: ['management'],
+  permissionCodes: [
+    'documents:manage',
+    'documents:approve',
+    'documents:export',
+  ],
   permissions: ['documents:manage', 'documents:approve', 'documents:export'],
 } as AuthenticatedPrincipal;
+
+function authorityPrincipal(
+  overrides: Partial<AuthenticatedPrincipal>,
+): AuthenticatedPrincipal {
+  return {
+    ...administrator,
+    isAdministrator: false,
+    departments: [],
+    permissionCodes: [],
+    permissions: [],
+    ...overrides,
+  };
+}
 
 function requestDetail(subjectUserId = 'subject-id') {
   return {
@@ -82,6 +100,46 @@ describe('DocumentManagementUseCase catalog operations', () => {
         prisma as never,
       ).ensureInitialDocumentCatalog(administrator),
     ).resolves.toEqual({ checklistId: 'checklist-id' });
+  });
+
+  it('permite gestão documental ao Admin sem departamentos e à Diretoria com Gestão do Tenant', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const useCase = new DocumentManagementUseCase({
+      documentType: { findMany },
+    } as never);
+
+    for (const principal of [
+      authorityPrincipal({ isAdministrator: true }),
+      authorityPrincipal({
+        departments: ['directorate'],
+        permissionCodes: ['tenant:manage'],
+        permissions: ['tenant:manage'],
+      }),
+    ]) {
+      await expect(useCase.listDocumentTypes(principal)).resolves.toEqual({
+        data: [],
+      });
+    }
+
+    expect(findMany).toHaveBeenCalledTimes(2);
+  });
+
+  it('nega gestão documental à Diretoria sem Gestão do Tenant', async () => {
+    const findMany = vi.fn();
+    const useCase = new DocumentManagementUseCase({
+      documentType: { findMany },
+    } as never);
+
+    await expect(
+      useCase.listDocumentTypes(
+        authorityPrincipal({
+          departments: ['directorate'],
+          permissionCodes: ['documents:manage'],
+          permissions: ['documents:manage'],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(findMany).not.toHaveBeenCalled();
   });
 
   it('lista e cria tipos documentais com auditoria', async () => {
@@ -383,6 +441,7 @@ describe('DocumentManagementUseCase request maintenance', () => {
     const request = {
       id: 'request-id',
       status: 'PENDING_UPLOAD',
+      version: 4,
       items: [
         {
           id: 'obsolete-item-id',
@@ -395,6 +454,8 @@ describe('DocumentManagementUseCase request maintenance', () => {
           status: 'PENDING_UPLOAD',
           requirement: 'REQUIRED',
           position: 1,
+          currentVersion: 0,
+          updatedAt: createdAt,
           configSnapshot: {},
           submissions: [],
         },
@@ -405,6 +466,8 @@ describe('DocumentManagementUseCase request maintenance', () => {
           status: 'CANCELLED',
           requirement: 'OPTIONAL',
           position: 2,
+          currentVersion: 0,
+          updatedAt: createdAt,
           configSnapshot: {},
           submissions: [],
         },
@@ -415,28 +478,42 @@ describe('DocumentManagementUseCase request maintenance', () => {
           status: 'PENDING_UPLOAD',
           requirement: 'REQUIRED',
           position: 3,
+          currentVersion: 0,
+          updatedAt: createdAt,
           configSnapshot: {},
           submissions: [],
         },
       ],
     };
-    const transaction = {
-      documentRequestItem: {
-        update: vi.fn().mockResolvedValue({}),
-        create: vi.fn().mockResolvedValue({}),
-        findMany: vi
-          .fn()
-          .mockResolvedValue([
-            { status: 'PENDING_UPLOAD', requirement: 'REQUIRED' },
-          ]),
+    const commandId = '00000000-0000-4000-8000-000000000001';
+    let transactionAttempt = 0;
+    const transientTransactionConflict = Object.assign(
+      new Error('could not serialize access due to concurrent update'),
+      {
+        code: 'P2010',
+        meta: {
+          driverAdapterError: {
+            cause: {
+              originalCode: '40001',
+              kind: 'TransactionWriteConflict',
+            },
+          },
+        },
       },
-      documentRequest: { update: vi.fn().mockResolvedValue({}) },
-      tenantAuditLog: { create: vi.fn().mockResolvedValue({}) },
-    };
-    const prisma = {
+    );
+    let documentReceipt:
+      | {
+          documentSyncFingerprint: string;
+          documentSynchronizedAt: Date;
+          documentRequestId: string;
+        }
+      | undefined;
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'locked-id' }]),
       user: {
         findUnique: vi.fn().mockResolvedValue({
           id: 'driver-id',
+          isActive: true,
           jobTitle: 'Motorista',
           maritalStatus: 'not-informed',
           militaryDocumentStatus: 'pending-confirmation',
@@ -450,6 +527,27 @@ describe('DocumentManagementUseCase request maintenance', () => {
           ],
         }),
       },
+      userUpdateHistory: {
+        findUnique: vi.fn().mockImplementation(() =>
+          Promise.resolve({
+            id: 'history-id',
+            userId: 'driver-id',
+            documentSyncFingerprint:
+              documentReceipt?.documentSyncFingerprint ?? null,
+            documentSynchronizedAt:
+              documentReceipt?.documentSynchronizedAt ?? null,
+            documentRequestId: documentReceipt?.documentRequestId ?? null,
+          }),
+        ),
+        updateMany: vi.fn().mockImplementation(({ data }) => {
+          documentReceipt = {
+            documentSyncFingerprint: data.documentSyncFingerprint,
+            documentSynchronizedAt: data.documentSynchronizedAt,
+            documentRequestId: data.documentRequestId,
+          };
+          return Promise.resolve({ count: 1 });
+        }),
+      },
       documentChecklistTemplate: {
         findFirst: vi.fn().mockResolvedValue({
           id: 'checklist-id',
@@ -457,21 +555,59 @@ describe('DocumentManagementUseCase request maintenance', () => {
           items: checklistItems,
         }),
       },
+      documentRequestItem: {
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        create: vi.fn().mockResolvedValue({}),
+        findMany: vi
+          .fn()
+          .mockResolvedValue([
+            { status: 'PENDING_UPLOAD', requirement: 'REQUIRED' },
+          ]),
+      },
       documentRequest: {
         findFirst: vi.fn().mockResolvedValue(request),
-        findUnique: vi.fn().mockResolvedValue(requestDetail('driver-id')),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
-      $transaction: vi.fn((callback: (client: typeof transaction) => unknown) =>
-        callback(transaction),
+      tenantAuditLog: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const prisma = {
+      documentChecklistTemplate: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'checklist-id',
+          items: [{ id: 'child-document-item-id' }],
+        }),
+      },
+      documentRequest: {
+        findUnique: vi.fn(),
+      },
+      $transaction: vi.fn(
+        async (callback: (client: typeof transaction) => unknown) => {
+          transactionAttempt += 1;
+          if (transactionAttempt === 1) {
+            throw transientTransactionConflict;
+          }
+          return callback(transaction);
+        },
       ),
     };
 
     await expect(
       new DocumentManagementUseCase(
         prisma as never,
-      ).synchronizeEmployeeDocuments(administrator, 'driver-id'),
-    ).resolves.toMatchObject({ request: { id: 'request-id' } });
-    expect(transaction.documentRequestItem.update).toHaveBeenCalledTimes(3);
+      ).synchronizeEmployeeDocuments(administrator, 'driver-id', commandId),
+    ).resolves.toMatchObject({
+      request: { id: 'request-id' },
+      idempotent: false,
+    });
+    expect(transaction.documentRequest.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          context: 'ADMISSION',
+          checklist: { code: 'employee-documents-dynamic' },
+        }),
+      }),
+    );
+    expect(transaction.documentRequestItem.updateMany).toHaveBeenCalledTimes(3);
     expect(transaction.documentRequestItem.create).toHaveBeenCalledTimes(2);
     expect(transaction.documentRequestItem.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -485,6 +621,178 @@ describe('DocumentManagementUseCase request maintenance', () => {
               validityRequired: true,
             },
           }),
+        }),
+      }),
+    );
+    const lockStatements = transaction.$queryRaw.mock.calls.map(([statement]) =>
+      (statement as readonly string[]).join(' '),
+    );
+    const itemLockIndex = lockStatements.findIndex((statement) =>
+      statement.includes('FROM document_request_items'),
+    );
+    const submissionLockIndex = lockStatements.findIndex((statement) =>
+      statement.includes('FROM document_submissions'),
+    );
+    expect(itemLockIndex).toBeGreaterThanOrEqual(0);
+    expect(submissionLockIndex).toBeGreaterThanOrEqual(0);
+    expect(itemLockIndex).toBeLessThan(submissionLockIndex);
+    await expect(
+      new DocumentManagementUseCase(
+        prisma as never,
+      ).synchronizeEmployeeDocuments(
+        authorityPrincipal({ departments: ['human-resources'] }),
+        'driver-id',
+        commandId,
+      ),
+    ).resolves.toMatchObject({
+      request: { id: 'request-id' },
+      idempotent: true,
+    });
+    expect(transaction.documentRequestItem.updateMany).toHaveBeenCalledTimes(3);
+    expect(transaction.documentRequestItem.create).toHaveBeenCalledTimes(2);
+    expect(transaction.userUpdateHistory.updateMany).toHaveBeenCalledTimes(1);
+    expect(transaction.tenantAuditLog.create).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(3);
+    expect(prisma.documentRequest.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('limita o retry serializável e não mascara erros que não são transitórios', async () => {
+    const transactionConflict = {
+      code: 'P2010',
+      meta: {
+        driverAdapterError: {
+          cause: {
+            originalCode: '40001',
+            kind: 'TransactionWriteConflict',
+          },
+        },
+      },
+    };
+    const checklist = {
+      documentChecklistTemplate: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'checklist-id',
+          items: [{ id: 'child-item-id' }],
+        }),
+      },
+    };
+    const retryingPrisma = {
+      ...checklist,
+      $transaction: vi.fn().mockRejectedValue(transactionConflict),
+    };
+
+    await expect(
+      new DocumentManagementUseCase(
+        retryingPrisma as never,
+      ).synchronizeEmployeeDocuments(
+        administrator,
+        'driver-id',
+        '00000000-0000-4000-8000-000000000090',
+      ),
+    ).rejects.toBe(transactionConflict);
+    expect(retryingPrisma.$transaction).toHaveBeenCalledTimes(3);
+
+    const permanentError = new Error('falha permanente');
+    const nonRetryingPrisma = {
+      ...checklist,
+      $transaction: vi.fn().mockRejectedValue(permanentError),
+    };
+    await expect(
+      new DocumentManagementUseCase(
+        nonRetryingPrisma as never,
+      ).synchronizeEmployeeDocuments(
+        administrator,
+        'driver-id',
+        '00000000-0000-4000-8000-000000000091',
+      ),
+    ).rejects.toBe(permanentError);
+    expect(nonRetryingPrisma.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborta a sincronização quando um upload altera o item bloqueado', async () => {
+    const commandId = '00000000-0000-4000-8000-000000000002';
+    const request = {
+      id: 'request-id',
+      status: 'PENDING_UPLOAD',
+      version: 2,
+      items: [
+        {
+          id: 'obsolete-item-id',
+          documentTypeId: 'obsolete-type-id',
+          documentType: {
+            ...documentType(),
+            id: 'obsolete-type-id',
+            code: 'obsolete',
+          },
+          status: 'PENDING_UPLOAD',
+          requirement: 'REQUIRED',
+          position: 1,
+          currentVersion: 0,
+          updatedAt: createdAt,
+          configSnapshot: {},
+          submissions: [],
+        },
+      ],
+    };
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'locked-id' }]),
+      userUpdateHistory: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'history-id',
+          userId: 'driver-id',
+          documentSyncFingerprint: null,
+          documentSynchronizedAt: null,
+          documentRequestId: null,
+        }),
+      },
+      user: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'driver-id',
+          isActive: true,
+          jobTitle: 'Auxiliar',
+          maritalStatus: 'not-informed',
+          militaryDocumentStatus: 'not-applicable',
+          dependents: [],
+        }),
+      },
+      documentChecklistTemplate: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'checklist-id',
+          active: true,
+          items: [],
+        }),
+      },
+      documentRequest: {
+        findFirst: vi.fn().mockResolvedValue(request),
+      },
+      documentRequestItem: {
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+    };
+    const prisma = {
+      documentChecklistTemplate: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'checklist-id',
+          items: [{ id: 'item-id' }],
+        }),
+      },
+      $transaction: vi.fn((callback: (client: typeof transaction) => unknown) =>
+        callback(transaction),
+      ),
+    };
+
+    await expect(
+      new DocumentManagementUseCase(
+        prisma as never,
+      ).synchronizeEmployeeDocuments(administrator, 'driver-id', commandId),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(transaction.documentRequestItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: 'obsolete-item-id',
+          status: 'PENDING_UPLOAD',
+          currentVersion: 0,
+          submissions: { none: {} },
         }),
       }),
     );
@@ -522,7 +830,9 @@ describe('DocumentManagementUseCase request maintenance', () => {
   it('adiciona manualmente um item e recalcula o estado da solicitaÃ§Ã£o', async () => {
     const type = documentType();
     const transaction = {
+      $executeRaw: vi.fn().mockResolvedValue(1),
       documentRequestItem: {
+        findFirst: vi.fn().mockResolvedValue(null),
         aggregate: vi.fn().mockResolvedValue({ _max: { position: 2 } }),
         create: vi.fn().mockResolvedValue({ id: 'new-item-id' }),
         findMany: vi
@@ -538,7 +848,10 @@ describe('DocumentManagementUseCase request maintenance', () => {
       documentRequest: {
         findUnique: vi
           .fn()
-          .mockResolvedValueOnce({ id: 'request-id' })
+          .mockResolvedValueOnce({
+            id: 'request-id',
+            subjectUserId: 'subject-id',
+          })
           .mockResolvedValueOnce(requestDetail()),
       },
       documentType: { findUnique: vi.fn().mockResolvedValue(type) },
@@ -566,6 +879,31 @@ describe('DocumentManagementUseCase request maintenance', () => {
         data: expect.objectContaining({ position: 3, dueAt: expect.any(Date) }),
       }),
     );
+    expect(transaction.$executeRaw).toHaveBeenCalledTimes(1);
+    expect(transaction.$executeRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      transaction.documentRequestItem.findFirst.mock.invocationCallOrder[0],
+    );
+
+    transaction.documentRequestItem.findFirst.mockResolvedValue({
+      id: 'concurrent-item-id',
+    });
+    prisma.documentRequest.findUnique.mockResolvedValueOnce({
+      id: 'request-id',
+      subjectUserId: 'subject-id',
+    });
+    transaction.documentRequestItem.create.mockClear();
+    await expect(
+      new DocumentManagementUseCase(prisma as never).addRequestItem(
+        administrator,
+        'request-id',
+        {
+          documentTypeId: type.id,
+          requirement: 'required',
+          reason: 'Concorrente',
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(transaction.documentRequestItem.create).not.toHaveBeenCalled();
   });
 
   it('altera a polÃ­tica do item e reabre itens antes dispensados', async () => {
@@ -625,6 +963,7 @@ describe('DocumentManagementUseCase queries and renewal', () => {
       requestItemId: 'item-id',
       status: 'SUBMITTED',
       version: 1,
+      updatedAt: createdAt,
       validation: null,
       files: [
         {
@@ -639,6 +978,9 @@ describe('DocumentManagementUseCase queries and renewal', () => {
       requestItem: {
         id: 'item-id',
         requestId: 'request-id',
+        status: 'SUBMITTED',
+        currentVersion: 1,
+        updatedAt: createdAt,
         configSnapshot: {
           minFiles: 1,
           maxFiles: 1,
@@ -666,7 +1008,11 @@ describe('DocumentManagementUseCase queries and renewal', () => {
       provider: 'local-structural',
     };
     const transaction = {
-      documentSubmission: { update: vi.fn().mockResolvedValue({}) },
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'locked-id' }]),
+      documentSubmission: {
+        findUnique: vi.fn().mockResolvedValue(submission),
+        update: vi.fn().mockResolvedValue({}),
+      },
       documentRequestItem: {
         update: vi.fn().mockResolvedValue({}),
         findMany: vi
@@ -725,11 +1071,71 @@ describe('DocumentManagementUseCase queries and renewal', () => {
         }),
       }),
     );
+    const lockStatements = transaction.$queryRaw.mock.calls.map(([statement]) =>
+      (statement as readonly string[]).join(' '),
+    );
+    const itemLockIndex = lockStatements.findIndex((statement) =>
+      statement.includes('FROM document_request_items'),
+    );
+    const submissionLockIndex = lockStatements.findIndex((statement) =>
+      statement.includes('FROM document_submissions'),
+    );
+    const requestLockIndex = lockStatements.findIndex((statement) =>
+      statement.includes('FROM document_requests'),
+    );
+    expect(itemLockIndex).toBeGreaterThanOrEqual(0);
+    expect(itemLockIndex).toBeLessThan(submissionLockIndex);
+    expect(submissionLockIndex).toBeLessThan(requestLockIndex);
+    expect(
+      transaction.$queryRaw.mock.invocationCallOrder[
+        transaction.$queryRaw.mock.invocationCallOrder.length - 1
+      ],
+    ).toBeLessThan(
+      transaction.documentRequestItem.update.mock.invocationCallOrder[0],
+    );
+
+    transaction.documentSubmission.findUnique.mockResolvedValue({
+      ...submission,
+      status: 'CANCELLED',
+      updatedAt: new Date('2026-08-05T12:01:00.000Z'),
+      validation: null,
+      requestItem: {
+        ...submission.requestItem,
+        status: 'PENDING_UPLOAD',
+        updatedAt: new Date('2026-08-05T12:01:00.000Z'),
+      },
+    });
+    transaction.documentRequestItem.update.mockClear();
+    await expect(
+      new DocumentManagementUseCase(prisma as never).completeSubmission(
+        administrator,
+        submission.id,
+      ),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(transaction.documentRequestItem.update).not.toHaveBeenCalled();
   });
 
   it('registra dados extraídos propostos com origem e confiança para revisão humana', async () => {
     const transaction = {
-      documentSubmission: { update: vi.fn().mockResolvedValue({}) },
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'locked-id' }]),
+      documentSubmission: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'submission-id',
+          requestItemId: 'item-id',
+          status: 'PENDING_HUMAN_REVIEW',
+          version: 2,
+          updatedAt: createdAt,
+          validation: null,
+          requestItem: {
+            id: 'item-id',
+            requestId: 'request-id',
+            status: 'PENDING_HUMAN_REVIEW',
+            currentVersion: 2,
+            updatedAt: createdAt,
+          },
+        }),
+        update: vi.fn().mockResolvedValue({}),
+      },
       documentValidation: { upsert: vi.fn().mockResolvedValue({}) },
       tenantAuditLog: { create: vi.fn().mockResolvedValue({}) },
     };
@@ -737,12 +1143,18 @@ describe('DocumentManagementUseCase queries and renewal', () => {
       documentSubmission: {
         findUnique: vi.fn().mockResolvedValue({
           id: 'submission-id',
+          requestItemId: 'item-id',
           status: 'PENDING_HUMAN_REVIEW',
           version: 2,
+          updatedAt: createdAt,
           files: [{ id: 'front-file-id' }, { id: 'back-file-id' }],
           validation: null,
           requestItem: {
+            id: 'item-id',
             requestId: 'request-id',
+            status: 'PENDING_HUMAN_REVIEW',
+            currentVersion: 2,
+            updatedAt: createdAt,
             configSnapshot: {
               extractionSchema: {
                 fields: [
@@ -811,6 +1223,53 @@ describe('DocumentManagementUseCase queries and renewal', () => {
         }),
       }),
     );
+    const lockStatements = transaction.$queryRaw.mock.calls.map(([statement]) =>
+      (statement as readonly string[]).join(' '),
+    );
+    const itemLockIndex = lockStatements.findIndex((statement) =>
+      statement.includes('FROM document_request_items'),
+    );
+    const submissionLockIndex = lockStatements.findIndex((statement) =>
+      statement.includes('FROM document_submissions'),
+    );
+    const requestLockIndex = lockStatements.findIndex((statement) =>
+      statement.includes('FROM document_requests'),
+    );
+    expect(itemLockIndex).toBeGreaterThanOrEqual(0);
+    expect(itemLockIndex).toBeLessThan(submissionLockIndex);
+    expect(submissionLockIndex).toBeLessThan(requestLockIndex);
+    expect(
+      transaction.$queryRaw.mock.invocationCallOrder[
+        transaction.$queryRaw.mock.invocationCallOrder.length - 1
+      ],
+    ).toBeLessThan(
+      transaction.documentSubmission.update.mock.invocationCallOrder[0],
+    );
+
+    transaction.documentSubmission.findUnique.mockResolvedValue({
+      id: 'submission-id',
+      requestItemId: 'item-id',
+      status: 'APPROVED',
+      version: 2,
+      updatedAt: new Date('2026-08-05T12:02:00.000Z'),
+      validation: null,
+      requestItem: {
+        id: 'item-id',
+        requestId: 'request-id',
+        status: 'APPROVED',
+        currentVersion: 2,
+        updatedAt: new Date('2026-08-05T12:02:00.000Z'),
+      },
+    });
+    transaction.documentSubmission.update.mockClear();
+    await expect(
+      new DocumentManagementUseCase(prisma as never).updateExtractedData(
+        administrator,
+        'submission-id',
+        { fields: { fullName: 'Outra pessoa' } },
+      ),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(transaction.documentSubmission.update).not.toHaveBeenCalled();
   });
 
   it('entrega arquivo autorizado e registra a consulta', async () => {

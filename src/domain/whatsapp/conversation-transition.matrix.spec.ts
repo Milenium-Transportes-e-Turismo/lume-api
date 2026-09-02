@@ -244,6 +244,61 @@ describe('matriz MVP de conversas WhatsApp', () => {
     ).toThrow('departamento de destino');
   });
 
+  it('mantém a origem responsável até o destino aceitar a transferência', () => {
+    const taken = transition(initial, 'take-over');
+    const requested = resolveConversationTransition({
+      current: taken,
+      name: 'request-transfer',
+      targetDepartment: 'operations',
+    });
+
+    expect(requested).toEqual(taken);
+    expect(
+      resolveConversationTransition({
+        current: requested,
+        name: 'accept-transfer',
+        targetDepartment: 'operations',
+      }),
+    ).toMatchObject({
+      department: 'operations',
+      conversationState: 'human-active',
+      flowStep: 'human-service',
+    });
+    expect(() => transition(initial, 'request-transfer')).toThrow(
+      'request-transfer não é permitida',
+    );
+    expect(() => transition(initial, 'accept-transfer')).toThrow(
+      'accept-transfer não é permitida',
+    );
+  });
+
+  it.each(['forward', 'request-transfer', 'accept-transfer'] as const)(
+    'nunca permite Empresa cliente como fila interna em %s',
+    (name) => {
+      const current =
+        name === 'forward' ? initial : transition(initial, 'take-over');
+
+      expect(() =>
+        resolveConversationTransition({
+          current,
+          name,
+          targetDepartment: 'client-company',
+        }),
+      ).toThrow('Empresa cliente');
+    },
+  );
+
+  it('nunca permite Empresa cliente como fila de contato departamental sistêmico', () => {
+    expect(() =>
+      resolveConversationTransition({
+        current: initial,
+        name: 'start-department-contact',
+        targetDepartment: 'client-company',
+        departmentOption: '2',
+      }),
+    ).toThrow('Empresa cliente');
+  });
+
   it('preserva o retorno pós-orçamento em intervenções humanas repetidas', () => {
     const confirmed: ConversationSnapshot = {
       ...initial,
@@ -500,6 +555,14 @@ describe('matriz MVP de conversas WhatsApp', () => {
       assertTransitionActor('proposal-response-received', 'user'),
     ).toThrow('ator user');
     expect(() => assertTransitionActor('take-over', 'user')).not.toThrow();
+    expect(() =>
+      assertTransitionActor('request-transfer', 'user'),
+    ).not.toThrow();
+    expect(() => assertTransitionActor('request-transfer', 'system')).toThrow();
+    expect(() =>
+      assertTransitionActor('accept-transfer', 'user'),
+    ).not.toThrow();
+    expect(() => assertTransitionActor('accept-transfer', 'system')).toThrow();
     expect(() =>
       assertTransitionActor('present-main-menu', 'system'),
     ).not.toThrow();

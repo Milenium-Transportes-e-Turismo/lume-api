@@ -1,11 +1,15 @@
 import {
   ALL_PERMISSION_CODES,
+  DOCUMENT_PORTAL_PERMISSIONS,
   EMPLOYEE_SELF_SERVICE_PERMISSIONS,
   SERVICE_PERMISSION_CEILING,
+  TENANT_BUSINESS_PERMISSION_CODES,
+  TENANT_WIDE_PERMISSION,
   allowedPermissionsForDepartments,
   type PermissionCode,
   type SupportedUserDepartment,
 } from './access.constants';
+import { hasTenantWideAuthority } from './tenant-authority';
 
 export function filterPermissionCodesForDepartments(
   departments: readonly SupportedUserDepartment[],
@@ -46,15 +50,7 @@ export function resolveEffectivePermissions(
   }
 
   if (documentAccessMode === 'document-portal') {
-    return [
-      'documents:view',
-      'documents:create',
-      'documents:update',
-      'profile:view',
-      'profile:update',
-      'support:view',
-      'support:create',
-    ];
+    return [...DOCUMENT_PORTAL_PERMISSIONS];
   }
 
   const permissions = new Set<PermissionCode>(
@@ -68,11 +64,26 @@ export function resolveEffectivePermissions(
     permissions.add('users:manage');
   }
 
-  for (const permission of filterPermissionCodesForDepartments(
+  const selectedPermissions = filterPermissionCodesForDepartments(
     departments,
     individualPermissions,
-  )) {
+  );
+
+  for (const permission of selectedPermissions) {
     permissions.add(permission);
+  }
+
+  if (
+    hasTenantWideAuthority({
+      isAdministrator: false,
+      departments,
+      permissionCodes: selectedPermissions,
+    })
+  ) {
+    permissions.add(TENANT_WIDE_PERMISSION);
+    for (const permission of TENANT_BUSINESS_PERMISSION_CODES) {
+      permissions.add(permission);
+    }
   }
 
   return Array.from(permissions).sort();

@@ -103,6 +103,7 @@ describe('resolveEffectivePermissions', () => {
     for (const department of ASSIGNABLE_DEPARTMENTS) {
       if (
         department === 'management' ||
+        department === 'human-resources' ||
         department === 'personnel-department' ||
         department === 'information-technology'
       ) {
@@ -157,6 +158,96 @@ describe('resolveEffectivePermissions', () => {
     }
   });
 
+  it('publishes RH and Personnel Department with the same document capabilities', () => {
+    const documentPermissions = (
+      department: 'human-resources' | 'personnel-department',
+    ) =>
+      DEFAULT_DEPARTMENT_PERMISSIONS[department]
+        .filter((permission) => permission.startsWith('documents:'))
+        .sort();
+
+    expect(documentPermissions('human-resources')).toEqual(
+      documentPermissions('personnel-department'),
+    );
+    expect(documentPermissions('human-resources')).toEqual([
+      'documents:approve',
+      'documents:create',
+      'documents:export',
+      'documents:manage',
+      'documents:update',
+      'documents:view',
+    ]);
+  });
+
+  it('publishes RH and Personnel Department as separate assignable departments', () => {
+    expect(ASSIGNABLE_DEPARTMENTS).toContain('human-resources');
+    expect(ASSIGNABLE_DEPARTMENTS).toContain('personnel-department');
+    expect(ASSIGNABLE_DEPARTMENTS.indexOf('human-resources')).not.toBe(
+      ASSIGNABLE_DEPARTMENTS.indexOf('personnel-department'),
+    );
+  });
+
+  it('allows individually assigned WhatsApp attendance and viewing in every internal department', () => {
+    for (const department of ASSIGNABLE_DEPARTMENTS.filter(
+      (candidate) => candidate !== 'client-company',
+    )) {
+      expect(
+        resolveEffectivePermissions(
+          [department],
+          ['whatsapp-conversations:view', 'whatsapp-conversations:attend'],
+        ),
+        department,
+      ).toContain('whatsapp-conversations:attend');
+      expect(
+        resolveEffectivePermissions(
+          [department],
+          ['whatsapp-conversations:view', 'whatsapp-conversations:attend'],
+        ),
+        department,
+      ).toContain('whatsapp-conversations:view');
+    }
+
+    expect(
+      resolveEffectivePermissions(
+        ['client-company'],
+        ['whatsapp-conversations:view', 'whatsapp-conversations:attend'],
+      ),
+    ).not.toEqual(
+      expect.arrayContaining([
+        'whatsapp-conversations:view',
+        'whatsapp-conversations:attend',
+      ]),
+    );
+  });
+
+  it('expands the Directorate tenant authority without platform administration', () => {
+    const permissions = resolveEffectivePermissions(
+      ['directorate'],
+      ['tenant:manage'],
+    );
+
+    expect(permissions).toEqual(
+      expect.arrayContaining([
+        'tenant:manage',
+        'commercial:manage',
+        'financial:approve',
+        'operations:manage',
+        'service-confirmations:approve',
+        'whatsapp-conversations:attend',
+      ]),
+    );
+    expect(permissions).not.toContain('users:manage');
+    expect(permissions).not.toContain('settings:manage');
+    expect(permissions).not.toContain('license:view');
+  });
+
+  it('does not expand Directorate authority without the individual grant', () => {
+    const permissions = resolveEffectivePermissions(['directorate'], []);
+
+    expect(permissions).not.toContain('tenant:manage');
+    expect(permissions).not.toContain('commercial:manage');
+  });
+
   it('does not treat the Management department as administrator authority', () => {
     expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).not.toContain('users:view');
     expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).not.toContain('users:create');
@@ -164,12 +255,38 @@ describe('resolveEffectivePermissions', () => {
     expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).not.toContain('users:manage');
     expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).toContain('settings:manage');
     expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).toContain('license:view');
+    expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).toContain('clients:view');
+    expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).toContain('clients:create');
+    expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).toContain('clients:update');
+    expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).not.toContain('clients:manage');
+    expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).not.toContain('clients:history');
+    expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).toContain(
+      'service-confirmations:approve',
+    );
+    expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).not.toContain('tenant:manage');
     expect(
-      MANAGEMENT_DEPARTMENT_PERMISSIONS.some(
-        (permission) =>
-          permission.startsWith('commercial:') ||
-          permission.startsWith('whatsapp-conversations:'),
+      MANAGEMENT_DEPARTMENT_PERMISSIONS.some((permission) =>
+        permission.startsWith('commercial:'),
       ),
     ).toBe(false);
+    expect(MANAGEMENT_DEPARTMENT_PERMISSIONS).not.toContain(
+      'whatsapp-conversations:manage',
+    );
+  });
+
+  it('allows explicitly assigned Cadastro access for Management', () => {
+    const permissions = resolveEffectivePermissions(
+      ['management'],
+      ['clients:view', 'clients:create', 'clients:update', 'commercial:view'],
+    );
+
+    expect(permissions).toEqual(
+      expect.arrayContaining([
+        'clients:view',
+        'clients:create',
+        'clients:update',
+      ]),
+    );
+    expect(permissions).not.toContain('commercial:view');
   });
 });

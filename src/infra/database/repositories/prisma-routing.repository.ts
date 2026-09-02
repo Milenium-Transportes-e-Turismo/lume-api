@@ -45,6 +45,12 @@ function mapCompany(row: {
   status: PrismaRoutingCompanyStatus;
   avicExternalId: string | null;
   avicLastSyncedAt: Date | null;
+  isTemporary: boolean;
+  temporaryReason: string | null;
+  regularizationDueAt: Date | null;
+  regularizedAt: Date | null;
+  regularizationRequirements: string[];
+  temporaryResponsibleUserId: string | null;
   version: number;
   createdByUserId: string | null;
   createdAt: Date;
@@ -80,6 +86,12 @@ function companySnapshot(company: RoutingCompanyProps): Prisma.InputJsonValue {
       status: company.status,
       avicExternalId: company.avicExternalId,
       avicLastSyncedAt: company.avicLastSyncedAt?.toISOString() ?? null,
+      isTemporary: company.isTemporary,
+      temporaryReason: company.temporaryReason,
+      regularizationDueAt: company.regularizationDueAt?.toISOString() ?? null,
+      regularizedAt: company.regularizedAt?.toISOString() ?? null,
+      regularizationRequirements: company.regularizationRequirements,
+      temporaryResponsibleUserId: company.temporaryResponsibleUserId,
       version: company.version,
     }),
   ) as Prisma.InputJsonValue;

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import {
   conflict,
   forbidden,
@@ -8,6 +10,7 @@ import {
   allowedPermissionsForDepartments,
   isPermissionCode,
   normalizeUserDepartments,
+  TENANT_WIDE_PERMISSION,
   type PermissionCode,
   type SupportedUserDepartment,
 } from '../../../domain/access/access.constants';
@@ -23,16 +26,19 @@ import {
   normalizeCpf,
   normalizeEmail,
 } from '../../../shared/utils/normalization';
-import {
-  TenantAuditLogsRepository,
-  UsersRepository,
-} from '../../contracts/repositories';
+import { UsersRepository } from '../../contracts/repositories';
 import { presentUser } from '../../presenters/user.presenter';
-import { assertCanAccessUserTarget } from '../../../domain/access/user-management-policy';
+import {
+  assertCanAccessUserTarget,
+  userMutationAuthorizationFingerprint,
+} from '../../../domain/access/user-management-policy';
+import { hasTenantWideAuthority } from '../../../domain/access/tenant-authority';
 import { RoutingRepository } from '../../contracts/routing.repository';
 
 export interface UpdateUserInput {
   companyId: string;
+  commandId: string;
+  expectedVersion: number;
   currentUserId?: string;
   actorUserId?: string;
   userId: string;
@@ -51,10 +57,58 @@ export interface UpdateUserInput {
   permissionCodes?: PermissionCode[];
 }
 
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, nested]) => nested !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => [key, canonicalize(nested)]),
+  );
+}
+
+function updateCommandFingerprint(input: UpdateUserInput): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify(
+        canonicalize({
+          operation: 'USER_UPDATED',
+          companyId: input.companyId,
+          actorUserId: input.actorUserId ?? input.currentUserId ?? null,
+          userId: input.userId,
+          expectedVersion: input.expectedVersion,
+          changes: {
+            routingCompanyId: input.routingCompanyId,
+            name: input.name?.trim(),
+            email: input.email?.trim(),
+            cpf: input.cpf === undefined ? undefined : normalizeCpf(input.cpf),
+            isAdministrator: input.isAdministrator,
+            documentAccessMode: input.documentAccessMode,
+            clientCategory: input.clientCategory,
+            jobTitle:
+              input.jobTitle === undefined
+                ? undefined
+                : input.jobTitle?.trim() || null,
+            maritalStatus: input.maritalStatus,
+            militaryDocumentStatus: input.militaryDocumentStatus,
+            dependents: input.dependents,
+            departments: input.departments
+              ? [...normalizeUserDepartments(input.departments)].sort()
+              : undefined,
+            permissionCodes: input.permissionCodes
+              ? [...new Set(input.permissionCodes)].sort()
+              : undefined,
+          },
+        }),
+      ),
+    )
+    .digest('hex');
+}
+
 export class UpdateUserUseCase {
   constructor(
     private readonly users: UsersRepository,
-    private readonly auditLogs?: TenantAuditLogsRepository,
     private readonly routing?: RoutingRepository,
   ) {}
 
@@ -66,12 +120,25 @@ export class UpdateUserUseCase {
     }
 
     const actorId = input.actorUserId ?? input.currentUserId;
-    const actor = actorId
-      ? await this.users.findById(input.companyId, actorId)
-      : null;
-    const actorRole = actor
-      ? assertCanAccessUserTarget(actor.user.props, target.user.props)
-      : null;
+    if (!actorId) {
+      throw forbidden('Informe o usuário responsável pela alteração.');
+    }
+    const actor = await this.users.findById(input.companyId, actorId);
+    if (
+      !actor ||
+      !actor.companyIsActive ||
+      !actor.user.props.isActive ||
+      actor.user.props.status !== 'active'
+    ) {
+      throw forbidden(
+        'Somente uma conta ativa pode realizar alterações em usuários.',
+      );
+    }
+    const actorRole = assertCanAccessUserTarget(
+      actor.user.props,
+      target.user.props,
+    );
+    const requestFingerprint = updateCommandFingerprint(input);
     if (
       actorRole === 'people-operations' &&
       (input.cpf !== undefined ||
@@ -98,7 +165,7 @@ export class UpdateUserUseCase {
     }
     if (
       input.permissionCodes !== undefined &&
-      !actor?.user.props.isAdministrator &&
+      !actor.user.props.isAdministrator &&
       (input.permissionCodes.includes('clients:history') ||
         target.user.props.permissionCodes.includes('clients:history'))
     ) {
@@ -106,7 +173,15 @@ export class UpdateUserUseCase {
         'Somente administradores podem conceder ou remover a permissão de visualizar o histórico de clientes.',
       );
     }
-
+    const replayed = await this.users.findUpdateReplay(input.companyId, {
+      userId: input.userId,
+      actorUserId: actorId,
+      commandId: input.commandId,
+      requestFingerprint,
+    });
+    if (replayed) {
+      return { ...presentUser(replayed.record), idempotent: true };
+    }
     const emailNormalized = input.email
       ? normalizeEmail(input.email)
       : undefined;
@@ -144,14 +219,16 @@ export class UpdateUserUseCase {
       input.documentAccessMode ?? target.user.props.documentAccessMode;
     const administratorChanged =
       finalIsAdministrator !== target.user.props.isAdministrator;
+    const documentPortalOnly =
+      !finalIsAdministrator && finalDocumentAccessMode === 'document-portal';
 
     if (target.user.props.isAdministrator || administratorChanged) {
-      if (!actor?.user.props.isAdministrator) {
+      if (!actor.user.props.isAdministrator) {
         throw forbidden(
           'Somente outro administrador pode alterar uma conta administradora.',
         );
       }
-      if (input.currentUserId === input.userId && !finalIsAdministrator) {
+      if (actorId === input.userId && !finalIsAdministrator) {
         throw forbidden(
           'Você não pode remover o próprio acesso de administrador.',
         );
@@ -168,12 +245,47 @@ export class UpdateUserUseCase {
       );
     }
 
-    const finalDepartments = finalIsAdministrator
-      ? []
-      : (departments ?? target.user.props.departments);
-    const finalPermissionCodes = finalIsAdministrator
-      ? []
-      : (permissionCodes ?? target.user.props.permissionCodes);
+    if (
+      documentPortalOnly &&
+      ((departments?.length ?? 0) > 0 || (permissionCodes?.length ?? 0) > 0)
+    ) {
+      throw validationError(
+        'O Portal de documentos não aceita departamentos nem permissões de negócio.',
+      );
+    }
+
+    const finalDepartments =
+      finalIsAdministrator || documentPortalOnly
+        ? []
+        : (departments ?? target.user.props.departments);
+    const finalPermissionCodes =
+      finalIsAdministrator || documentPortalOnly
+        ? []
+        : (permissionCodes ?? target.user.props.permissionCodes);
+    const tenantWideGrantChanged =
+      finalPermissionCodes.includes(TENANT_WIDE_PERMISSION) !==
+      target.user.props.permissionCodes.includes(TENANT_WIDE_PERMISSION);
+    const tenantWideAuthorityChanged =
+      hasTenantWideAuthority({
+        isAdministrator: finalIsAdministrator,
+        departments: finalDepartments,
+        permissionCodes: finalPermissionCodes,
+        documentAccessMode: finalDocumentAccessMode,
+      }) !==
+      hasTenantWideAuthority({
+        isAdministrator: target.user.props.isAdministrator,
+        departments: target.user.props.departments,
+        permissionCodes: target.user.props.permissionCodes,
+        documentAccessMode: target.user.props.documentAccessMode,
+      });
+    if (
+      (tenantWideGrantChanged || tenantWideAuthorityChanged) &&
+      !actor.user.props.isAdministrator
+    ) {
+      throw forbidden(
+        'Somente administradores podem conceder ou remover o acesso amplo da Diretoria.',
+      );
+    }
     const requestedRoutingCompanyId =
       input.routingCompanyId === undefined
         ? target.user.props.routingCompanyId
@@ -247,7 +359,39 @@ export class UpdateUserUseCase {
       target.user.props.status === 'active' &&
       target.user.props.isAdministrator;
 
+    const changedFields = [
+      'name',
+      'routingCompanyId',
+      'email',
+      'cpf',
+      'isAdministrator',
+      'documentAccessMode',
+      'clientCategory',
+      'jobTitle',
+      'maritalStatus',
+      'militaryDocumentStatus',
+      'dependents',
+      'departments',
+      'permissionCodes',
+    ].filter((field) => input[field as keyof UpdateUserInput] !== undefined);
     const persistenceInput = {
+      command: {
+        commandId: input.commandId,
+        expectedVersion: input.expectedVersion,
+        requestFingerprint,
+        actorUserId: actorId,
+        changedFields,
+      },
+      mutationSnapshot: {
+        actorUserId: actor.user.props.id,
+        actorUpdatedAt: actor.user.props.updatedAt,
+        actorVersion: actor.user.props.version,
+        actorAuthorizationFingerprint: userMutationAuthorizationFingerprint({
+          ...actor.user.props,
+          companyIsActive: actor.companyIsActive,
+        }),
+        targetUpdatedAt: target.user.props.updatedAt,
+      },
       routingCompanyId:
         finalRoutingCompanyId === target.user.props.routingCompanyId
           ? undefined
@@ -270,8 +414,10 @@ export class UpdateUserUseCase {
       maritalStatus: input.maritalStatus,
       militaryDocumentStatus: input.militaryDocumentStatus,
       dependents: input.dependents,
-      departments: finalIsAdministrator ? [] : departments,
-      permissionCodes: finalIsAdministrator ? [] : permissionCodes,
+      departments:
+        finalIsAdministrator || documentPortalOnly ? [] : departments,
+      permissionCodes:
+        finalIsAdministrator || documentPortalOnly ? [] : permissionCodes,
     };
     const updated =
       isActiveAdministrator && !finalIsAdministrator
@@ -288,34 +434,6 @@ export class UpdateUserUseCase {
     if (!updated) {
       throw conflict('A empresa deve manter ao menos um administrador ativo.');
     }
-    if (this.auditLogs) {
-      await this.auditLogs.create({
-        companyId: input.companyId,
-        actorUserId: input.actorUserId,
-        action: 'USER_UPDATED',
-        targetType: 'user',
-        targetId: input.userId,
-        metadata: {
-          changedFields: [
-            'name',
-            'routingCompanyId',
-            'email',
-            'cpf',
-            'isAdministrator',
-            'documentAccessMode',
-            'clientCategory',
-            'jobTitle',
-            'maritalStatus',
-            'militaryDocumentStatus',
-            'dependents',
-            'departments',
-            'permissionCodes',
-          ].filter(
-            (field) => input[field as keyof UpdateUserInput] !== undefined,
-          ),
-        },
-      });
-    }
-    return presentUser(updated);
+    return { ...presentUser(updated.record), idempotent: updated.idempotent };
   }
 }

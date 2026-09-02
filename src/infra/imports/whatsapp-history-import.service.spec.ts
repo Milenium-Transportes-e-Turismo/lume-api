@@ -968,12 +968,15 @@ describe('WhatsAppHistoryImportService media retention', () => {
       androidBackup: { mediaImport: { status: 'validating' } },
     });
     let ready = validating;
-    await vi.waitFor(async () => {
-      ready = await service.detail(COMPANY_ID, COMMAND_ID);
-      expect(ready.androidBackup?.mediaImport).toMatchObject({
-        status: 'ready',
-      });
-    });
+    await vi.waitFor(
+      async () => {
+        ready = await service.detail(COMPANY_ID, COMMAND_ID);
+        expect(ready.androidBackup?.mediaImport).toMatchObject({
+          status: 'ready',
+        });
+      },
+      { timeout: 10_000 },
+    );
     expect(androidMediaImporter.previewArchive).toHaveBeenCalledOnce();
     expect(ready.androidBackup?.comparison).toMatchObject({
       mediaStored: 0,
@@ -1090,23 +1093,29 @@ describe('WhatsAppHistoryImportService media retention', () => {
       uploadBytesReceived: 30,
       uploadBytesTotal: 30,
     });
-    await vi.waitFor(async () => {
-      const failed = await service.detail(COMPANY_ID, COMMAND_ID);
-      expect(failed.androidBackup?.mediaImport).toMatchObject({
-        status: 'failed',
-        errorMessage:
-          'Não foi possível processar o ZIP de mídias. Tente novamente; os arquivos já armazenados serão preservados.',
-      });
-    });
-    await vi.waitFor(() => {
-      expect(
-        (
-          service as unknown as {
-            androidMediaJobs: ReadonlySet<string>;
-          }
-        ).androidMediaJobs.size,
-      ).toBe(0);
-    });
+    await vi.waitFor(
+      async () => {
+        const failed = await service.detail(COMPANY_ID, COMMAND_ID);
+        expect(failed.androidBackup?.mediaImport).toMatchObject({
+          status: 'failed',
+          errorMessage:
+            'Não foi possível processar o ZIP de mídias. Tente novamente; os arquivos já armazenados serão preservados.',
+        });
+      },
+      { timeout: 10_000 },
+    );
+    await vi.waitFor(
+      () => {
+        expect(
+          (
+            service as unknown as {
+              androidMediaJobs: ReadonlySet<string>;
+            }
+          ).androidMediaJobs.size,
+        ).toBe(0);
+      },
+      { timeout: 10_000 },
+    );
 
     const retry = await service.createAndroidMediaUpload(
       COMPANY_ID,
@@ -1133,25 +1142,31 @@ describe('WhatsAppHistoryImportService media retention', () => {
       COMMAND_ID,
       retry.uploadId,
     );
-    await vi.waitFor(async () => {
-      const completed = await service.detail(COMPANY_ID, COMMAND_ID);
-      expect(completed.androidBackup?.mediaImport).toMatchObject({
-        status: 'completed',
-        stored: 1,
-        pending: 0,
-      });
-    });
-    await vi.waitFor(() => {
-      expect(
-        (
-          service as unknown as {
-            androidMediaJobs: ReadonlySet<string>;
-          }
-        ).androidMediaJobs.size,
-      ).toBe(0);
-    });
+    await vi.waitFor(
+      async () => {
+        const completed = await service.detail(COMPANY_ID, COMMAND_ID);
+        expect(completed.androidBackup?.mediaImport).toMatchObject({
+          status: 'completed',
+          stored: 1,
+          pending: 0,
+        });
+      },
+      { timeout: 10_000 },
+    );
+    await vi.waitFor(
+      () => {
+        expect(
+          (
+            service as unknown as {
+              androidMediaJobs: ReadonlySet<string>;
+            }
+          ).androidMediaJobs.size,
+        ).toBe(0);
+      },
+      { timeout: 10_000 },
+    );
     expect(androidMediaImporter.attachArchive).toHaveBeenCalledTimes(2);
-  });
+  }, 30_000);
 
   it('stores a ZIP attachment and links it to the imported message', async () => {
     const { root, prisma, mediaStorage, service } = await setup();

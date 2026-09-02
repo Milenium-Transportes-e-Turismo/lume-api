@@ -24,8 +24,8 @@ Legenda:
 ## Preparação transversal
 
 - [x] Usar exclusivamente a especificação completa recebida em 29/08/2026.
-- [x] Confirmar `staging` em `lume-tenant-api`.
-- [x] Confirmar `staging` em `lume-tenant-web`.
+- [x] Confirmar `develop` em `lume-tenant-api`.
+- [x] Confirmar `develop` em `lume-tenant-web`.
 - [x] Confirmar working trees limpas antes das alterações.
 - [x] Ler os `AGENTS.md` dos dois projetos.
 - [x] Inspecionar a página de referência do Figma e o nó do painel WhatsApp.

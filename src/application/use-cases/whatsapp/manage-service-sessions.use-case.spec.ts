@@ -74,9 +74,7 @@ class RecordingRepository extends ServiceSessionManagementRepository {
 
   listAssignmentTargets = vi.fn().mockResolvedValue([]);
 
-  async getAccessible() {
-    return this.current;
-  }
+  getAccessible = vi.fn(async () => this.current);
 
   async mutate(input: MutateManagedServiceSessionInput) {
     this.mutations.push(input);
@@ -191,6 +189,26 @@ describe('ManageServiceSessionUseCase', () => {
     ).rejects.toMatchObject({ code: 'CONFLICT' });
     expect(repository.mutations).toHaveLength(0);
   });
+
+  it('propaga escopo tenant-wide nulo para leitura e mutação', async () => {
+    const repository = new RecordingRepository();
+    const useCase = new ManageServiceSessionUseCase(repository);
+
+    await useCase.assume({
+      ...actor,
+      accessibleDepartments: null,
+      sessionId: 'session-1',
+      commandId: 'command-tenant-wide',
+      expectedVersion: 2,
+    });
+
+    expect(repository.getAccessible).toHaveBeenCalledWith({
+      companyId: 'company-1',
+      sessionId: 'session-1',
+      accessibleDepartments: null,
+    });
+    expect(repository.mutations[0]?.accessibleDepartments).toBeNull();
+  });
 });
 
 describe('QueryServiceSessionsUseCase', () => {
@@ -217,5 +235,22 @@ describe('QueryServiceSessionsUseCase', () => {
     expect(repository.listAssignmentTargets).toHaveBeenCalledWith({
       companyId: 'company-1',
     });
+  });
+
+  it('preserva null como escopo tenant-wide na listagem', async () => {
+    const repository = new RecordingRepository();
+    const useCase = new QueryServiceSessionsUseCase(repository);
+
+    await useCase.list(
+      { ...actor, accessibleDepartments: null },
+      { page: 1, pageSize: 20 },
+    );
+
+    expect(repository.list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        companyId: 'company-1',
+        accessibleDepartments: null,
+      }),
+    );
   });
 });

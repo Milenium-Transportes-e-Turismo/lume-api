@@ -43,6 +43,12 @@ export interface RoutingCompanyProps {
   status: RoutingCompanyStatus;
   avicExternalId: string | null;
   avicLastSyncedAt: Date | null;
+  isTemporary: boolean;
+  temporaryReason: string | null;
+  regularizationDueAt: Date | null;
+  regularizedAt: Date | null;
+  regularizationRequirements: string[];
+  temporaryResponsibleUserId: string | null;
   version: number;
   createdByUserId: string | null;
   createdAt: Date;
@@ -187,6 +193,12 @@ export function createRoutingCompany(
     ...normalized,
     legalName: normalized.legalName ?? displayName,
     avicLastSyncedAt: null,
+    isTemporary: false,
+    temporaryReason: null,
+    regularizationDueAt: null,
+    regularizedAt: null,
+    regularizationRequirements: [],
+    temporaryResponsibleUserId: null,
     version: 1,
     createdByUserId: input.actorUserId ?? null,
     createdAt: now,

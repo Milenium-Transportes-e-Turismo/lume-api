@@ -17,12 +17,14 @@ describe('BootstrapTenantUseCase', () => {
   it('publishes all assignable departments with PT-BR labels', () => {
     expect(ASSIGNABLE_DEPARTMENTS).toEqual([
       'client-company',
+      'human-resources',
       'commercial',
       'purchasing',
       'controllership',
       'personnel-department',
       'financial',
       'management',
+      'directorate',
       'maintenance',
       'monitoring',
       'operations',
@@ -34,12 +36,14 @@ describe('BootstrapTenantUseCase', () => {
       ),
     ).toEqual([
       'Empresa cliente',
+      'Recursos Humanos',
       'Comercial',
       'Compras',
       'Controladoria',
       'Departamento Pessoal',
       'Financeiro',
       'Gerência',
+      'Diretoria',
       'Manutenção',
       'Monitoramento',
       'Operacional',
@@ -57,17 +61,19 @@ describe('BootstrapTenantUseCase', () => {
     ).execute(companyFixture);
 
     expect(result.tenant.id).toBe(license.status().payload.tenantId);
-    expect(store.tenantDepartments).toHaveLength(11);
+    expect(store.tenantDepartments).toHaveLength(13);
     expect(
       store.tenantDepartments.map((department) => department.name),
     ).toEqual([
       'Empresa cliente',
+      'Recursos Humanos',
       'Comercial',
       'Compras',
       'Controladoria',
       'Departamento Pessoal',
       'Financeiro',
       'Gerência',
+      'Diretoria',
       'Manutenção',
       'Monitoramento',
       'Operacional',

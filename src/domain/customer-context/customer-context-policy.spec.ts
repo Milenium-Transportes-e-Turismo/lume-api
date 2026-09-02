@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { CustomerContextSummary } from '../../application/contracts/customer-context.repository';
+import type { CustomerContextSummary } from './customer-context';
 import {
   buildBoundedCustomerModelContext,
   CUSTOMER_CONTEXT_MAX_BYTES,

@@ -37,6 +37,8 @@ const actorsByTransition: Readonly<
   'proposal-response-received': ['webhook', 'system'],
   'return-to-main-menu': ['system'],
   'take-over': ['user'],
+  'request-transfer': ['user'],
+  'accept-transfer': ['user'],
   'return-to-bot': ['user'],
   forward: ['user', 'system'],
   'change-department': ['user'],
@@ -62,6 +64,14 @@ export function assertTransitionActor(
 function assertOpen(current: ConversationSnapshot): void {
   if (current.conversationState === 'closed') {
     throw validationError('Uma conversa encerrada não aceita esta transição.');
+  }
+}
+
+function assertInternalServiceDepartment(department: Department): void {
+  if (department === 'client-company') {
+    throw validationError(
+      'Empresa cliente não pode ser o departamento responsável por um atendimento interno.',
+    );
   }
 }
 
@@ -154,6 +164,7 @@ export function resolveConversationTransition(
           'Informe o departamento de destino antes de coletar os dados.',
         );
       }
+      assertInternalServiceDepartment(input.targetDepartment);
       if (
         !input.departmentOption ||
         (!/^[2-9]$/.test(input.departmentOption) &&
@@ -335,6 +346,38 @@ export function resolveConversationTransition(
         resumeFlowStep: resolveBotFlowStep(current),
       };
 
+    case 'request-transfer':
+      assertState(current, ['human-active'], name);
+      if (!input.targetDepartment) {
+        throw validationError(
+          'Informe o departamento de destino da transferência.',
+        );
+      }
+      assertInternalServiceDepartment(input.targetDepartment);
+      if (input.targetDepartment === current.department) {
+        throw validationError(
+          'O destino da transferência deve ser diferente do departamento atual.',
+        );
+      }
+      return current;
+
+    case 'accept-transfer':
+      assertState(current, ['human-active'], name);
+      if (!input.targetDepartment) {
+        throw validationError(
+          'A transferência pendente não possui departamento de destino.',
+        );
+      }
+      assertInternalServiceDepartment(input.targetDepartment);
+      return {
+        ...current,
+        department: input.targetDepartment,
+        conversationState: 'human-active',
+        flowStep: 'human-service',
+        resumeState: null,
+        resumeFlowStep: resolveBotFlowStep(current),
+      };
+
     case 'archive':
     case 'unarchive':
       return current;
@@ -356,6 +399,7 @@ export function resolveConversationTransition(
           'Informe o departamento de destino do encaminhamento.',
         );
       }
+      assertInternalServiceDepartment(input.targetDepartment);
       return {
         ...current,
         department: input.targetDepartment,
@@ -370,6 +414,7 @@ export function resolveConversationTransition(
       if (!input.targetDepartment) {
         throw validationError('Informe o novo departamento da conversa.');
       }
+      assertInternalServiceDepartment(input.targetDepartment);
       return {
         ...current,
         department: input.targetDepartment,

@@ -11,8 +11,12 @@ describe('ListPermissionsUseCase', () => {
     expect(catalog.permissions).not.toContain('users:delete');
     expect(catalog.permissions).not.toContain('dashboard:delete');
     expect(catalog.actionsByResource.dashboard).toEqual(['view']);
-    expect(catalog.departments).toHaveLength(11);
+    expect(catalog.departments).toHaveLength(13);
     expect(catalog.permissions).toContain('route-planner:calculate');
+    expect(catalog.permissions).toContain('tenant:manage');
+    expect(catalog.permissions).toContain('whatsapp-conversations:attend');
+    expect(catalog.permissions).toContain('service-confirmations:approve');
+    expect(catalog.permissions).toContain('routing-contracts:view');
     expect(catalog.departments).toContainEqual({
       code: 'client-company',
       name: 'Empresa cliente',
@@ -21,5 +25,34 @@ describe('ListPermissionsUseCase', () => {
       code: 'information-technology',
       name: 'Tecnologia da Informação (TI)',
     });
+    expect(catalog.departments).toContainEqual({
+      code: 'human-resources',
+      name: 'Recursos Humanos',
+    });
+    expect(catalog.departments).toContainEqual({
+      code: 'directorate',
+      name: 'Diretoria',
+    });
+    for (const department of catalog.departments) {
+      if (department.code === 'client-company') {
+        expect(catalog.permissionsByDepartment[department.code]).not.toContain(
+          'whatsapp-conversations:attend',
+        );
+      } else {
+        expect(catalog.permissionsByDepartment[department.code]).toContain(
+          'whatsapp-conversations:attend',
+        );
+      }
+    }
+    expect(catalog.permissionsByDepartment.management).toEqual(
+      expect.arrayContaining([
+        'clients:view',
+        'clients:create',
+        'clients:update',
+      ]),
+    );
+    expect(catalog.permissionsByDepartment.management).not.toContain(
+      'clients:manage',
+    );
   });
 });

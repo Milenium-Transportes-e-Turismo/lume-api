@@ -1,8 +1,12 @@
 # Gestão documental
 
-O módulo é genérico e atende admissão, atualização, renovação, regularização,
-desligamento e outras solicitações. A solicitação é vinculada ao tenant e ao
-`User` titular; não existe uma segunda identidade para candidato ou funcionário.
+O módulo atende admissão, atualização, renovação, regularização, desligamento e
+outras solicitações. No modelo legado executável, a solicitação ainda é
+vinculada ao tenant e a um `User`. O modelo alvo aprovado usa um Titular
+Principal genérico — Pessoa, Empresa, Vínculo de Trabalho, Candidato, veículo,
+contrato, orçamento ou viagem — sem criar usuários fictícios. Até a migration e
+as mutações de titularidade serem ativadas, documentos legados ambíguos
+permanecem não classificados e disponíveis para revisão humana.
 
 ## Segurança e acesso
 
@@ -15,6 +19,43 @@ desligamento e outras solicitações. A solicitação é vinculada ao tenant e a
   validados antes da persistência;
 - logs guardam metadados mínimos e hashes, nunca os bytes integrais.
 
+RH e Departamento Pessoal são departamentos separados com o mesmo teto
+documental. Essa equivalência de acesso não define a responsabilidade: o
+responsável deve ser escolhido pela regra de cada tipo documental. O runtime
+ainda grava um único departamento na solicitação, com padrão de Departamento
+Pessoal, e não publica uma matriz de responsabilidade por tipo; essa continua
+sendo uma lacuna autoritativa.
+
+### Pré-admissão sem conta de usuário
+
+A primeira fatia do Acesso de Pré-admissão é ligada diretamente a uma Pessoa
+ativa do Cadastro Principal. Ela não cria `User`, não concede login e não
+reutiliza `routingCompanyId` como identidade. Somente um integrante de RH ou do
+Departamento Pessoal que também possua `documents:manage` pode criar, renovar
+ou revogar o acesso.
+
+O acesso vence em 30 dias por padrão. A renovação rotaciona o token e inicia
+outro prazo de 30 dias; a revogação bloqueia o token imediatamente. Criação,
+renovação e revogação exigem `commandId` e `expectedVersion`, são idempotentes e
+registram histórico e `TenantAuditLog` na mesma transação. A criação usa
+`expectedVersion=0`.
+
+O token bruto é devolvido somente pela criação ou renovação. O PostgreSQL guarda
+apenas seu hash; uma chave derivada do segredo de acesso do servidor permite
+reconstruir a mesma resposta durante um retry idempotente sem persistir o token.
+O Tenant Web deve manter o token no fragmento local do link e enviá-lo no corpo
+de `POST /api/v1/pre-admission/public/resolve`, nunca em query string. A resposta
+pública contém apenas nome da pessoa, validade e snapshots dos tipos
+documentais solicitados. Nenhum arquivo pode ser lido publicamente por ID.
+
+Esta fatia ainda **não recebe arquivos**. O fluxo documental legado exige
+`subjectUserId`, `submittedByUserId` e `uploadedByUserId`; ligar o upload agora
+exigiria fabricar um usuário ou criar uma segunda fonte de arquivos, ambos
+proibidos. O endpoint público informa `uploadAvailable=false`. A próxima fatia
+deve adaptar o Titular Principal genérico ao `DocumentManagementUseCase` e ao
+armazenamento já existente; até lá, o Web não deve apresentar a coleta como
+concluída.
+
 Na administração de usuários, somente contas com `isAdministrator=true`
 podem editar departamentos, permissões, estado ou recuperação de acesso. RH e
 Departamento Pessoal possuem apenas `users:view` e `users:create`; ao criarem
@@ -24,6 +65,11 @@ RH e DP podem manter o perfil documental (classificação Administrativo, Geral 
 Motorista, estado civil, decisão sobre documento militar e dependentes), mas essa
 autorização não permite alterar os
 demais acessos.
+
+O recálculo documental disparado por `PATCH /users/:id` usa o mesmo `commandId`
+da atualização. O recibo fica em `UserUpdateHistory`; por isso, repetir o PATCH
+após uma falha intermediária conclui ou reapresenta a mesma sincronização sem
+duplicar solicitação, incremento de versão ou auditoria.
 
 ## Fluxo
 
@@ -106,6 +152,14 @@ Prefixo `/api/v1/document-management`:
 - `DELETE /submissions/:id` (remoção lógica e auditada);
 - `POST /submissions/:id/reviews`;
 
+Prefixo `/api/v1/pre-admission`:
+
+- `POST /accesses` cria o acesso e devolve o token bruto;
+- `POST /accesses/:id/renew` rotaciona o token e renova por 30 dias;
+- `POST /accesses/:id/revoke` revoga o token imediatamente;
+- `POST /public/resolve` valida o token opaco sem autenticação de `User` e
+  apresenta somente seu escopo documental.
+
 O endpoint combinado é o contrato preferencial do Tenant Web. O `commandId`
 mantém idempotência e um conjunto de arquivos idêntico já aguardando revisão é
 reutilizado sem uma nova chamada ao agente. Um arquivo anteriormente recusado
@@ -135,7 +189,11 @@ JPEG e PNG são transmitidos sem duplicação pelo Tenant Web; a quantidade e a
 estrutura exigidas para cada tipo documental continuam validadas.
 
 Criação, envio e revisão recebem `commandId`. Atualizações concorrentes de itens
-usam a versão persistida.
+usam a versão persistida. Mutações de um dossiê bloqueiam, em ordem estável,
+itens, envios e solicitação; depois do bloqueio, o estado é relido antes de
+validar, remover, revisar ou alterar dados extraídos. A sincronização acionada
+pelo cadastro usa transação serializável com retentativa limitada apenas para
+conflitos transitórios do PostgreSQL e reapresenta o recibo do mesmo comando.
 
 ## Operação
 

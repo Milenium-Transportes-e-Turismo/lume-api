@@ -13,7 +13,9 @@ import {
 } from './dto/service-session.dto';
 import { ServiceSessionsController } from './service-sessions.controller';
 
-function principal(): AuthenticatedPrincipal {
+function principal(
+  patch: Partial<AuthenticatedPrincipal> = {},
+): AuthenticatedPrincipal {
   return {
     companyId: '00000000-0000-4000-8000-000000000010',
     tokenVersion: 1,
@@ -25,6 +27,7 @@ function principal(): AuthenticatedPrincipal {
     cpf: null,
     type: 'employee',
     isAdministrator: false,
+    documentAccessMode: 'standard',
     jobTitle: null,
     maritalStatus: null,
     militaryDocumentStatus: 'not-applicable',
@@ -41,6 +44,8 @@ function principal(): AuthenticatedPrincipal {
     hasProfilePicture: false,
     createdAt: '2026-08-29T12:00:00.000Z',
     updatedAt: '2026-08-29T12:00:00.000Z',
+    version: 1,
+    ...patch,
   };
 }
 
@@ -93,6 +98,86 @@ describe('ServiceSessionsController', () => {
       }),
       expect.objectContaining({ search: 'cliente' }),
     );
+  });
+
+  it('concede escopo tenant-wide à Diretoria com tenant:manage', async () => {
+    const list = vi.fn().mockResolvedValue({ items: [], total: 0 });
+    const controller = new ServiceSessionsController(
+      { list } as unknown as QueryServiceSessionsUseCase,
+      {} as ManageServiceSessionUseCase,
+    );
+
+    await controller.list(
+      principal({
+        departments: ['directorate'],
+        permissionCodes: ['tenant:manage', 'service:view'],
+        permissions: ['tenant:manage', 'service:view'],
+      }),
+      new ServiceSessionListQueryDto(),
+    );
+
+    expect(list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        companyId: '00000000-0000-4000-8000-000000000010',
+        accessibleDepartments: null,
+      }),
+      expect.any(ServiceSessionListQueryDto),
+    );
+  });
+
+  it('concede escopo tenant-wide ao administrador com grant operacional', async () => {
+    const list = vi.fn().mockResolvedValue({ items: [], total: 0 });
+    const controller = new ServiceSessionsController(
+      { list } as unknown as QueryServiceSessionsUseCase,
+      {} as ManageServiceSessionUseCase,
+    );
+
+    await controller.list(
+      principal({
+        isAdministrator: true,
+        departments: [],
+        permissionCodes: ['service:view'],
+        permissions: ['service:view'],
+      }),
+      new ServiceSessionListQueryDto(),
+    );
+
+    expect(list).toHaveBeenCalledWith(
+      expect.objectContaining({ accessibleDepartments: null }),
+      expect.any(ServiceSessionListQueryDto),
+    );
+  });
+
+  it.each([
+    {
+      label: 'modo de acesso cliente',
+      patch: {
+        type: 'client' as const,
+        documentAccessMode: 'client' as const,
+        departments: [] as AuthenticatedPrincipal['departments'],
+      },
+    },
+    {
+      label: 'departamento client-company',
+      patch: {
+        departments: [
+          'client-company',
+        ] as AuthenticatedPrincipal['departments'],
+      },
+    },
+  ])('bloqueia $label nas filas internas', ({ patch }) => {
+    const list = vi.fn();
+    const controller = new ServiceSessionsController(
+      { list } as unknown as QueryServiceSessionsUseCase,
+      {} as ManageServiceSessionUseCase,
+    );
+
+    expect(() =>
+      controller.list(principal(patch), new ServiceSessionListQueryDto()),
+    ).toThrowError(
+      'Perfis de empresa cliente não podem acessar filas internas de atendimento.',
+    );
+    expect(list).not.toHaveBeenCalled();
   });
 
   it('sempre assume para o próprio usuário autenticado', async () => {

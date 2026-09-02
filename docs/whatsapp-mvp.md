@@ -37,6 +37,15 @@ isoladas para análise. Um evento nunca é encaminhado para dois consumidores.
 somente a sessão humana, remove a atribuição e volta ao menu inicial. A conversa
 canônica e todo o histórico são preservados para o próximo contato.
 
+O responsável é a referência corrente, não uma trava exclusiva. Qualquer
+usuário interno com `whatsapp-conversations:attend` pode atuar, substituir a
+referência ou devolver a conversa ao bot; `client-company` é excluído. A
+transferência entre departamentos é solicitada com destino e motivo. Até o
+aceite, o atendimento permanece ativo no departamento de origem, enquanto a
+pendência aparece para o destino. O aceite autorizado altera departamento e
+Responsável Atual na mesma transação. Todos os comandos exigem versão esperada
+e preservam ator, responsável anterior e resultado no histórico.
+
 ## Orçamentos e anexos
 
 O envio de proposta em PDF assume o remetente como atendente, cria mensagem

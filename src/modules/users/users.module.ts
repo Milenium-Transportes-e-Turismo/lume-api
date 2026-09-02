@@ -60,12 +60,9 @@ import { RoutingRepository } from '../../application/contracts/routing.repositor
     },
     {
       provide: UpdateUserUseCase,
-      useFactory: (
-        users: UsersRepository,
-        auditLogs: TenantAuditLogsRepository,
-        routing: RoutingRepository,
-      ) => new UpdateUserUseCase(users, auditLogs, routing),
-      inject: [UsersRepository, TenantAuditLogsRepository, RoutingRepository],
+      useFactory: (users: UsersRepository, routing: RoutingRepository) =>
+        new UpdateUserUseCase(users, routing),
+      inject: [UsersRepository, RoutingRepository],
     },
     {
       provide: UpdateUserStatusUseCase,

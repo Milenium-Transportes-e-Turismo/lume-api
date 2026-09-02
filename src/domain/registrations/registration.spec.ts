@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  assertRegistrationAllowsCommercialCommitment,
+  assertTemporaryRegistrationCanBeRegularized,
+  canAuthorizeTemporaryRegistration,
   normalizeRegistrationInput,
   normalizeRegistrationPromotionPayload,
 } from './registration';
@@ -248,5 +251,178 @@ describe('normalizeRegistrationInput', () => {
         registration.phones.map((phone) => phone.normalizedValue),
       ),
     ).toEqual([['5534999990000'], ['5534999990000']]);
+  });
+
+  it('creates a temporary registration with a seven-day default deadline', () => {
+    const now = new Date('2026-08-30T12:00:00.000Z');
+    const registration = normalizeRegistrationInput(
+      {
+        type: 'pf',
+        firstName: 'Motorista substituto',
+        roleCodes: ['driver'],
+        emails: [{ address: 'substituto@example.com' }],
+        isTemporary: true,
+        temporaryReason: 'Substituição emergencial na operação de hoje.',
+        temporaryResponsibleUserId: '00000000-0000-4000-8000-000000000001',
+      },
+      '44a420ee-e888-4e08-ae22-cbd7d3c31e4d',
+      now,
+    );
+
+    expect(registration).toMatchObject({
+      isTemporary: true,
+      temporaryReason: 'Substituição emergencial na operação de hoje.',
+      regularizationRequirements: [
+        'cpf-before-regularization',
+        'phone-before-regularization',
+        'driver-license-before-assignment',
+      ],
+      temporaryResponsibleUserId: '00000000-0000-4000-8000-000000000001',
+    });
+    expect(registration.regularizationDueAt?.toISOString()).toBe(
+      '2026-09-06T12:00:00.000Z',
+    );
+  });
+
+  it('requires contact and reason for temporary registrations', () => {
+    expect(() =>
+      normalizeRegistrationInput({
+        type: 'pj',
+        legalName: 'Fornecedor emergencial',
+        roleCodes: ['supplier'],
+        isTemporary: true,
+        temporaryReason: 'Compra urgente',
+        temporaryResponsibleUserId: '00000000-0000-4000-8000-000000000001',
+      }),
+    ).toThrow('pelo menos um telefone ou e-mail');
+
+    expect(() =>
+      normalizeRegistrationInput({
+        type: 'pf',
+        firstName: 'Passageiro',
+        roleCodes: ['passenger'],
+        phones: [{ number: '(34) 99999-0000' }],
+        isTemporary: true,
+        temporaryResponsibleUserId: '00000000-0000-4000-8000-000000000001',
+      }),
+    ).toThrow('motivo do Cadastro temporário');
+  });
+
+  it('does not allow a temporary deadline beyond seven days', () => {
+    expect(() =>
+      normalizeRegistrationInput(
+        {
+          type: 'pf',
+          firstName: 'Passageiro',
+          roleCodes: ['passenger'],
+          phones: [{ number: '(34) 99999-0000' }],
+          isTemporary: true,
+          temporaryReason: 'Embarque emergencial',
+          temporaryResponsibleUserId: '00000000-0000-4000-8000-000000000001',
+          regularizationDueAt: '2026-09-07T12:00:00.000Z',
+        },
+        '44a420ee-e888-4e08-ae22-cbd7d3c31e4d',
+        new Date('2026-08-30T12:00:00.000Z'),
+      ),
+    ).toThrow('em até 7 dias');
+  });
+
+  it('requires an explicit regularization owner in the domain input', () => {
+    expect(() =>
+      normalizeRegistrationInput({
+        type: 'pf',
+        firstName: 'Pessoa temporária',
+        roleCodes: ['client'],
+        phones: [{ number: '(34) 99999-0000' }],
+        isTemporary: true,
+        temporaryReason: 'Atendimento emergencial',
+      }),
+    ).toThrow('responsável pela regularização');
+  });
+});
+
+describe('canAuthorizeTemporaryRegistration', () => {
+  it('accepts administrators, management or the explicit management capability', () => {
+    expect(
+      canAuthorizeTemporaryRegistration({
+        isAdministrator: true,
+        departments: [],
+        permissions: [],
+      }),
+    ).toBe(true);
+    expect(
+      canAuthorizeTemporaryRegistration({
+        isAdministrator: false,
+        departments: ['management'],
+        permissions: [],
+      }),
+    ).toBe(true);
+    expect(
+      canAuthorizeTemporaryRegistration({
+        isAdministrator: false,
+        departments: ['commercial'],
+        permissions: ['clients:manage'],
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a regular registration creator without management authority', () => {
+    expect(
+      canAuthorizeTemporaryRegistration({
+        isAdministrator: false,
+        departments: ['commercial'],
+        permissions: ['clients:create'],
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('assertRegistrationAllowsCommercialCommitment', () => {
+  it('blocks registrations that still lack a real tax identifier', () => {
+    expect(() =>
+      assertRegistrationAllowsCommercialCommitment({
+        isTemporary: true,
+        regularizationRequirements: ['tax-id-before-commercial-commitment'],
+        cpf: null,
+        cnpj: null,
+      }),
+    ).toThrow('Regularize o CPF/CNPJ');
+    expect(() =>
+      assertRegistrationAllowsCommercialCommitment({
+        isTemporary: true,
+        regularizationRequirements: ['driver-license-before-assignment'],
+        cpf: '52998224725',
+        cnpj: null,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertRegistrationAllowsCommercialCommitment({
+        isTemporary: false,
+        regularizationRequirements: [],
+        cpf: null,
+        cnpj: null,
+      }),
+    ).toThrow('Regularize o CPF/CNPJ');
+  });
+});
+
+describe('assertTemporaryRegistrationCanBeRegularized', () => {
+  it('requires the identity minimum before removing the temporary flag', () => {
+    expect(() =>
+      assertTemporaryRegistrationCanBeRegularized({
+        type: 'pf',
+        cpf: null,
+        cnpj: null,
+        phones: [{}],
+      }),
+    ).toThrow('Informe o CPF');
+    expect(() =>
+      assertTemporaryRegistrationCanBeRegularized({
+        type: 'pf',
+        cpf: '52998224725',
+        cnpj: null,
+        phones: [{}],
+      }),
+    ).not.toThrow();
   });
 });

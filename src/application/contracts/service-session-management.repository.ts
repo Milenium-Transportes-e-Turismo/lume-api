@@ -9,6 +9,9 @@ import type {
   ServiceSessionStatus,
 } from '../../domain/whatsapp/service-session';
 
+export type ServiceSessionDepartmentScope =
+  readonly PresentedUserDepartment[] | null;
+
 export interface ManagedServiceSession extends ServiceSessionSnapshot {
   readonly id: string;
   readonly companyId: string;
@@ -43,7 +46,7 @@ export interface ManagedServiceSession extends ServiceSessionSnapshot {
 
 export interface ListManagedServiceSessionsInput {
   readonly companyId: string;
-  readonly accessibleDepartments: readonly PresentedUserDepartment[];
+  readonly accessibleDepartments: ServiceSessionDepartmentScope;
   readonly page: number;
   readonly pageSize: number;
   readonly status?: ServiceSessionStatus;
@@ -83,7 +86,7 @@ export interface MutateManagedServiceSessionInput {
   readonly actorUserId: string;
   readonly commandId: string;
   readonly expectedVersion: number;
-  readonly accessibleDepartments: readonly PresentedUserDepartment[];
+  readonly accessibleDepartments: ServiceSessionDepartmentScope;
   readonly eventName:
     | 'assume'
     | 'return-to-queue'
@@ -107,7 +110,7 @@ export abstract class ServiceSessionManagementRepository {
   abstract getAccessible(input: {
     readonly companyId: string;
     readonly sessionId: string;
-    readonly accessibleDepartments: readonly PresentedUserDepartment[];
+    readonly accessibleDepartments: ServiceSessionDepartmentScope;
   }): Promise<ManagedServiceSession | null>;
 
   abstract listAssignmentTargets(input: {

@@ -10,6 +10,7 @@ import {
 import { WhatsAppRepository } from '../../application/contracts/whatsapp.repository';
 import { WhatsAppChannelManagementRepository } from '../../application/contracts/whatsapp-channel-management.repository';
 import { ServiceSessionManagementRepository } from '../../application/contracts/service-session-management.repository';
+import { CommercialQuoteRepository } from '../../application/contracts/commercial-quote.repository';
 import { DataExchangeRepository } from '../../application/contracts/data-exchange.repository';
 import { PrismaService } from './prisma/prisma.service';
 import { PrismaRefreshTokensRepository } from './repositories/prisma-refresh-tokens.repository';
@@ -23,6 +24,12 @@ import { PrismaServiceSessionManagementRepository } from './repositories/prisma-
 import { PrismaDataExchangeRepository } from './repositories/prisma-data-exchange.repository';
 import { RoutingRepository } from '../../application/contracts/routing.repository';
 import { PrismaRoutingRepository } from './repositories/prisma-routing.repository';
+import { RegistrationIdentityCandidateReader } from '../../application/contracts/registration-identity-candidate.reader';
+import { PrismaRegistrationIdentityCandidateReader } from './repositories/prisma-registration-identity-candidate.reader';
+import { PreAdmissionAccessRepository } from '../../application/contracts/pre-admission-access.repository';
+import { PrismaPreAdmissionAccessRepository } from './repositories/prisma-pre-admission-access.repository';
+import { ConfirmedServiceRepository } from '../../application/contracts/confirmed-service.repository';
+import { PrismaConfirmedServiceRepository } from './repositories/prisma-confirmed-service.repository';
 
 @Global()
 @Module({
@@ -45,7 +52,12 @@ import { PrismaRoutingRepository } from './repositories/prisma-routing.repositor
       provide: TenantAuditLogsRepository,
       useClass: PrismaTenantAuditLogsRepository,
     },
-    { provide: WhatsAppRepository, useClass: PrismaWhatsAppRepository },
+    PrismaWhatsAppRepository,
+    { provide: WhatsAppRepository, useExisting: PrismaWhatsAppRepository },
+    {
+      provide: CommercialQuoteRepository,
+      useExisting: PrismaWhatsAppRepository,
+    },
     {
       provide: WhatsAppChannelManagementRepository,
       useClass: PrismaWhatsAppChannelManagementRepository,
@@ -56,6 +68,18 @@ import { PrismaRoutingRepository } from './repositories/prisma-routing.repositor
     },
     { provide: DataExchangeRepository, useClass: PrismaDataExchangeRepository },
     { provide: RoutingRepository, useClass: PrismaRoutingRepository },
+    {
+      provide: RegistrationIdentityCandidateReader,
+      useClass: PrismaRegistrationIdentityCandidateReader,
+    },
+    {
+      provide: PreAdmissionAccessRepository,
+      useClass: PrismaPreAdmissionAccessRepository,
+    },
+    {
+      provide: ConfirmedServiceRepository,
+      useClass: PrismaConfirmedServiceRepository,
+    },
   ],
   exports: [
     PrismaService,
@@ -65,10 +89,14 @@ import { PrismaRoutingRepository } from './repositories/prisma-routing.repositor
     PasswordChangeChallengesRepository,
     TenantAuditLogsRepository,
     WhatsAppRepository,
+    CommercialQuoteRepository,
     WhatsAppChannelManagementRepository,
     ServiceSessionManagementRepository,
     DataExchangeRepository,
     RoutingRepository,
+    RegistrationIdentityCandidateReader,
+    PreAdmissionAccessRepository,
+    ConfirmedServiceRepository,
   ],
 })
 export class DatabaseModule {}

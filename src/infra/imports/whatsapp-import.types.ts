@@ -1,3 +1,8 @@
+import {
+  INTERNAL_DEPARTMENTS,
+  type InternalDepartment,
+} from '../../domain/access/access.constants';
+
 export const WHATSAPP_IMPORT_TABLES = {
   conversations: 'AtendimentosImportacao',
   messages: 'MensagensImportacao',
@@ -73,19 +78,9 @@ export const DOCUMENT_HEADERS = [
   'validation_message',
 ] as const;
 
-export const IMPORT_DEPARTMENT_CODES = [
-  'commercial',
-  'purchasing',
-  'controlling',
-  'personnel-department',
-  'financial',
-  'management',
-  'maintenance',
-  'monitoring',
-  'operations',
-] as const;
+export const IMPORT_DEPARTMENT_CODES = INTERNAL_DEPARTMENTS;
 
-export type ImportDepartmentCode = (typeof IMPORT_DEPARTMENT_CODES)[number];
+export type ImportDepartmentCode = InternalDepartment;
 
 export interface ConversationImportRow {
   rowNumber: number;

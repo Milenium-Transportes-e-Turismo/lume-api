@@ -20,9 +20,8 @@ import {
 import { InterpretWhatsAppMediaUseCase } from '../../application/use-cases/whatsapp/interpret-whatsapp-media.use-case';
 import {
   CreateHumanOutboundWhatsAppUseCase,
-  EnsureWhatsAppConversationUseCase,
-  QuoteProposalUseCase,
   QueryWhatsAppUseCase,
+  StartHumanWhatsAppConversationUseCase,
   TransitionWhatsAppConversationUseCase,
 } from '../../application/use-cases/whatsapp/whatsapp.use-cases';
 import { EvolutionWebhookService } from '../../infra/integrations/evolution/evolution-webhook.service';
@@ -57,9 +56,10 @@ import { WhatsAppChannelsController } from './whatsapp-channels.controller';
 import { ServiceSessionsController } from './service-sessions.controller';
 import { WhatsAppMediaInterpretationController } from './whatsapp-media-interpretation.controller';
 import { AgentsRuntimeModule } from '../agents/agents-runtime.module';
+import { CommercialModule } from '../commercial/commercial.module';
 
 @Module({
-  imports: [AgentsRuntimeModule],
+  imports: [AgentsRuntimeModule, CommercialModule],
   controllers: [
     EvolutionWebhookController,
     WhatsAppPanelController,
@@ -175,9 +175,9 @@ import { AgentsRuntimeModule } from '../agents/agents-runtime.module';
       ],
     },
     {
-      provide: EnsureWhatsAppConversationUseCase,
+      provide: StartHumanWhatsAppConversationUseCase,
       useFactory: (repository: WhatsAppRepository) =>
-        new EnsureWhatsAppConversationUseCase(repository),
+        new StartHumanWhatsAppConversationUseCase(repository),
       inject: [WhatsAppRepository],
     },
     {
@@ -196,12 +196,6 @@ import { AgentsRuntimeModule } from '../agents/agents-runtime.module';
       provide: QueryWhatsAppUseCase,
       useFactory: (repository: WhatsAppRepository) =>
         new QueryWhatsAppUseCase(repository),
-      inject: [WhatsAppRepository],
-    },
-    {
-      provide: QuoteProposalUseCase,
-      useFactory: (repository: WhatsAppRepository) =>
-        new QuoteProposalUseCase(repository),
       inject: [WhatsAppRepository],
     },
   ],

@@ -1,5 +1,9 @@
 # Lume Tenant API
 
+O vocabulário canônico e as relações entre os contextos estão em
+[`CONTEXT-MAP.md`](CONTEXT-MAP.md). Decisões arquiteturais aprovadas ficam em
+[`docs/adr`](docs/adr).
+
 O fluxo reutilizável de checklists, uploads versionados, revisão humana e
 renovação está em [`docs/document-management.md`](docs/document-management.md).
 
@@ -125,25 +129,39 @@ o `lume-control`. A queda do computador da fornecedora não interrompe o
 cliente.
 
 A licença assinada possui validade e tolerância locais. O endpoint autenticado
-`GET /api/v1/license/status` mostra o estado sem realizar chamadas externas e
-exige simultaneamente o departamento Gerência (`management`) e a permissão
-`license:view`.
+`GET /api/v1/license/status` mostra o estado sem realizar chamadas externas. O
+Administrador da Instalação possui acesso total; os demais usuários precisam
+simultaneamente do departamento Gerência (`management`) e de `license:view`.
 
 O vínculo público de acesso é composto por um ou mais departamentos e por
 `permissionCodes` selecionadas individualmente. As permissões efetivas nunca
 ultrapassam o teto da união desses departamentos. Não existem cargos, papéis ou
 relações indiretas de autorização no domínio, no contrato HTTP ou no schema
 atual. Assim, um usuário apenas Comercial não recebe acesso administrativo, e
-um usuário apenas Gerência não recebe acesso aos fluxos comerciais.
-`isAdministrator=true` é uma autoridade explícita e separada: somente outro
-administrador pode concedê-la ou removê-la, e ela apresenta todos os
-departamentos e permissões do catálogo atual.
+um usuário apenas Gerência não recebe acesso aos fluxos comerciais. Por decisão
+explícita de produto, Gerência pode receber individualmente `clients:create` e
+`clients:update`, além de `clients:view`, para consultar, criar e editar
+Cadastros normais e temporários. Isso não concede `clients:manage`, histórico
+ou permissões comerciais.
+`isAdministrator=true` é a autoridade total e separada do Administrador da
+Instalação Lume: somente outro administrador pode concedê-la ou removê-la. A
+Diretoria também é distinta: pertencer a `directorate` não basta; a autoridade
+ampla de negócio exige `tenant:manage` atribuída individualmente. A Gerência
+continua controlada pelas capacidades estreitas de cada processo. Supervisão é
+uma capacidade explícita, não um cargo ou perfil implícito.
 
-O bootstrap idempotente sincroniza as nove áreas operacionais: Comercial,
-Compras, Controladoria, Departamento Pessoal, Financeiro, Gerência, Manutenção,
-Monitoramento e Operacional. A conta administrativa inicial é vinculada à
-autoridade administrativa explícita; seus vínculos diretos ficam vazios para
-não confundir administração global com o departamento Gerência.
+O bootstrap idempotente sincroniza o catálogo fixo atual: Empresa Cliente e as
+áreas internas RH, Comercial, Compras, Controladoria, Departamento Pessoal,
+Financeiro, Gerência, Diretoria, Manutenção, Monitoramento, Operacional e TI. A
+conta administrativa inicial é vinculada à autoridade administrativa
+explícita; seus vínculos diretos ficam vazios para não confundir administração
+global com Gerência ou Diretoria.
+
+RH e Departamento Pessoal são departamentos separados com o mesmo teto de
+capacidades documentais. O catálogo do runtime ainda é fechado no código e no
+enum do banco; criar departamentos internos dinamicamente continua sendo uma
+lacuna. Quando essa extensão existir, capacidades transversais devem alcançar os
+novos departamentos sem incluir `client-company`.
 
 ## Contas e acesso
 
@@ -163,6 +181,9 @@ não confundir administração global com o departamento Gerência.
 - `users:update` altera dados, departamentos, permissões e solicita recuperação
   de senha; `users:manage` fica restrito ao ciclo de estado da conta
   (ativar novamente, desativar ou suspender);
+- `PATCH /api/v1/users/:id` exige `commandId` e `expectedVersion`, incrementa a
+  versão do cadastro e grava recibo idempotente, histórico e auditoria na mesma
+  transação; repetição divergente ou versão antiga retorna conflito;
 - `users:delete` não faz parte do catálogo delegável; `DELETE /api/v1/users/:id`
   exige administrador, impede autoexclusão e preserva históricos por exclusão
   lógica;
@@ -234,7 +255,119 @@ O atendente responsável também pode corrigir manualmente o status comercial da
 solicitação atual. A API aplica concorrência otimista, limita a alteração ao
 orçamento corrente de uma conversa aberta e registra autor, data e motivo na
 auditoria. Aprovação ou recusa continuam exigindo uma proposta efetivamente
-enviada; cancelamento e recusa exigem motivo.
+enviada; recusa exige motivo e novos cancelamentos exigem motivo e classificação
+explícita como `opportunity-abandoned` ou `acceptance-cancelled`. Ciclos antigos
+cancelados ficam como `legacy-unclassified`, enquanto a abertura de outro ciclo
+registra `superseded` sem presumir uma perda comercial.
+
+### Cadastros temporários
+
+Cadastros emergenciais são identificados por `isTemporary`, motivo, responsável
+ativo do tenant e vencimento de regularização limitado a sete dias. A resposta
+expõe as pendências que impedem ações críticas. Enquanto faltar CPF ou CNPJ de
+cliente/fornecedor, a criação ou alteração de contrato é bloqueada. A
+regularização usa `POST /api/v1/registrations/:registrationId/regularize`, com
+`commandId`, `expectedVersion` e histórico preservado.
+
+Os previews de migração não escrevem dados: a consolidação pode ser inspecionada
+em `GET /api/v1/registrations/:registrationId/consolidation-preview`, a possível
+associação de usuário em `GET /api/v1/identity/users/:userId/person-match-preview`
+e o titular legado de um envio em
+`GET /api/v1/document-management/submissions/:submissionId/legacy-subject-preview`.
+Uma recomendação por CPF não é apresentada como vínculo já confirmado. A
+associação é uma mutação separada em
+`POST /api/v1/identity/users/:userId/person-association`, exige `users:manage`,
+`commandId` e `expectedVersion`, e possui histórico em
+`GET /api/v1/identity/users/:userId/person-association-history`. Somente um CPF
+único e idêntico permite associação automática; escolhas por CPF ou e-mail
+exigem confirmação humana e motivo. Sem Pessoa aplicável, a API cria um Cadastro
+temporário para regularização sem alterar permissões nem o escopo legado do
+Usuário.
+
+### Pré-admissão por link seguro
+
+RH ou Departamento Pessoal com `documents:manage` pode criar um acesso de 30
+dias para uma Pessoa do Cadastro Principal em
+`POST /api/v1/pre-admission/accesses`, sem criar `User`.
+Renovação rotaciona o token; revogação o bloqueia imediatamente. O token bruto
+aparece somente nas respostas de criação/renovação e apenas seu hash permanece
+no PostgreSQL. O endpoint público recebe o token no corpo e expõe somente o
+escopo de tipos documentais solicitados, nunca arquivos por ID.
+
+O recebimento dos arquivos ainda não faz parte desta primeira fatia: a resposta
+declara `uploadAvailable=false` enquanto o legado documental depender de
+titular e autor do tipo `User`. A adaptação seguinte deve reutilizar a gestão e
+o armazenamento documentais existentes com Titular Principal genérico, sem
+conta fictícia ou repositório paralelo.
+
+Os dois departamentos possuem o mesmo teto de capacidades `documents:*`, mas a
+autorização continua individual: pertencer ao departamento não concede
+`documents:manage` automaticamente. RH e Departamento Pessoal permanecem
+opções atribuíveis e separadas. Definir a responsabilidade por tipo documental
+ainda é uma lacuna; igualdade de permissões não escolhe o departamento
+responsável.
+
+### Atendimento WhatsApp transversal
+
+`whatsapp-conversations:attend` é atribuída individualmente e pode ser usada
+por qualquer departamento interno catalogado, nunca por `client-company`.
+`whatsapp-conversations:manage` permanece como capacidade ampla legada para
+administração do canal e operações de proposta Comercial; ela não deve ser
+concedida apenas para liberar atendimento. O responsável da conversa é uma
+referência corrente, não uma trava exclusiva: outro usuário autorizado pode
+atuar ou assumir, com `expectedVersion` e histórico do ator e da substituição.
+Supervisão segue a mesma regra de capacidade explícita, sem perfil fixo.
+
+### Aceite e confirmação comercial
+
+Aceite não confirma serviço nem cria Viagem. Para o serviço singular do
+orçamento legado, o Financeiro registra o ateste em
+`POST /api/v1/commercial/quote-requests/:id/financial-attestation`, o
+Operacional registra o seu em `operational-attestation` e somente então o
+Comercial finaliza em `confirmed-services`. Cada etapa possui ator, evidência,
+`commandId`, versão do orçamento, idempotência e revalidação de acesso dentro da
+transação. O estado pode ser recuperado em `confirmed-service-readiness`.
+
+Uma dispensa `not-applicable` é registrada separadamente com motivo, evidência,
+`commandId` e versão esperada. Gerência depende da capacidade estreita
+`service-confirmations:approve`; Diretoria depende de `directorate` com
+`tenant:manage` individual; e o Administrador da Instalação possui autoridade
+total. O modelo legado ainda representa um serviço por orçamento; itens
+comerciais múltiplos e cancelamento pós-confirmação continuam lacunas
+explícitas, sem fallback que apague o estágio alcançado.
+
+### Viagens operacionais
+
+`POST /api/v1/trips` cria manualmente um rascunho a partir de contrato contínuo
+ativo e vigente ou de um Serviço Confirmado eventual. A origem contínua informa
+`expectedContractVersion`; a eventual informa `sourceKind=confirmed-service`,
+`confirmedServiceId` e `expectedConfirmedServiceVersion`. O aceite do orçamento
+não cria viagem: antes, as três áreas precisam concluir os atos separados. A
+origem eventual é bloqueada e revalidada, usa a data de saída confirmada e não
+aceita uma data divergente enviada pelo cliente.
+
+Mudanças seguintes usam `POST /api/v1/trips/:tripId/commands` com `commandId` e
+`expectedVersion`. A máquina preserva os caminhos `Em execução → Suspensa → Em
+execução` e `Em execução → Interrompida → encerramento antecipado`, mantendo
+programações versionadas, ocorrências, evidências e histórico consultável.
+
+Para contratos contínuos, `POST /api/v1/trips/:tripId/route-plan` seleciona a
+versão aprovada de uma Rota e preserva cada seleção anterior. A versão vigente é
+congelada no início da Viagem; mudanças posteriores são desvios de execução.
+`GET /api/v1/trips/:tripId/route-plans` devolve somente um resumo operacional,
+sem nomes ou dados sensíveis de passageiros. Rotas eventuais, veículo/motorista,
+quilometragem, custos e efeitos financeiros/documentais ainda não compõem esta
+fatia.
+
+Os endpoints reconhecem as permissões canônicas `trips:view`, `trips:create`,
+`trips:update` e `trips:manage`. Durante a transição, os códigos equivalentes
+`routes:*` continuam aceitos para os usuários já provisionados; isso é
+compatibilidade de acesso, não uma fusão entre Plano de Rota e Viagem.
+
+O estado preciso dos contratos que o frontend pode consumir está em
+[docs/tenant-web-contract-readiness.md](./docs/tenant-web-contract-readiness.md).
+O quadro separa capacidades disponíveis, parciais e ainda sem endpoint para que
+o Tenant Web não transforme proteção visual ou mock em regra de negócio.
 
 Ao encerrar um atendimento, a mesma transação persiste uma mensagem de
 despedida e sua outbox antes de fechar a conversa. A saudação usa manhã, tarde
@@ -275,9 +408,11 @@ permanecem como adaptadores legados compiláveis, mas não são registrados no
 módulo em execução.
 
 O cadastro genérico de clientes PF/PJ e seus usuários foi preservado em
-`/clients`; contratos, colaboradores, pontos fixos e sugestões do antigo módulo
-foram removidos. O núcleo novo não pressupõe contrato e poderá atender tanto o
-fretamento eventual quanto o contínuo. Consulte
+`/clients`. O módulo e os endpoints operacionais antigos foram removidos do
+runtime; a fundação persistida de contratos, passageiros, pontos fixos e rotas é
+mantida temporariamente como compatibilidade para `OperationalTrip` e seleção de
+plano, sem reativar o runtime legado. O núcleo novo não pressupõe contrato e
+poderá atender tanto o fretamento eventual quanto o contínuo. Consulte
 [docs/routing/architecture.md](docs/routing/architecture.md) e
 [docs/routing/operations.md](docs/routing/operations.md). A ativação em
 homologação está em [docs/routing/staging.md](docs/routing/staging.md).

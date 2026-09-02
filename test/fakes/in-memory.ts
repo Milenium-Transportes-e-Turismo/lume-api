@@ -19,7 +19,9 @@ import {
   type RefreshTokenRecord,
   type PasswordChangeChallengeRecord,
   type UserProfileRecord,
+  type FindUserUpdateReplayInput,
   type UpdateUserPersistenceInput,
+  type UpdateUserPersistenceResult,
   type UpdateUserStatusPersistenceInput,
   type UserListQuery,
   type UserRecord,
@@ -27,6 +29,11 @@ import {
 import { Company } from '../../src/domain/entities/company';
 import { User } from '../../src/domain/entities/user';
 import { resolveEffectivePermissions } from '../../src/domain/access/resolve-permissions';
+import {
+  isPrivilegedUserManagementTarget,
+  userMutationAuthorizationFingerprint,
+} from '../../src/domain/access/user-management-policy';
+import { conflict } from '../../src/core/errors/app-error';
 
 export class InMemoryStore {
   companies: Company[] = [];
@@ -45,6 +52,24 @@ export class InMemoryStore {
     passwordHash: string;
     createdAt: Date;
   }> = [];
+  userUpdateHistory: Array<{
+    companyId: string;
+    userId: string;
+    actorUserId: string;
+    commandId: string;
+    commandFingerprint: string;
+    expectedVersion: number;
+    resultingVersion: number;
+    changedFields: string[];
+  }> = [];
+  tenantAuditLogs: Array<{
+    companyId: string;
+    actorUserId?: string;
+    action: string;
+    targetType: string;
+    targetId: string;
+    metadata: Readonly<Record<string, unknown>>;
+  }> = [];
 }
 
 function toUserRecord(store: InMemoryStore, user: User): UserRecord {
@@ -54,6 +79,51 @@ function toUserRecord(store: InMemoryStore, user: User): UserRecord {
       store.companies.find((company) => company.id === user.companyId)?.props
         .status === 'ACTIVE',
   };
+}
+
+function userChangedFields(before: User, after: User): string[] {
+  const trackedFields = [
+    [
+      'routingCompanyId',
+      before.props.routingCompanyId,
+      after.props.routingCompanyId,
+    ],
+    ['name', before.props.name, after.props.name],
+    ['email', before.props.email, after.props.email],
+    ['cpf', before.props.cpfNormalized, after.props.cpfNormalized],
+    [
+      'isAdministrator',
+      before.props.isAdministrator,
+      after.props.isAdministrator,
+    ],
+    [
+      'documentAccessMode',
+      before.props.documentAccessMode,
+      after.props.documentAccessMode,
+    ],
+    ['clientCategory', before.props.clientCategory, after.props.clientCategory],
+    ['jobTitle', before.props.jobTitle, after.props.jobTitle],
+    ['maritalStatus', before.props.maritalStatus, after.props.maritalStatus],
+    [
+      'militaryDocumentStatus',
+      before.props.militaryDocumentStatus,
+      after.props.militaryDocumentStatus,
+    ],
+    ['dependents', before.props.dependents, after.props.dependents],
+    ['departments', before.props.departments, after.props.departments],
+    [
+      'permissionCodes',
+      before.props.permissionCodes,
+      after.props.permissionCodes,
+    ],
+  ] as const;
+
+  return trackedFields
+    .filter(
+      ([, beforeValue, afterValue]) =>
+        JSON.stringify(beforeValue) !== JSON.stringify(afterValue),
+    )
+    .map(([field]) => field);
 }
 
 function profileRecord(user: User): UserProfileRecord {
@@ -113,6 +183,26 @@ export class InMemoryUsersRepository extends UsersRepository {
         updatedAt: now,
       });
     });
+  }
+
+  private activeMutationActor(companyId: string, actorUserId: string): User {
+    const actor = this.store.users.find(
+      (user) => user.companyId === companyId && user.id === actorUserId,
+    );
+    const companyIsActive =
+      this.store.companies.find((company) => company.id === companyId)?.props
+        .status === 'ACTIVE';
+    if (
+      !actor ||
+      !companyIsActive ||
+      !actor.props.isActive ||
+      actor.props.status !== 'active'
+    ) {
+      throw conflict(
+        'O acesso do responsável foi revogado. Atualize os dados e tente novamente.',
+      );
+    }
+    return actor;
   }
 
   async loginIdentifierExists(input: {
@@ -184,10 +274,18 @@ export class InMemoryUsersRepository extends UsersRepository {
     this.reactivateExpiredSuspensions();
     const filtered = this.store.users
       .filter((user) => user.companyId === companyId)
+      .filter((user) => !query.excludeUserId || user.id !== query.excludeUserId)
+      .filter(
+        (user) => !query.excludeAdministrators || !user.props.isAdministrator,
+      )
+      .filter(
+        (user) =>
+          !query.excludePrivilegedUsers ||
+          !isPrivilegedUserManagementTarget(user.props),
+      )
       .filter(
         (user) =>
           !query.department ||
-          user.props.isAdministrator ||
           user.props.departments.includes(query.department),
       )
       .filter(
@@ -197,6 +295,7 @@ export class InMemoryUsersRepository extends UsersRepository {
             user.props.departments,
             user.props.permissionCodes,
             user.props.isAdministrator,
+            user.props.documentAccessMode,
           ).includes(query.permission),
       )
       .filter((user) => !query.status || user.props.status === query.status)
@@ -215,16 +314,84 @@ export class InMemoryUsersRepository extends UsersRepository {
     };
   }
 
+  async findUpdateReplay(
+    companyId: string,
+    input: FindUserUpdateReplayInput,
+  ): Promise<UpdateUserPersistenceResult | null> {
+    this.activeMutationActor(companyId, input.actorUserId);
+    const history = this.store.userUpdateHistory.find(
+      (entry) =>
+        entry.companyId === companyId && entry.commandId === input.commandId,
+    );
+    if (!history) return null;
+    if (
+      history.userId !== input.userId ||
+      history.actorUserId !== input.actorUserId ||
+      history.commandFingerprint !== input.requestFingerprint
+    ) {
+      throw conflict('O commandId já foi utilizado com outros dados.');
+    }
+    const user = this.store.users.find(
+      (candidate) =>
+        candidate.companyId === companyId && candidate.id === input.userId,
+    );
+    if (!user) {
+      throw conflict('O resultado idempotente não está mais disponível.');
+    }
+    return { record: toUserRecord(this.store, user), idempotent: true };
+  }
+
   async update(
     companyId: string,
     userId: string,
     input: UpdateUserPersistenceInput,
   ) {
+    const actor = this.activeMutationActor(
+      companyId,
+      input.command.actorUserId,
+    );
+    const actorCompanyIsActive =
+      this.store.companies.find((company) => company.id === companyId)?.props
+        .status === 'ACTIVE';
+    const replayed = await this.findUpdateReplay(companyId, {
+      userId,
+      actorUserId: input.command.actorUserId,
+      commandId: input.command.commandId,
+      requestFingerprint: input.command.requestFingerprint,
+    });
+    if (replayed) return replayed;
     const index = this.store.users.findIndex(
       (user) => user.companyId === companyId && user.id === userId,
     );
     const current = this.store.users[index];
     if (!current) throw new Error('Missing user.');
+    if (current.props.version !== input.command.expectedVersion) {
+      throw conflict(
+        `O usuário foi alterado por outro comando. Versão atual: ${current.props.version}.`,
+      );
+    }
+    if (
+      current.props.updatedAt.getTime() !==
+      input.mutationSnapshot.targetUpdatedAt.getTime()
+    ) {
+      throw conflict(
+        'O usuário foi alterado por outra operação. Atualize os dados e tente novamente.',
+      );
+    }
+    if (
+      input.mutationSnapshot.actorUserId !== input.command.actorUserId ||
+      actor.props.updatedAt.getTime() !==
+        input.mutationSnapshot.actorUpdatedAt.getTime() ||
+      actor.props.version !== input.mutationSnapshot.actorVersion ||
+      userMutationAuthorizationFingerprint({
+        ...actor.props,
+        companyIsActive: actorCompanyIsActive,
+      }) !== input.mutationSnapshot.actorAuthorizationFingerprint
+    ) {
+      throw conflict(
+        'O acesso do responsável foi alterado. Atualize os dados e tente novamente.',
+      );
+    }
     const updated = User.restore({
       ...current.props,
       name: input.name ?? current.props.name,
@@ -234,9 +401,26 @@ export class InMemoryUsersRepository extends UsersRepository {
         input.cpfNormalized === undefined
           ? current.props.cpfNormalized
           : input.cpfNormalized,
+      routingCompanyId:
+        input.routingCompanyId === undefined
+          ? current.props.routingCompanyId
+          : input.routingCompanyId,
       isAdministrator: input.isAdministrator ?? current.props.isAdministrator,
       documentAccessMode:
         input.documentAccessMode ?? current.props.documentAccessMode,
+      clientCategory:
+        input.clientCategory === undefined
+          ? current.props.clientCategory
+          : input.clientCategory,
+      jobTitle:
+        input.jobTitle === undefined ? current.props.jobTitle : input.jobTitle,
+      maritalStatus:
+        input.maritalStatus === undefined
+          ? current.props.maritalStatus
+          : input.maritalStatus,
+      militaryDocumentStatus:
+        input.militaryDocumentStatus ?? current.props.militaryDocumentStatus,
+      dependents: input.dependents ?? current.props.dependents,
       departments: input.departments ?? current.props.departments,
       permissionCodes: input.permissionCodes ?? current.props.permissionCodes,
       tokenVersion:
@@ -246,17 +430,51 @@ export class InMemoryUsersRepository extends UsersRepository {
         input.documentAccessMode !== undefined
           ? current.props.tokenVersion + 1
           : current.props.tokenVersion,
+      version: current.props.version + 1,
       updatedAt: new Date(),
     });
     this.store.users[index] = updated;
-    return toUserRecord(this.store, updated);
+    const changedFields = userChangedFields(current, updated);
+    this.store.userUpdateHistory.push({
+      companyId,
+      userId,
+      actorUserId: input.command.actorUserId,
+      commandId: input.command.commandId,
+      commandFingerprint: input.command.requestFingerprint,
+      expectedVersion: input.command.expectedVersion,
+      resultingVersion: updated.props.version,
+      changedFields,
+    });
+    this.store.tenantAuditLogs.push({
+      companyId,
+      actorUserId: input.command.actorUserId,
+      action: 'USER_UPDATED',
+      targetType: 'user',
+      targetId: userId,
+      metadata: {
+        commandId: input.command.commandId,
+        expectedVersion: input.command.expectedVersion,
+        resultingVersion: updated.props.version,
+        changedFields,
+        requestedFields: input.command.changedFields,
+      },
+    });
+    return { record: toUserRecord(this.store, updated), idempotent: false };
   }
 
-  updateWithAdministratorInvariant(
+  async updateWithAdministratorInvariant(
     companyId: string,
     userId: string,
     input: UpdateUserPersistenceInput,
   ) {
+    this.activeMutationActor(companyId, input.command.actorUserId);
+    const replayed = await this.findUpdateReplay(companyId, {
+      userId,
+      actorUserId: input.command.actorUserId,
+      commandId: input.command.commandId,
+      requestFingerprint: input.command.requestFingerprint,
+    });
+    if (replayed) return replayed;
     const activeAdministrators = this.store.users.filter(
       (user) =>
         user.companyId === companyId &&

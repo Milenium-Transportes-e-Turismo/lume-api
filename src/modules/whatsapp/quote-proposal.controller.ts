@@ -25,14 +25,15 @@ import {
 import type { Response } from 'express';
 
 import type { AuthenticatedPrincipal } from '../../application/presenters/user.presenter';
-import { QuoteProposalUseCase } from '../../application/use-cases/whatsapp/whatsapp.use-cases';
+import { QuoteProposalUseCase } from '../../application/use-cases/commercial/commercial-quotes.use-case';
 import { forbidden, notFound } from '../../core/errors/app-error';
-import { QUOTE_PROPOSAL_MAX_PDF_BYTES } from '../../domain/whatsapp/whatsapp.constants';
+import { QUOTE_PROPOSAL_MAX_PDF_BYTES } from '../../domain/commercial/commercial.constants';
+import { hasTenantWideAuthority } from '../../domain/access/tenant-authority';
 import {
   dateOnlyFromDateTime,
   parseBusinessDateTime,
   parseDateOnly,
-} from '../../domain/whatsapp/quote-schedule';
+} from '../../domain/commercial/quote-schedule';
 import { CurrentUser } from '../../shared/http/decorators/current-user.decorator';
 import { RequireAnyPermission } from '../../shared/http/decorators/require-permissions.decorator';
 import {
@@ -78,9 +79,12 @@ export function normalizeUploadedFileName(fileName: string): string {
 }
 
 function assertCommercialDepartment(current: AuthenticatedPrincipal): void {
-  if (!current.departments.includes('commercial')) {
+  if (
+    !current.departments.includes('commercial') &&
+    !hasTenantWideAuthority(current)
+  ) {
     throw forbidden(
-      'O acesso aos orçamentos é restrito a usuários vinculados ao departamento Comercial.',
+      'O acesso aos orçamentos exige vínculo com o Comercial ou autoridade ampla no tenant.',
     );
   }
 }

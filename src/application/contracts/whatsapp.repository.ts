@@ -1,10 +1,10 @@
 import type { Department } from '../../domain/access/access.constants';
+import type { QuoteRequestStatus } from '../../domain/commercial/quote-status';
 import type {
   ConversationState,
   DeliveryStatus,
   MessageDirection,
   MessageKind,
-  RequestStatus,
   TransitionName,
 } from '../../domain/whatsapp/whatsapp.constants';
 
@@ -187,27 +187,6 @@ export interface TransitionCommand {
   };
 }
 
-export interface QuoteRequestPatch {
-  commandId: string;
-  expectedVersion: number;
-  contactName?: string | null;
-  document?: string | null;
-  email?: string | null;
-  serviceType?: string | null;
-  origin?: string | null;
-  destination?: string | null;
-  departureDate?: Date | null;
-  departureAt?: Date | null;
-  returnDate?: Date | null;
-  returnAt?: Date | null;
-  passengerCount?: number | null;
-  vehicleType?: string | null;
-  vehicleAtDisposal?: boolean | null;
-  localTransfers?: boolean | null;
-  notes?: string | null;
-  structuredData?: Readonly<Record<string, unknown>>;
-}
-
 export interface CreateOutboundInput {
   companyId: string;
   conversationId: string;
@@ -320,11 +299,17 @@ export interface ConversationListQuery {
   page: number;
   pageSize: number;
   department?: Department;
+  departments?: readonly Department[];
   state?: ConversationState;
   control?: 'bot' | 'human' | 'paused' | 'closed';
-  requestStatus?: RequestStatus;
+  requestStatus?: QuoteRequestStatus;
   search?: string;
   archive?: 'active' | 'archived' | 'all';
+}
+
+export interface ConversationAccessScope {
+  /** `null` is an explicit tenant-wide scope for trusted callers. */
+  readonly departments: readonly Department[] | null;
 }
 
 export interface EnsureWhatsAppConversationResult {
@@ -332,6 +317,14 @@ export interface EnsureWhatsAppConversationResult {
   readonly version: number;
   readonly conversationState: ConversationState;
   readonly assignedTo: { readonly id: string; readonly name: string } | null;
+}
+
+export interface StartHumanWhatsAppConversationInput {
+  readonly companyId: string;
+  readonly phoneNormalized: string;
+  readonly commandId: string;
+  readonly actorUserId: string;
+  readonly targetDepartment?: Department;
 }
 
 export interface MessageListQuery {
@@ -343,99 +336,6 @@ export interface MessageListQuery {
 export interface TransitionListQuery {
   page: number;
   pageSize: number;
-}
-
-export interface QuoteProposalListQuery {
-  page: number;
-  pageSize: number;
-  stage: 'pending' | 'sent' | 'approved' | 'cancelled';
-  search?: string;
-  conversationId?: string;
-  createdFrom?: string;
-  createdTo?: string;
-}
-
-export interface QuoteProposalNotificationSummary {
-  notificationId: 'commercial.pending-quote-proposals';
-  pendingTotal: number;
-  unreadTotal: number;
-}
-
-export interface QuoteProposalPdf {
-  originalName: string;
-  mimeType: string;
-  sizeBytes: number;
-  content: Buffer;
-}
-
-export interface UploadQuoteProposalDocumentInput {
-  companyId: string;
-  quoteRequestId: string;
-  actorUserId: string;
-  commandId: string;
-  expectedVersion: number;
-  file: QuoteProposalPdf;
-}
-
-export interface SendQuoteProposalInput {
-  companyId: string;
-  quoteRequestId: string;
-  proposalDocumentId: string;
-  batchId: string;
-  batchDocumentIds: string[];
-  actorUserId: string;
-  commandId: string;
-  expectedVersion: number;
-}
-
-export interface CreateQuoteProposalInput {
-  companyId: string;
-  conversationId: string;
-  actorUserId: string;
-  commandId: string;
-  expectedVersion: number;
-  contactName: string;
-  document?: string | null;
-  email?: string | null;
-  serviceType: string;
-  origin: string;
-  destination: string;
-  departureDate?: Date | null;
-  departureAt?: Date | null;
-  returnDate?: Date | null;
-  returnAt?: Date | null;
-  passengerCount: number;
-  vehicleType?: string | null;
-  vehicleAtDisposal: boolean;
-  localTransfers: boolean;
-  notes?: string | null;
-}
-
-export interface DecideQuoteProposalInput {
-  companyId: string;
-  quoteRequestId: string;
-  actorUserId: string;
-  commandId: string;
-  expectedVersion: number;
-  decision: 'approved' | 'rejected';
-  reason?: string | null;
-}
-
-export type ManuallyAssignableQuoteStatus =
-  | 'waiting-for-customer'
-  | 'under-review'
-  | 'approved'
-  | 'rejected'
-  | 'cancelled';
-
-export interface UpdateQuoteProposalStatusInput {
-  companyId: string;
-  quoteRequestId: string;
-  actorUserId: string;
-  commandId: string;
-  expectedVersion: number;
-  status: ManuallyAssignableQuoteStatus;
-  reason?: string | null;
 }
 
 export abstract class WhatsAppRepository {
@@ -465,16 +365,15 @@ export abstract class WhatsAppRepository {
     input: ProcessServiceSessionLifecycleInput,
   ): Promise<ProcessServiceSessionLifecycleResult>;
   abstract transition(input: TransitionCommand): Promise<unknown>;
-  abstract ensureConversationForPhone(
-    companyId: string,
-    phoneNormalized: string,
-  ): Promise<EnsureWhatsAppConversationResult>;
-  abstract patchQuoteRequest(
-    companyId: string,
-    quoteRequestId: string,
-    input: QuoteRequestPatch,
-  ): Promise<unknown>;
+  abstract startHumanConversation(
+    input: StartHumanWhatsAppConversationInput,
+  ): Promise<
+    EnsureWhatsAppConversationResult & { readonly idempotent: boolean }
+  >;
   abstract createOutbound(input: CreateOutboundInput): Promise<unknown>;
+  abstract authorizeHumanOutbound(
+    input: CreateHumanOutboundInput,
+  ): Promise<void>;
   abstract createHumanOutbound(
     input: CreateHumanOutboundInput,
   ): Promise<unknown>;
@@ -498,6 +397,7 @@ export abstract class WhatsAppRepository {
   abstract getConversation(
     companyId: string,
     conversationId: string,
+    scope: ConversationAccessScope,
   ): Promise<unknown>;
   abstract getAutomationBatch(
     companyId: string,
@@ -509,52 +409,12 @@ export abstract class WhatsAppRepository {
     companyId: string,
     conversationId: string,
     query: MessageListQuery,
+    scope: ConversationAccessScope,
   ): Promise<unknown>;
   abstract listTransitions(
     companyId: string,
     conversationId: string,
     query: TransitionListQuery,
-  ): Promise<unknown>;
-  abstract getCurrentQuoteRequest(
-    companyId: string,
-    conversationId: string,
-  ): Promise<unknown>;
-  abstract listQuoteProposals(
-    companyId: string,
-    query: QuoteProposalListQuery,
-  ): Promise<unknown>;
-  abstract getQuoteProposalNotificationSummary(
-    companyId: string,
-    userId: string,
-  ): Promise<QuoteProposalNotificationSummary>;
-  abstract markQuoteProposalNotificationRead(
-    companyId: string,
-    userId: string,
-  ): Promise<
-    QuoteProposalNotificationSummary & {
-      readAt: string;
-      markedRead: number;
-    }
-  >;
-  abstract getQuoteProposal(
-    companyId: string,
-    quoteRequestId: string,
-  ): Promise<unknown>;
-  abstract createQuoteProposal(
-    input: CreateQuoteProposalInput,
-  ): Promise<unknown>;
-  abstract decideQuoteProposal(
-    input: DecideQuoteProposalInput,
-  ): Promise<unknown>;
-  abstract updateQuoteProposalStatus(
-    input: UpdateQuoteProposalStatusInput,
-  ): Promise<unknown>;
-  abstract uploadQuoteProposalDocument(
-    input: UploadQuoteProposalDocumentInput,
-  ): Promise<unknown>;
-  abstract sendQuoteProposal(input: SendQuoteProposalInput): Promise<unknown>;
-  abstract getQuoteProposalDocument(
-    companyId: string,
-    documentId: string,
+    scope: ConversationAccessScope,
   ): Promise<unknown>;
 }

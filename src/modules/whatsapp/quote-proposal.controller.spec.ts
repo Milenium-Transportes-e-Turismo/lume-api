@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { AuthenticatedPrincipal } from '../../application/presenters/user.presenter';
-import type { QuoteProposalUseCase } from '../../application/use-cases/whatsapp/whatsapp.use-cases';
+import type { QuoteProposalUseCase } from '../../application/use-cases/commercial/commercial-quotes.use-case';
 import { REQUIRED_PERMISSIONS } from '../../shared/http/decorators/require-permissions.decorator';
 import { QuoteProposalListQueryDto } from './dto/whatsapp.dto';
 import {
@@ -90,6 +90,53 @@ describe('QuoteProposalController permissions', () => {
         new QuoteProposalListQueryDto(),
       ),
     ).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }));
+  });
+
+  it('permite consultar propostas ao Admin sem departamentos e à Diretoria com Gestão do Tenant', () => {
+    const list = vi.fn().mockReturnValue({ items: [] });
+    const controller = new QuoteProposalController({
+      list,
+    } as unknown as QuoteProposalUseCase);
+    const query = new QuoteProposalListQueryDto();
+
+    for (const current of [
+      principal({
+        isAdministrator: true,
+        departments: [],
+        permissionCodes: [],
+        permissions: [],
+      }),
+      principal({
+        isAdministrator: false,
+        departments: ['directorate'],
+        permissionCodes: ['tenant:manage'],
+        permissions: ['tenant:manage'],
+      }),
+    ]) {
+      expect(controller.list(current, query)).toEqual({ items: [] });
+    }
+
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it('nega propostas à Diretoria sem Gestão do Tenant', () => {
+    const list = vi.fn();
+    const controller = new QuoteProposalController({
+      list,
+    } as unknown as QuoteProposalUseCase);
+
+    expect(() =>
+      controller.list(
+        principal({
+          isAdministrator: false,
+          departments: ['directorate'],
+          permissionCodes: ['commercial:view'],
+          permissions: ['commercial:view'],
+        }),
+        new QuoteProposalListQueryDto(),
+      ),
+    ).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }));
+    expect(list).not.toHaveBeenCalled();
   });
 });
 

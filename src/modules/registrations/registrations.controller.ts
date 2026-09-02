@@ -19,6 +19,7 @@ import {
   CreateCatalogItemDto,
   CreateRegistrationDto,
   ListRegistrationsQueryDto,
+  RegistrationConsolidationPreviewQueryDto,
   RegistrationRelationshipDto,
   RemoveRegistrationRelationshipDto,
   UpdateRegistrationDto,
@@ -95,6 +96,17 @@ export class RegistrationsController {
     return this.registrations.update(current, registrationId, body);
   }
 
+  @Post(':registrationId/regularize')
+  @RequireAnyPermission('clients:update')
+  regularize(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Param('registrationId', new ParseUUIDPipe({ version: '4' }))
+    registrationId: string,
+    @Body() body: UpdateRegistrationDto,
+  ) {
+    return this.registrations.regularize(current, registrationId, body);
+  }
+
   @Get(':registrationId/history')
   @RequireAnyPermission('clients:history')
   history(
@@ -103,6 +115,21 @@ export class RegistrationsController {
     registrationId: string,
   ) {
     return this.registrations.history(current, registrationId);
+  }
+
+  @Get(':registrationId/consolidation-preview')
+  @RequireAnyPermission('clients:manage')
+  consolidationPreview(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Param('registrationId', new ParseUUIDPipe({ version: '4' }))
+    registrationId: string,
+    @Query() query: RegistrationConsolidationPreviewQueryDto,
+  ) {
+    return this.registrations.consolidationPreview(
+      current,
+      registrationId,
+      query.duplicateRegistrationId,
+    );
   }
 
   @Post(':registrationId/relationships')
