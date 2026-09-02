@@ -2,20 +2,26 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { AuthenticatedPrincipal } from '../../application/presenters/user.presenter';
 import type { QuoteProposalUseCase } from '../../application/use-cases/whatsapp/whatsapp.use-cases';
-import type { UserDepartment } from '../../domain/access/access.constants';
+import type { PresentedUserDepartment } from '../../domain/access/access.constants';
 import { NotificationsController } from './notifications.controller';
 
 function principal(
-  departments: readonly UserDepartment[],
+  departments: readonly PresentedUserDepartment[],
 ): AuthenticatedPrincipal {
   return {
     id: '00000000-0000-4000-8000-000000000111',
     companyId: '00000000-0000-4000-8000-000000000222',
+    routingCompanyId: null,
     name: 'Atendente',
     username: 'atendente',
     email: 'atendente@example.com',
     cpf: null,
     type: 'employee',
+    isAdministrator: false,
+    jobTitle: null,
+    maritalStatus: null,
+    militaryDocumentStatus: 'not-applicable',
+    dependents: [],
     departments: [...departments],
     permissionCodes: [],
     permissions: [

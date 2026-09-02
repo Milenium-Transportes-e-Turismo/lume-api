@@ -12,7 +12,6 @@ function record(id: string, isAdministrator = false) {
     taxId: '11222333000181',
   });
   const user = User.create({
-    id,
     companyId: company.id,
     name: isAdministrator ? 'Administrador' : 'Colaborador',
     username: id,
@@ -24,7 +23,7 @@ function record(id: string, isAdministrator = false) {
     isAdministrator,
     departments: isAdministrator ? ['management'] : ['commercial'],
   });
-  return { user, departments: user.departments, permissionOverrides: [] };
+  return { user, companyIsActive: true };
 }
 
 describe('ListUsersUseCase', () => {

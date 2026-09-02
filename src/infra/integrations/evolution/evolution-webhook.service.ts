@@ -122,6 +122,7 @@ function isPhoneJid(value: string): boolean {
 function resolveContactJid(key: JsonObject): {
   remoteJid: string;
   contactJid: string;
+  participantJid?: string;
 } {
   const remoteJid = requiredString(key.remoteJid, 'data.key.remoteJid', 200);
   const remoteJidAlt = optionalString(
@@ -132,10 +133,14 @@ function resolveContactJid(key: JsonObject): {
 
   // participant identifica o remetente em grupos e não deve substituir o
   // contato da conversa direta. Ainda assim, validamos o campo quando existe.
-  optionalString(key.participant, 'data.key.participant', 200);
+  const participantJid = optionalString(
+    key.participantAlt ?? key.participant,
+    'data.key.participant',
+    200,
+  );
 
   if (remoteJid.endsWith('@g.us')) {
-    return { remoteJid, contactJid: remoteJid };
+    return { remoteJid, contactJid: remoteJid, participantJid };
   }
 
   const contactJid = [remoteJid, remoteJidAlt].find(
@@ -147,7 +152,80 @@ function resolveContactJid(key: JsonObject): {
       'data.key não contém um JID de telefone para identificar o contato.',
     );
   }
-  return { remoteJid, contactJid };
+  return { remoteJid, contactJid, participantJid };
+}
+
+function optionalPhoneFromJid(value: string | undefined): string | undefined {
+  if (!value || !isPhoneJid(value)) return undefined;
+  try {
+    return normalizeWhatsAppPhone(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function groupEventRecords(value: unknown): JsonObject[] {
+  if (Array.isArray(value)) {
+    return value.map((item, index) => asObject(item, `data[${index}]`));
+  }
+  return [asObject(value, 'data')];
+}
+
+function groupJidFromRecord(record: JsonObject): string {
+  const value = record.id ?? record.groupId ?? record.remoteJid;
+  const jid = requiredString(value, 'data.groupId', 200);
+  if (!jid.endsWith('@g.us')) {
+    throw validationError('data.groupId deve identificar um grupo WhatsApp.');
+  }
+  return jid;
+}
+
+function groupParticipantsFromRecord(record: JsonObject): Array<{
+  whatsappId: string;
+  phoneNormalized?: string;
+  displayName?: string;
+  isAdmin?: boolean;
+  removed?: boolean;
+}> {
+  const raw = Array.isArray(record.participants) ? record.participants : [];
+  const action =
+    typeof record.action === 'string' ? record.action.trim().toLowerCase() : '';
+  return raw.map((item, index) => {
+    const participant =
+      typeof item === 'string'
+        ? ({ id: item } satisfies JsonObject)
+        : asObject(item, `data.participants[${index}]`);
+    const whatsappId = requiredString(
+      participant.id ?? participant.jid ?? participant.participant,
+      `data.participants[${index}].id`,
+      200,
+    );
+    const displayName = optionalString(
+      participant.name ?? participant.pushName,
+      `data.participants[${index}].name`,
+      160,
+    );
+    const rawAdmin = participant.admin ?? participant.isAdmin;
+    const isAdmin =
+      typeof rawAdmin === 'boolean'
+        ? rawAdmin
+        : rawAdmin === 'admin' || rawAdmin === 'superadmin'
+          ? true
+          : action === 'promote'
+            ? true
+            : action === 'demote'
+              ? false
+              : undefined;
+    return {
+      whatsappId,
+      ...(optionalPhoneFromJid(whatsappId)
+        ? { phoneNormalized: optionalPhoneFromJid(whatsappId) }
+        : {}),
+      ...(displayName ? { displayName } : {}),
+      ...(isAdmin === undefined ? {} : { isAdmin }),
+      ...(action === 'remove' ? { removed: true } : {}),
+    };
+  });
 }
 
 function header(headers: Headers, name: string): string | undefined {
@@ -271,6 +349,49 @@ export class EvolutionWebhookService {
       throw forbidden('A instância Evolution não pertence a este canal.');
     }
 
+    const payloadHash = createHash('sha256')
+      .update(input.rawBody)
+      .digest('hex');
+    if (
+      [
+        'groups.upsert',
+        'groups-upsert',
+        'groups.update',
+        'groups-update',
+        'group-participants.update',
+        'group-participants-update',
+      ].includes(event)
+    ) {
+      const records = groupEventRecords(body.data);
+      const results = [];
+      for (const [index, record] of records.entries()) {
+        const whatsappId = groupJidFromRecord(record);
+        const eventId = `group:${createHash('sha256')
+          .update(`${channel.id}:${event}:${payloadHash}:${index}`)
+          .digest('hex')}`;
+        results.push(
+          await this.repository.syncWebhookGroup({
+            channel,
+            externalEventId: eventId,
+            correlationId: eventId,
+            payloadHash,
+            whatsappId,
+            displayName: optionalString(
+              record.subject ?? record.name,
+              'data.subject',
+              200,
+            ),
+            occurredAt: now,
+            participants: groupParticipantsFromRecord(record),
+            replaceParticipants: ['groups.upsert', 'groups-upsert'].includes(
+              event,
+            ),
+          }),
+        );
+      }
+      return { accepted: true, groupSync: true, results };
+    }
+
     if (!['messages.upsert', 'messages-upsert'].includes(event)) {
       return { accepted: true, ignored: true, reason: 'unsupported-event' };
     }
@@ -278,23 +399,10 @@ export class EvolutionWebhookService {
     const data = asObject(body.data, 'data');
     const key = asObject(data.key, 'data.key');
     const providerMessageId = requiredString(key.id, 'data.key.id', 160);
-    const { remoteJid, contactJid } = resolveContactJid(key);
+    const { remoteJid, contactJid, participantJid } = resolveContactJid(key);
     const fromMe = key.fromMe;
     if (typeof fromMe !== 'boolean') {
       throw validationError('data.key.fromMe deve ser booleano.');
-    }
-    if (remoteJid.endsWith('@g.us') && channel.ignoreGroups) {
-      return { accepted: true, ignored: true, reason: 'group' };
-    }
-
-    let phoneNormalized: string;
-    try {
-      phoneNormalized = normalizeWhatsAppPhone(contactJid);
-    } catch {
-      throw validationError('Telefone do webhook fora do padrão E.164.');
-    }
-    if (!fromMe && this.ignoredInboundPhones.has(phoneNormalized)) {
-      return { accepted: true, ignored: true, reason: 'internal-phone' };
     }
     const occurredAt = messageTimestamp(data.messageTimestamp);
     if (occurredAt.valueOf() > now.valueOf() + this.maximumSkewMs) {
@@ -308,12 +416,67 @@ export class EvolutionWebhookService {
     }
 
     const content = this.extractContent(asObject(data.message, 'data.message'));
-    const payloadHash = createHash('sha256')
-      .update(input.rawBody)
-      .digest('hex');
     const correlationId = `evolution:${createHash('sha256')
       .update(`${channel.id}:${providerMessageId}`)
       .digest('hex')}`;
+
+    if (remoteJid.endsWith('@g.us')) {
+      const participantPhone = optionalPhoneFromJid(participantJid);
+      const persisted = await this.repository.persistWebhookGroupMessage({
+        channel,
+        externalEventId: providerMessageId,
+        providerMessageId,
+        correlationId,
+        payloadHash,
+        groupWhatsappId: remoteJid,
+        groupDisplayName: optionalString(
+          data.groupName ?? data.subject,
+          'data.groupName',
+          200,
+        ),
+        ...(participantJid
+          ? {
+              participant: {
+                whatsappId: participantJid,
+                ...(participantPhone
+                  ? { phoneNormalized: participantPhone }
+                  : {}),
+                ...(typeof data.pushName === 'string' && data.pushName.trim()
+                  ? { displayName: data.pushName.trim().slice(0, 160) }
+                  : {}),
+              },
+            }
+          : {}),
+        direction: fromMe ? 'outbound' : 'inbound',
+        occurredAt,
+        kind: content.kind,
+        text: content.text,
+        media: content.media,
+      });
+      if (
+        ['image', 'document', 'audio', 'video', 'sticker'].includes(
+          content.kind,
+        ) &&
+        persisted.groupMessageId
+      ) {
+        const retention = await this.mediaContent.retainWebhookGroupMedia(
+          channel.companyId,
+          persisted.groupMessageId,
+        );
+        return { ...persisted, mediaRetention: retention.status };
+      }
+      return persisted;
+    }
+
+    let phoneNormalized: string;
+    try {
+      phoneNormalized = normalizeWhatsAppPhone(contactJid);
+    } catch {
+      throw validationError('Telefone do webhook fora do padrão E.164.');
+    }
+    if (!fromMe && this.ignoredInboundPhones.has(phoneNormalized)) {
+      return { accepted: true, ignored: true, reason: 'internal-phone' };
+    }
     const profilePictureUrl = await this.profilePictures.get(
       channel.instanceName,
       phoneNormalized,

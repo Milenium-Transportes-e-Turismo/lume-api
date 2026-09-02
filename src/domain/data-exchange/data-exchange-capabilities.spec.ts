@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 
-import { AppError } from '../../core/errors/app-error';
 import {
   assertConversionSupported,
   dataExchangeCapabilities,
@@ -42,7 +41,7 @@ describe('data exchange capabilities', () => {
         1024,
       ),
     ).toThrowError(
-      expect.objectContaining<AppError>({ code: 'UNSUPPORTED_FILE_FORMAT' }),
+      expect.objectContaining({ code: 'UNSUPPORTED_FILE_FORMAT' }),
     );
     expect(() =>
       validateDataExchangeFile(
@@ -60,7 +59,7 @@ describe('data exchange capabilities', () => {
   it('publica somente conversões que possuem adaptador', () => {
     expect(() => assertConversionSupported('xlsx', 'csv')).not.toThrow();
     expect(() => assertConversionSupported('pdf', 'xlsx')).toThrowError(
-      expect.objectContaining<AppError>({
+      expect.objectContaining({
         code: 'CONVERSION_NOT_SUPPORTED',
       }),
     );

@@ -5,8 +5,11 @@ import { ConfigService } from '@nestjs/config';
 
 import {
   WhatsAppRepository,
+  type ApplyContinuityClassificationInput,
+  type ApplyContinuityClassificationResult,
   type ClaimEvolutionDispatchInput,
   type CompleteOutboxExecutionInput,
+  type ContinuityClassificationCandidate,
   type ConversationListQuery,
   type CreateHumanOutboundInput,
   type CreateOutboundInput,
@@ -18,10 +21,15 @@ import {
   type MessageListQuery,
   type PersistWebhookMessageInput,
   type PersistWebhookMessageResult,
+  type PersistWebhookGroupMessageInput,
+  type PersistWebhookGroupMessageResult,
+  type ProcessServiceSessionLifecycleInput,
+  type ProcessServiceSessionLifecycleResult,
   type QuoteProposalListQuery,
   type QuoteRequestPatch,
   type ReconcileAutomationOutboxInput,
   type SendQuoteProposalInput,
+  type SyncWebhookGroupInput,
   type TransitionCommand,
   type TransitionListQuery,
   type UpdateQuoteProposalStatusInput,
@@ -40,10 +48,30 @@ import {
   buildDepartmentContactClosureMessage,
 } from '../../../domain/whatsapp/conversation-closure-message';
 import {
+  isHumanServiceOpen,
+  parseHumanServiceHours,
+} from '../../../domain/whatsapp/human-service-hours';
+import {
   assertTransitionActor,
   resolveConversationTransition,
 } from '../../../domain/whatsapp/conversation-transition.matrix';
 import { validateQuoteProposalPdf } from '../../../domain/whatsapp/quote-proposal-pdf';
+import {
+  AI_CLOSING_WAIT_MS,
+  LUME_AI_CLOSING_QUESTION,
+  createPublicContinuationCode,
+  decideServiceContinuity,
+  formatAiClosureMessage,
+  parsePublicContinuationCommand,
+  publicContinuationCodeExpiresAt,
+  type ServicePriority,
+  type ServiceSessionStatus as DomainServiceSessionStatus,
+} from '../../../domain/whatsapp/service-session';
+import {
+  selectPriorityResumeCandidate,
+  type PausedPriorityCandidate,
+} from '../../../domain/whatsapp/service-priority-coordination';
+import { effectiveMediaInterpretation } from '../../../domain/whatsapp/media-interpretation-policy';
 import {
   assertQuoteScheduleConsistency,
   dateOnlyFromDateTime,
@@ -62,20 +90,36 @@ import { UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT } from '../../../domain/whatsapp/wh
 import { sanitizeLogText } from '../../../shared/utils/sensitive-data';
 import { formatWhatsAppPhone } from '../../../shared/utils/normalization';
 import {
+  AgentExecutionStatus,
   ConversationState,
+  ConversationParticipantRole,
+  ContinuityClassification,
+  ContinuityFallbackAction,
   DeliveryStatus,
   DepartmentCode,
   EvolutionDispatchState,
   FlowStep,
   IntegrationOutboxStatus,
+  MediaAssetType,
+  MediaProcessingStatus,
   MessageAttemptStatus,
   MessageDirection,
   MessageKind,
+  MutationActorType,
   QuoteProposalDocumentStatus,
   RequestStatus,
+  ServiceAssignmentSource,
+  ServiceAssignmentStatus,
+  ServiceSessionControlMode,
+  ServiceSessionPriority,
+  ServiceSessionPrioritySource,
+  ServiceSessionStatus,
   TransitionActorType,
   WhatsAppAutomationExecutionStatus,
   WhatsAppAutomationProvider,
+  WhatsAppGroupAiMode,
+  WhatsAppMessageActorType,
+  WhatsAppMessageSource,
   type Prisma,
 } from '../prisma/generated/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -190,6 +234,58 @@ const requestFromPrisma: Readonly<
   REJECTED: 'rejected',
   CANCELLED: 'cancelled',
 };
+
+const servicePriorityToPrisma: Readonly<
+  Record<
+    NonNullable<CreateOutboundInput['sessionPriority']>['priority'],
+    ServiceSessionPriority
+  >
+> = {
+  low: ServiceSessionPriority.LOW,
+  normal: ServiceSessionPriority.NORMAL,
+  high: ServiceSessionPriority.HIGH,
+  urgent: ServiceSessionPriority.URGENT,
+};
+
+const servicePriorityFromPrisma: Readonly<
+  Record<ServiceSessionPriority, ServicePriority>
+> = {
+  LOW: 'low',
+  NORMAL: 'normal',
+  HIGH: 'high',
+  URGENT: 'urgent',
+};
+
+type RestorablePrioritySessionStatus = Exclude<
+  DomainServiceSessionStatus,
+  'paused-by-higher-priority' | 'closing' | 'closed'
+>;
+
+const priorityResumeStatusToPrisma: Readonly<
+  Record<RestorablePrioritySessionStatus, ServiceSessionStatus>
+> = {
+  open: ServiceSessionStatus.OPEN,
+  'waiting-customer': ServiceSessionStatus.WAITING_CUSTOMER,
+  'waiting-human': ServiceSessionStatus.WAITING_HUMAN,
+};
+
+function restorablePriorityStatus(
+  value: unknown,
+): RestorablePrioritySessionStatus | null {
+  switch (value) {
+    case 'open':
+    case ServiceSessionStatus.OPEN:
+      return 'open';
+    case 'waiting-customer':
+    case ServiceSessionStatus.WAITING_CUSTOMER:
+      return 'waiting-customer';
+    case 'waiting-human':
+    case ServiceSessionStatus.WAITING_HUMAN:
+      return 'waiting-human';
+    default:
+      return null;
+  }
+}
 
 const COMMERCIAL_PENDING_QUOTES_NOTIFICATION =
   'commercial.pending-quote-proposals' as const;
@@ -428,8 +524,413 @@ type ConversationDetailWithRelations = Prisma.WhatsAppConversationGetPayload<{
   include: typeof conversationDetailInclude;
 }>;
 
+const serviceSessionAuthorizationSelect = {
+  id: true,
+  companyId: true,
+  threadId: true,
+  sourceChannelId: true,
+  currentDepartmentId: true,
+  responsibleUserId: true,
+  queueId: true,
+  relatedServiceSessionId: true,
+  status: true,
+  controlMode: true,
+  priority: true,
+  priorityReason: true,
+  prioritySource: true,
+  isForeground: true,
+  version: true,
+  publicContinuationCode: true,
+  continuationCodeExpiresAt: true,
+  conversationResolved: true,
+  pendingActions: true,
+  resolutionConfirmedByCustomer: true,
+  closingStartedAt: true,
+  closingDeadlineAt: true,
+  offHoursHandoffNotifiedAt: true,
+  closedAt: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+type ServiceSessionAuthorization = Prisma.ServiceSessionGetPayload<{
+  select: typeof serviceSessionAuthorizationSelect;
+}>;
+
+const priorityResumeSessionSelect = {
+  ...serviceSessionAuthorizationSelect,
+  queue: { select: { priorityWeight: true } },
+  currentDepartment: {
+    select: {
+      serviceQueues: {
+        where: { enabled: true },
+        orderBy: [{ priorityWeight: 'desc' }, { id: 'asc' }],
+        take: 1,
+        select: { priorityWeight: true },
+      },
+    },
+  },
+} satisfies Prisma.ServiceSessionSelect;
+
+type PriorityResumeSession = Prisma.ServiceSessionGetPayload<{
+  select: typeof priorityResumeSessionSelect;
+}>;
+
+interface PriorityResumePredecessor {
+  readonly session: PriorityResumeSession;
+  readonly previousStatus: RestorablePrioritySessionStatus;
+  readonly pausedAt: Date;
+}
+
+interface FoundationContext {
+  readonly threadId: string;
+  readonly session: ServiceSessionAuthorization;
+}
+
+function serviceSessionStateForConversation(state: ConversationState): {
+  status: ServiceSessionStatus;
+  controlMode: ServiceSessionControlMode;
+  isForeground: boolean;
+} {
+  switch (state) {
+    case ConversationState.WAITING_FOR_CUSTOMER:
+      return {
+        status: ServiceSessionStatus.WAITING_CUSTOMER,
+        controlMode: ServiceSessionControlMode.AI,
+        isForeground: true,
+      };
+    case ConversationState.SENT_TO_HUMAN:
+      return {
+        status: ServiceSessionStatus.WAITING_HUMAN,
+        controlMode: ServiceSessionControlMode.HUMAN,
+        isForeground: true,
+      };
+    case ConversationState.HUMAN_ACTIVE:
+      return {
+        status: ServiceSessionStatus.OPEN,
+        controlMode: ServiceSessionControlMode.HUMAN,
+        isForeground: true,
+      };
+    case ConversationState.CLOSED:
+      return {
+        status: ServiceSessionStatus.CLOSED,
+        controlMode: ServiceSessionControlMode.AI,
+        isForeground: false,
+      };
+    default:
+      return {
+        status: ServiceSessionStatus.OPEN,
+        controlMode: ServiceSessionControlMode.AI,
+        isForeground: true,
+      };
+  }
+}
+
+function serviceSessionSnapshot(session: ServiceSessionAuthorization) {
+  return {
+    id: session.id,
+    threadId: session.threadId,
+    sourceChannelId: session.sourceChannelId,
+    currentDepartmentId: session.currentDepartmentId,
+    responsibleUserId: session.responsibleUserId,
+    queueId: session.queueId,
+    relatedServiceSessionId: session.relatedServiceSessionId,
+    status: session.status,
+    controlMode: session.controlMode,
+    priority: session.priority,
+    priorityReason: session.priorityReason,
+    prioritySource: session.prioritySource,
+    isForeground: session.isForeground,
+    version: session.version,
+    publicContinuationCode: session.publicContinuationCode,
+    continuationCodeExpiresAt:
+      session.continuationCodeExpiresAt?.toISOString() ?? null,
+    conversationResolved: session.conversationResolved,
+    pendingActions: session.pendingActions,
+    resolutionConfirmedByCustomer: session.resolutionConfirmedByCustomer,
+    closingStartedAt: session.closingStartedAt?.toISOString() ?? null,
+    closingDeadlineAt: session.closingDeadlineAt?.toISOString() ?? null,
+    offHoursHandoffNotifiedAt:
+      session.offHoursHandoffNotifiedAt?.toISOString() ?? null,
+    closedAt: session.closedAt?.toISOString() ?? null,
+  };
+}
+
+function automaticReplyBlocked(session: ServiceSessionAuthorization): boolean {
+  return (
+    session.controlMode !== ServiceSessionControlMode.AI ||
+    session.status !== ServiceSessionStatus.OPEN ||
+    !session.isForeground
+  );
+}
+
+function pendingActionsAreEmpty(value: Prisma.JsonValue): boolean {
+  return Array.isArray(value) && value.length === 0;
+}
+
 function payload(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
+}
+
+function optionalJsonRecord(
+  value: Readonly<Record<string, unknown>> | undefined,
+): Readonly<Record<string, unknown>> {
+  return value ?? {};
+}
+
+function optionalMediaText(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function mediaAssetType(
+  kind: CanonicalMessageKind,
+  media: Readonly<Record<string, unknown>> | undefined,
+): MediaAssetType | null {
+  switch (kind) {
+    case 'audio':
+      return MediaAssetType.AUDIO;
+    case 'image':
+      return MediaAssetType.IMAGE;
+    case 'document': {
+      const mimeType = optionalMediaText(media?.mimeType ?? media?.mimetype)
+        .trim()
+        .toLowerCase();
+      const fileName = optionalMediaText(media?.fileName).trim().toLowerCase();
+      return mimeType.includes('spreadsheet') ||
+        mimeType.includes('excel') ||
+        mimeType === 'text/csv' ||
+        /\.(?:xlsx?|csv)$/iu.test(fileName)
+        ? MediaAssetType.SPREADSHEET
+        : MediaAssetType.DOCUMENT;
+    }
+    case 'location':
+      return MediaAssetType.LOCATION;
+    case 'contact':
+      return MediaAssetType.CONTACT;
+    case 'video':
+      return MediaAssetType.VIDEO;
+    case 'sticker':
+      return MediaAssetType.OTHER;
+    default:
+      return null;
+  }
+}
+
+function optionalSafeInteger(value: unknown): number | null {
+  return Number.isSafeInteger(value) && Number(value) >= 0
+    ? Number(value)
+    : null;
+}
+
+function optionalFiniteNumber(value: unknown): number | null {
+  const numeric = typeof value === 'string' ? Number(value) : value;
+  return typeof numeric === 'number' && Number.isFinite(numeric) && numeric >= 0
+    ? numeric
+    : null;
+}
+
+interface MessageMediaInterpretationRow {
+  readonly id: string;
+  readonly status: string;
+  readonly transcription: string | null;
+  readonly extractedText: string | null;
+  readonly summary: string | null;
+  readonly structuredData: Prisma.JsonValue | null;
+  readonly provenance: Prisma.JsonValue;
+  readonly errorCode: string | null;
+  readonly completedAt: Date | null;
+  readonly correction: {
+    readonly correction: string;
+    readonly feedback: string | null;
+    readonly correctedByUserId: string;
+    readonly createdAt: Date;
+  } | null;
+}
+
+interface MessageMediaAssetRow {
+  readonly id: string;
+  readonly type: MediaAssetType;
+  readonly status: MediaProcessingStatus;
+  readonly mimeType: string | null;
+  readonly originalName: string | null;
+  readonly sizeBytes: number | null;
+  readonly sha256: string | null;
+  readonly durationSeconds: Prisma.Decimal | null;
+  readonly pageCount: number | null;
+  readonly storedAt: Date | null;
+  readonly interpretation: MessageMediaInterpretationRow | null;
+}
+
+function machineMediaContext(
+  interpretation: MessageMediaInterpretationRow | null,
+): string | null {
+  if (!interpretation) return null;
+  return (
+    interpretation.summary?.trim() ||
+    interpretation.transcription?.trim() ||
+    interpretation.extractedText?.trim() ||
+    (interpretation.structuredData
+      ? JSON.stringify(interpretation.structuredData)
+      : null)
+  );
+}
+
+function automationMediaContext(asset: MessageMediaAssetRow | null): {
+  readonly mediaInterpretationStatus:
+    'not-requested' | 'pending' | 'succeeded' | 'failed' | 'unsupported';
+  readonly interpretedText: string | null;
+  readonly interpretationSource: 'human' | 'machine' | 'none';
+  readonly mediaInterpretationId: string | null;
+} {
+  if (!asset) {
+    return {
+      mediaInterpretationStatus: 'not-requested',
+      interpretedText: null,
+      interpretationSource: 'none',
+      mediaInterpretationId: null,
+    };
+  }
+  const interpretation = asset.interpretation;
+  const effective = effectiveMediaInterpretation({
+    machineInterpretation: machineMediaContext(interpretation),
+    humanCorrection: interpretation?.correction?.correction ?? null,
+  });
+  const persistedStatus = interpretation?.status.toLowerCase();
+  const mediaInterpretationStatus =
+    persistedStatus === 'pending' ||
+    persistedStatus === 'succeeded' ||
+    persistedStatus === 'failed' ||
+    persistedStatus === 'unsupported'
+      ? persistedStatus
+      : asset.status === MediaProcessingStatus.PROCESSING
+        ? 'pending'
+        : asset.status === MediaProcessingStatus.FAILED
+          ? 'failed'
+          : asset.status === MediaProcessingStatus.UNSUPPORTED
+            ? 'unsupported'
+            : 'not-requested';
+  return {
+    mediaInterpretationStatus,
+    interpretedText: effective.value,
+    interpretationSource: effective.source,
+    mediaInterpretationId:
+      mediaInterpretationStatus === 'succeeded' &&
+      Boolean(effective.value?.trim()) &&
+      (effective.source === 'machine' || effective.source === 'human')
+        ? (interpretation?.id ?? null)
+        : null,
+  };
+}
+
+function presentMessageMediaAsset(asset: MessageMediaAssetRow | null) {
+  if (!asset) return null;
+  const interpretation = asset.interpretation;
+  const effective = automationMediaContext(asset);
+  return {
+    id: asset.id,
+    type: asset.type.toLowerCase(),
+    status: asset.status.toLowerCase(),
+    mimeType: asset.mimeType,
+    originalName: asset.originalName,
+    sizeBytes: asset.sizeBytes,
+    sha256: asset.sha256,
+    durationSeconds:
+      asset.durationSeconds === null ? null : Number(asset.durationSeconds),
+    pageCount: asset.pageCount,
+    storedAt: asset.storedAt?.toISOString() ?? null,
+    interpretation: interpretation
+      ? {
+          status: effective.mediaInterpretationStatus,
+          transcription: interpretation.transcription,
+          extractedText: interpretation.extractedText,
+          summary: interpretation.summary,
+          structuredData: interpretation.structuredData,
+          provenance: interpretation.provenance,
+          errorCode: interpretation.errorCode,
+          completedAt: interpretation.completedAt?.toISOString() ?? null,
+          correction: interpretation.correction
+            ? {
+                correction: interpretation.correction.correction,
+                feedback: interpretation.correction.feedback,
+                correctedByUserId: interpretation.correction.correctedByUserId,
+                createdAt: interpretation.correction.createdAt.toISOString(),
+              }
+            : null,
+          effectiveContext: {
+            value: effective.interpretedText,
+            source: effective.interpretationSource,
+          },
+        }
+      : null,
+  };
+}
+
+const messageMediaAssetInclude = {
+  interpretation: {
+    include: {
+      correction: {
+        select: {
+          correction: true,
+          feedback: true,
+          correctedByUserId: true,
+          createdAt: true,
+        },
+      },
+    },
+  },
+} satisfies Prisma.MediaAssetInclude;
+
+async function createWebhookMediaAsset(
+  transaction: Prisma.TransactionClient,
+  input: {
+    readonly companyId: string;
+    readonly kind: CanonicalMessageKind;
+    readonly media?: Readonly<Record<string, unknown>>;
+    readonly occurredAt: Date;
+    readonly group: boolean;
+  },
+): Promise<string | null> {
+  const type = mediaAssetType(input.kind, input.media);
+  if (!type) return null;
+  const media = optionalJsonRecord(input.media);
+  const mimeType =
+    optionalMediaText(media.mimeType ?? media.mimetype).trim() || null;
+  const originalName = optionalMediaText(media.fileName).trim() || null;
+  const sizeBytes = optionalSafeInteger(media.size ?? media.sizeBytes);
+  const durationSeconds = optionalFiniteNumber(
+    media.durationSeconds ?? media.seconds,
+  );
+  const preserveOnly =
+    input.group ||
+    type === MediaAssetType.VIDEO ||
+    type === MediaAssetType.OTHER;
+  const metadataOnly =
+    type === MediaAssetType.LOCATION || type === MediaAssetType.CONTACT;
+  const asset = await transaction.mediaAsset.create({
+    data: {
+      companyId: input.companyId,
+      type,
+      status: preserveOnly
+        ? MediaProcessingStatus.UNSUPPORTED
+        : metadataOnly
+          ? MediaProcessingStatus.STORED
+          : MediaProcessingStatus.PROCESSING,
+      mimeType,
+      originalName,
+      sizeBytes,
+      durationSeconds,
+      storedAt: metadataOnly ? input.occurredAt : null,
+      metadata: payload({
+        source: input.group
+          ? 'evolution-whatsapp-group'
+          : 'evolution-whatsapp-direct',
+        interpretationPolicy: preserveOnly ? 'preserve-only' : 'eligible',
+        webhookMedia: media,
+      }),
+    },
+    select: { id: true },
+  });
+  return asset.id;
 }
 
 function correlation(prefix: string, value: string): string {
@@ -771,6 +1272,681 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
       false;
   }
 
+  private async ensureFoundationForConversation(
+    transaction: Prisma.TransactionClient,
+    conversation: Pick<
+      ConversationWithRelations,
+      | 'id'
+      | 'companyId'
+      | 'channelId'
+      | 'contactId'
+      | 'threadId'
+      | 'department'
+      | 'conversationState'
+      | 'assignedToUserId'
+      | 'closedAt'
+    >,
+    options: {
+      commandSeed: string;
+      occurredAt: Date;
+      direction?: MessageDirection;
+      desiredConversationState?: ConversationState;
+      messageText?: string;
+    },
+  ): Promise<FoundationContext> {
+    const thread = await transaction.whatsAppThread.upsert({
+      where: {
+        companyId_sourceChannelId_contactId: {
+          companyId: conversation.companyId,
+          sourceChannelId: conversation.channelId,
+          contactId: conversation.contactId,
+        },
+      },
+      create: {
+        companyId: conversation.companyId,
+        sourceChannelId: conversation.channelId,
+        contactId: conversation.contactId,
+        ...(options.direction === MessageDirection.INBOUND
+          ? { lastInboundAt: options.occurredAt }
+          : options.direction === MessageDirection.OUTBOUND
+            ? { lastOutboundAt: options.occurredAt }
+            : {}),
+      },
+      update: {},
+      select: { id: true },
+    });
+
+    if (options.direction === MessageDirection.INBOUND) {
+      await transaction.whatsAppThread.updateMany({
+        where: {
+          id: thread.id,
+          companyId: conversation.companyId,
+          OR: [
+            { lastInboundAt: null },
+            { lastInboundAt: { lt: options.occurredAt } },
+          ],
+        },
+        data: { lastInboundAt: options.occurredAt },
+      });
+    } else if (options.direction === MessageDirection.OUTBOUND) {
+      await transaction.whatsAppThread.updateMany({
+        where: {
+          id: thread.id,
+          companyId: conversation.companyId,
+          OR: [
+            { lastOutboundAt: null },
+            { lastOutboundAt: { lt: options.occurredAt } },
+          ],
+        },
+        data: { lastOutboundAt: options.occurredAt },
+      });
+    }
+
+    if (conversation.threadId !== thread.id) {
+      await transaction.whatsAppConversation.updateMany({
+        where: { id: conversation.id, companyId: conversation.companyId },
+        data: { threadId: thread.id },
+      });
+    }
+
+    await this.lockCommand(
+      transaction,
+      conversation.companyId,
+      'service-session-lifecycle',
+      thread.id,
+    );
+
+    let session = await transaction.serviceSession.findFirst({
+      where: {
+        companyId: conversation.companyId,
+        threadId: thread.id,
+        isForeground: true,
+        status: { not: ServiceSessionStatus.CLOSED },
+      },
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+      select: serviceSessionAuthorizationSelect,
+    });
+
+    if (
+      session &&
+      options.direction === MessageDirection.INBOUND &&
+      session.status === ServiceSessionStatus.CLOSING
+    ) {
+      const before = serviceSessionSnapshot(session);
+      const commandId = correlation(
+        'service-session-closing-cancelled',
+        `${options.commandSeed}:${session.id}`,
+      );
+      const cancelled = await transaction.serviceSession.updateMany({
+        where: {
+          id: session.id,
+          companyId: conversation.companyId,
+          version: session.version,
+          status: ServiceSessionStatus.CLOSING,
+          controlMode: ServiceSessionControlMode.AI,
+        },
+        data: {
+          status: ServiceSessionStatus.OPEN,
+          conversationResolved: false,
+          resolutionConfirmedByCustomer: false,
+          closingStartedAt: null,
+          closingDeadlineAt: null,
+          version: { increment: 1 },
+        },
+      });
+      if (cancelled.count !== 1) {
+        throw new AppError(
+          'CONFLICT',
+          'A sessão mudou durante o cancelamento do encerramento.',
+        );
+      }
+      session = await transaction.serviceSession.findUniqueOrThrow({
+        where: {
+          id_companyId: {
+            id: session.id,
+            companyId: conversation.companyId,
+          },
+        },
+        select: serviceSessionAuthorizationSelect,
+      });
+      const after = serviceSessionSnapshot(session);
+      await transaction.serviceSessionEvent.create({
+        data: {
+          companyId: conversation.companyId,
+          serviceSessionId: session.id,
+          commandId,
+          commandFingerprint: commandFingerprint({
+            commandId,
+            before,
+            after,
+            message: options.commandSeed,
+          }),
+          name: 'customer-replied-during-ai-closing',
+          expectedVersion: before.version,
+          resultingVersion: after.version,
+          actorType: MutationActorType.SERVICE,
+          beforeSnapshot: payload(before),
+          afterSnapshot: payload(after),
+          metadata: payload({ source: 'whatsapp-app' }),
+          createdAt: options.occurredAt,
+        },
+      });
+    }
+
+    if (
+      session &&
+      options.direction === MessageDirection.INBOUND &&
+      (session.conversationResolved || session.resolutionConfirmedByCustomer)
+    ) {
+      session = await this.updateFoundationSession(transaction, {
+        companyId: conversation.companyId,
+        session,
+        commandId: correlation(
+          'customer-reset-ai-resolution',
+          `${options.commandSeed}:${session.id}`,
+        ),
+        name: 'customer-message-reset-ai-resolution',
+        actorType: MutationActorType.SERVICE,
+        status: session.status,
+        controlMode: session.controlMode,
+        isForeground: session.isForeground,
+        conversationResolved: false,
+        resolutionConfirmedByCustomer: false,
+        occurredAt: options.occurredAt,
+        metadata: {
+          source: 'whatsapp-app',
+          conversationId: conversation.id,
+        },
+      });
+    }
+
+    if (!session) {
+      const desiredState =
+        options.desiredConversationState ?? conversation.conversationState;
+      const desired = serviceSessionStateForConversation(desiredState);
+      const department = await transaction.tenantDepartment.findUnique({
+        where: {
+          companyId_code: {
+            companyId: conversation.companyId,
+            code: conversation.department,
+          },
+        },
+        select: { id: true },
+      });
+      const continuationCode = parsePublicContinuationCommand(
+        options.messageText ?? '',
+      );
+      const validCodeSession =
+        options.direction === MessageDirection.INBOUND && continuationCode
+          ? await transaction.serviceSession.findFirst({
+              where: {
+                companyId: conversation.companyId,
+                threadId: thread.id,
+                status: ServiceSessionStatus.CLOSED,
+                publicContinuationCode: continuationCode,
+                continuationCodeExpiresAt: { gt: options.occurredAt },
+                closedAt: { not: null },
+              },
+              orderBy: [{ closedAt: 'desc' }, { id: 'desc' }],
+              select: serviceSessionAuthorizationSelect,
+            })
+          : null;
+      const previousClosed =
+        validCodeSession ??
+        (options.direction === MessageDirection.INBOUND
+          ? await transaction.serviceSession.findFirst({
+              where: {
+                companyId: conversation.companyId,
+                threadId: thread.id,
+                status: ServiceSessionStatus.CLOSED,
+                closedAt: { not: null },
+              },
+              orderBy: [{ closedAt: 'desc' }, { id: 'desc' }],
+              select: serviceSessionAuthorizationSelect,
+            })
+          : null);
+      const continuity =
+        previousClosed?.closedAt &&
+        options.direction === MessageDirection.INBOUND
+          ? decideServiceContinuity({
+              now: options.occurredAt,
+              previousClosedAt: previousClosed.closedAt,
+              validPublicContinuationCode: validCodeSession !== null,
+            })
+          : null;
+
+      if (previousClosed && continuity?.action === 'reopen-previous') {
+        const before = serviceSessionSnapshot(previousClosed);
+        const reopened = await transaction.serviceSession.updateMany({
+          where: {
+            id: previousClosed.id,
+            companyId: conversation.companyId,
+            version: previousClosed.version,
+            status: ServiceSessionStatus.CLOSED,
+            isForeground: false,
+          },
+          data: {
+            status: ServiceSessionStatus.OPEN,
+            controlMode: ServiceSessionControlMode.AI,
+            isForeground: true,
+            responsibleUserId: null,
+            queueId: null,
+            publicContinuationCode: null,
+            continuationCodeExpiresAt: null,
+            conversationResolved: false,
+            pendingActions: [],
+            resolutionConfirmedByCustomer: false,
+            closingStartedAt: null,
+            closingDeadlineAt: null,
+            closedAt: null,
+            version: { increment: 1 },
+          },
+        });
+        if (reopened.count !== 1) {
+          throw new AppError(
+            'CONFLICT',
+            'A sessão mudou durante a decisão de continuidade.',
+          );
+        }
+        session = await transaction.serviceSession.findUniqueOrThrow({
+          where: {
+            id_companyId: {
+              id: previousClosed.id,
+              companyId: conversation.companyId,
+            },
+          },
+          select: serviceSessionAuthorizationSelect,
+        });
+        const after = serviceSessionSnapshot(session);
+        const commandId = correlation(
+          'service-session-reopened',
+          `${options.commandSeed}:${session.id}`,
+        );
+        await transaction.serviceSessionEvent.create({
+          data: {
+            companyId: conversation.companyId,
+            serviceSessionId: session.id,
+            commandId,
+            commandFingerprint: commandFingerprint({
+              commandId,
+              before,
+              after,
+              continuity,
+            }),
+            name: 'service-session-reopened',
+            expectedVersion: previousClosed.version,
+            resultingVersion: session.version,
+            actorType: MutationActorType.SERVICE,
+            beforeSnapshot: payload(before),
+            afterSnapshot: payload(after),
+            metadata: payload({
+              source: 'whatsapp-app',
+              publicCode: validCodeSession !== null,
+            }),
+            createdAt: options.occurredAt,
+          },
+        });
+      } else {
+        session = await transaction.serviceSession.create({
+          data: {
+            companyId: conversation.companyId,
+            threadId: thread.id,
+            sourceChannelId: conversation.channelId,
+            currentDepartmentId: department?.id,
+            responsibleUserId:
+              desired.controlMode === ServiceSessionControlMode.HUMAN
+                ? conversation.assignedToUserId
+                : null,
+            status: desired.status,
+            controlMode: desired.controlMode,
+            isForeground: desired.isForeground,
+            ...(desired.status === ServiceSessionStatus.CLOSED
+              ? { closedAt: conversation.closedAt ?? options.occurredAt }
+              : {}),
+          },
+          select: serviceSessionAuthorizationSelect,
+        });
+        const commandId = correlation(
+          'service-session-created',
+          `${options.commandSeed}:${session.id}`,
+        );
+        const after = serviceSessionSnapshot(session);
+        await transaction.serviceSessionEvent.create({
+          data: {
+            companyId: conversation.companyId,
+            serviceSessionId: session.id,
+            commandId,
+            commandFingerprint: commandFingerprint({
+              commandId,
+              conversationId: conversation.id,
+              threadId: thread.id,
+              after,
+            }),
+            name: 'dual-write-session-created',
+            expectedVersion: 0,
+            resultingVersion: 1,
+            actorType: MutationActorType.SERVICE,
+            beforeSnapshot: payload({}),
+            afterSnapshot: payload(after),
+            metadata: payload({
+              source: 'legacy-facade-dual-write',
+              conversationId: conversation.id,
+            }),
+            createdAt: options.occurredAt,
+          },
+        });
+      }
+
+      if (previousClosed && continuity) {
+        const decisionCommandId = correlation(
+          'service-session-continuity',
+          `${options.commandSeed}:${previousClosed.id}`,
+        );
+        await transaction.serviceSessionContinuityDecision.create({
+          data: {
+            companyId: conversation.companyId,
+            commandId: decisionCommandId,
+            sourceServiceSessionId: previousClosed.id,
+            targetServiceSessionId: session.id,
+            targetDepartmentId: session.currentDepartmentId,
+            classification:
+              continuity.classification === 'new-subject'
+                ? ContinuityClassification.NEW_SUBJECT
+                : continuity.classification === 'uncertain'
+                  ? ContinuityClassification.UNCERTAIN
+                  : ContinuityClassification.CONTINUATION,
+            fallbackAction:
+              continuity.classification === 'public-code'
+                ? null
+                : continuity.action === 'create-new'
+                  ? ContinuityFallbackAction.CREATE_NEW
+                  : continuity.fallbackAction === 'reopen-on-uncertain'
+                    ? ContinuityFallbackAction.REOPEN_PREVIOUS
+                    : null,
+            confidence: continuity.confidence,
+            reason: continuity.reason,
+            createdAt: options.occurredAt,
+          },
+        });
+      }
+    }
+
+    await transaction.quoteRequest.updateMany({
+      where: {
+        companyId: conversation.companyId,
+        conversationId: conversation.id,
+        OR: [{ threadId: null }, { serviceSessionId: null }],
+      },
+      data: { threadId: thread.id, serviceSessionId: session.id },
+    });
+    await transaction.quoteProposalDocument.updateMany({
+      where: {
+        companyId: conversation.companyId,
+        conversationId: conversation.id,
+        OR: [{ threadId: null }, { serviceSessionId: null }],
+      },
+      data: { threadId: thread.id, serviceSessionId: session.id },
+    });
+
+    return { threadId: thread.id, session };
+  }
+
+  private async resolveRegistrationCandidates(
+    transaction: Prisma.TransactionClient,
+    input: {
+      companyId: string;
+      serviceSessionId: string;
+      whatsappContactId: string;
+      phoneNormalized: string;
+      occurredAt: Date;
+    },
+  ): Promise<void> {
+    const candidates = await transaction.registrationPhone.findMany({
+      where: {
+        companyId: input.companyId,
+        normalizedValue: input.phoneNormalized,
+        OR: [{ activeFrom: null }, { activeFrom: { lte: input.occurredAt } }],
+        AND: [
+          {
+            OR: [
+              { activeUntil: null },
+              { activeUntil: { gte: input.occurredAt } },
+            ],
+          },
+        ],
+      },
+      distinct: ['registrationId'],
+      select: { registrationId: true },
+    });
+    const existing = await transaction.conversationParticipant.findMany({
+      where: {
+        companyId: input.companyId,
+        serviceSessionId: input.serviceSessionId,
+        whatsappContactId: input.whatsappContactId,
+        validUntil: null,
+      },
+      select: { registrationId: true, isPrimary: true },
+    });
+    const existingRegistrationIds = new Set(
+      existing.flatMap((item) =>
+        item.registrationId ? [item.registrationId] : [],
+      ),
+    );
+    const missing = candidates.filter(
+      (candidate) => !existingRegistrationIds.has(candidate.registrationId),
+    );
+    const hasPrimary = existing.some((item) => item.isPrimary);
+
+    if (missing.length > 0) {
+      await transaction.conversationParticipant.createMany({
+        data: missing.map((candidate) => ({
+          companyId: input.companyId,
+          serviceSessionId: input.serviceSessionId,
+          whatsappContactId: input.whatsappContactId,
+          registrationId: candidate.registrationId,
+          role: ConversationParticipantRole.UNKNOWN,
+          isPrimary: !hasPrimary && candidates.length === 1,
+          confidence: candidates.length === 1 ? 1 : undefined,
+          identificationSource: 'registration-phone-candidate',
+          metadata: payload({ candidate: true }),
+          validFrom: input.occurredAt,
+        })),
+      });
+    } else if (candidates.length === 0 && existing.length === 0) {
+      await transaction.conversationParticipant.create({
+        data: {
+          companyId: input.companyId,
+          serviceSessionId: input.serviceSessionId,
+          whatsappContactId: input.whatsappContactId,
+          role: ConversationParticipantRole.UNKNOWN,
+          isPrimary: true,
+          identificationSource: 'whatsapp-contact-only',
+          metadata: payload({ candidate: false }),
+          validFrom: input.occurredAt,
+        },
+      });
+    }
+  }
+
+  private async updateFoundationSession(
+    transaction: Prisma.TransactionClient,
+    input: {
+      companyId: string;
+      session: ServiceSessionAuthorization;
+      commandId: string;
+      name: string;
+      actorType: MutationActorType;
+      actorUserId?: string;
+      actorAgentId?: string;
+      status: ServiceSessionStatus;
+      controlMode: ServiceSessionControlMode;
+      isForeground: boolean;
+      responsibleUserId?: string | null;
+      currentDepartmentId?: string | null;
+      queueId?: string | null;
+      priority?: ServiceSessionPriority;
+      priorityReason?: string | null;
+      prioritySource?: ServiceSessionPrioritySource;
+      offHoursHandoffNotifiedAt?: Date | null;
+      conversationResolved?: boolean;
+      resolutionConfirmedByCustomer?: boolean;
+      occurredAt: Date;
+      metadata?: Readonly<Record<string, unknown>>;
+    },
+  ): Promise<ServiceSessionAuthorization> {
+    const before = serviceSessionSnapshot(input.session);
+    const responsibleUserId =
+      input.responsibleUserId === undefined
+        ? input.session.responsibleUserId
+        : input.responsibleUserId;
+    const currentDepartmentId =
+      input.currentDepartmentId === undefined
+        ? input.session.currentDepartmentId
+        : input.currentDepartmentId;
+    const queueId =
+      input.queueId === undefined ? input.session.queueId : input.queueId;
+    const priority =
+      input.priority === undefined ? input.session.priority : input.priority;
+    const priorityReason =
+      input.priorityReason === undefined
+        ? input.session.priorityReason
+        : input.priorityReason;
+    const prioritySource =
+      input.prioritySource === undefined
+        ? input.session.prioritySource
+        : input.prioritySource;
+    const offHoursHandoffNotifiedAt =
+      input.offHoursHandoffNotifiedAt === undefined
+        ? input.session.offHoursHandoffNotifiedAt
+        : input.offHoursHandoffNotifiedAt;
+    const conversationResolved =
+      input.conversationResolved === undefined
+        ? input.session.conversationResolved
+        : input.conversationResolved;
+    const resolutionConfirmedByCustomer =
+      input.resolutionConfirmedByCustomer === undefined
+        ? input.session.resolutionConfirmedByCustomer
+        : input.resolutionConfirmedByCustomer;
+    if (
+      input.session.status === input.status &&
+      input.session.controlMode === input.controlMode &&
+      input.session.isForeground === input.isForeground &&
+      input.session.responsibleUserId === responsibleUserId &&
+      input.session.currentDepartmentId === currentDepartmentId &&
+      input.session.queueId === queueId &&
+      input.session.priority === priority &&
+      input.session.priorityReason === priorityReason &&
+      input.session.prioritySource === prioritySource &&
+      input.session.offHoursHandoffNotifiedAt?.valueOf() ===
+        offHoursHandoffNotifiedAt?.valueOf() &&
+      input.session.conversationResolved === conversationResolved &&
+      input.session.resolutionConfirmedByCustomer ===
+        resolutionConfirmedByCustomer
+    ) {
+      return input.session;
+    }
+
+    const updated = await transaction.serviceSession.updateMany({
+      where: {
+        id: input.session.id,
+        companyId: input.companyId,
+        version: input.session.version,
+      },
+      data: {
+        status: input.status,
+        controlMode: input.controlMode,
+        isForeground: input.isForeground,
+        responsibleUserId,
+        currentDepartmentId,
+        queueId,
+        priority,
+        priorityReason,
+        prioritySource,
+        offHoursHandoffNotifiedAt,
+        conversationResolved,
+        resolutionConfirmedByCustomer,
+        ...(input.status === ServiceSessionStatus.CLOSING
+          ? {}
+          : { closingStartedAt: null, closingDeadlineAt: null }),
+        ...(input.status === ServiceSessionStatus.CLOSED
+          ? {}
+          : {
+              publicContinuationCode: null,
+              continuationCodeExpiresAt: null,
+            }),
+        closedAt:
+          input.status === ServiceSessionStatus.CLOSED
+            ? input.occurredAt
+            : null,
+        version: { increment: 1 },
+      },
+    });
+    if (updated.count !== 1) {
+      throw new AppError(
+        'CONFLICT',
+        'A sessão de atendimento foi alterada durante o comando.',
+      );
+    }
+    const session = await transaction.serviceSession.findUniqueOrThrow({
+      where: {
+        id_companyId: { id: input.session.id, companyId: input.companyId },
+      },
+      select: serviceSessionAuthorizationSelect,
+    });
+    const after = serviceSessionSnapshot(session);
+    await transaction.serviceSessionEvent.create({
+      data: {
+        companyId: input.companyId,
+        serviceSessionId: session.id,
+        commandId: input.commandId,
+        commandFingerprint: commandFingerprint({
+          commandId: input.commandId,
+          name: input.name,
+          before,
+          after,
+          metadata: input.metadata,
+        }),
+        name: input.name,
+        expectedVersion: input.session.version,
+        resultingVersion: session.version,
+        actorType: input.actorType,
+        actorUserId: input.actorUserId,
+        actorAgentId: input.actorAgentId,
+        beforeSnapshot: payload(before),
+        afterSnapshot: payload(after),
+        metadata: payload(input.metadata ?? {}),
+        createdAt: input.occurredAt,
+      },
+    });
+    return session;
+  }
+
+  private assertSessionAllowsAutomaticReply(
+    conversation: Pick<
+      ConversationWithRelations,
+      'conversationState' | 'flowStep' | 'assignedToUserId'
+    >,
+    session: ServiceSessionAuthorization,
+  ): void {
+    if (
+      automaticReplyBlocked(session) ||
+      conversation.conversationState !== ConversationState.BOT_ACTIVE ||
+      conversation.flowStep === FlowStep.HUMAN_SERVICE ||
+      conversation.assignedToUserId !== null
+    ) {
+      throw new AppError(
+        'CONFLICT',
+        'A sessão não permite geração ou envio de resposta automática.',
+        {
+          serviceSessionId: session.id,
+          serviceSessionVersion: session.version,
+          controlMode: session.controlMode.toLowerCase(),
+          status: session.status.toLowerCase(),
+        },
+      );
+    }
+  }
+
   async findWebhookChannel(
     channelId: string,
   ): Promise<WebhookChannelConfiguration | null> {
@@ -786,6 +1962,2085 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         enabled: true,
       },
     });
+  }
+
+  async assertAutomaticReplyAllowed(
+    companyId: string,
+    conversationId: string,
+  ): Promise<{
+    allowed: true;
+    threadId: string;
+    serviceSessionId: string;
+    serviceSessionVersion: number;
+  }> {
+    return this.prisma.$transaction(async (transaction) => {
+      await this.lockCommand(
+        transaction,
+        companyId,
+        'whatsapp-conversation',
+        conversationId,
+      );
+      const conversation = await this.findConversationOrThrow(
+        transaction,
+        companyId,
+        conversationId,
+      );
+      if (!conversation.threadId) {
+        throw new AppError(
+          'CONFLICT',
+          'A conversa ainda não possui thread para autorizar automação.',
+        );
+      }
+      const session = await transaction.serviceSession.findFirst({
+        where: {
+          companyId,
+          threadId: conversation.threadId,
+          isForeground: true,
+          status: { not: ServiceSessionStatus.CLOSED },
+        },
+        orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+        select: serviceSessionAuthorizationSelect,
+      });
+      if (!session) {
+        throw new AppError(
+          'CONFLICT',
+          'A conversa não possui sessão ativa para autorizar automação.',
+        );
+      }
+      this.assertSessionAllowsAutomaticReply(conversation, session);
+      return {
+        allowed: true,
+        threadId: conversation.threadId,
+        serviceSessionId: session.id,
+        serviceSessionVersion: session.version,
+      };
+    });
+  }
+
+  async getPendingContinuityClassification(
+    companyId: string,
+    conversationId: string,
+    sourceEventId: string,
+  ): Promise<ContinuityClassificationCandidate | null> {
+    const anchor = await this.prisma.whatsAppMessage.findUnique({
+      where: {
+        companyId_correlationId: { companyId, correlationId: sourceEventId },
+      },
+      select: {
+        id: true,
+        companyId: true,
+        conversationId: true,
+        serviceSessionId: true,
+        direction: true,
+        kind: true,
+        text: true,
+        occurredAt: true,
+      },
+    });
+    if (
+      !anchor ||
+      anchor.companyId !== companyId ||
+      anchor.conversationId !== conversationId ||
+      anchor.direction !== MessageDirection.INBOUND ||
+      !anchor.serviceSessionId
+    ) {
+      return null;
+    }
+    const decision =
+      await this.prisma.serviceSessionContinuityDecision.findFirst({
+        where: {
+          companyId,
+          sourceServiceSessionId: anchor.serviceSessionId,
+          targetServiceSessionId: anchor.serviceSessionId,
+          classification: ContinuityClassification.UNCERTAIN,
+          fallbackAction: ContinuityFallbackAction.REOPEN_PREVIOUS,
+          agentExecutionId: null,
+          createdAt: anchor.occurredAt,
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        select: { id: true, sourceServiceSessionId: true },
+      });
+    if (!decision) return null;
+
+    const session = await this.prisma.serviceSession.findUnique({
+      where: {
+        id_companyId: {
+          id: decision.sourceServiceSessionId,
+          companyId,
+        },
+      },
+      select: serviceSessionAuthorizationSelect,
+    });
+    if (
+      !session ||
+      session.status !== ServiceSessionStatus.OPEN ||
+      session.controlMode !== ServiceSessionControlMode.AI ||
+      !session.isForeground
+    ) {
+      return null;
+    }
+
+    const [previousDescending, allowedDepartments] = await Promise.all([
+      this.prisma.whatsAppMessage.findMany({
+        where: {
+          companyId,
+          conversationId,
+          serviceSessionId: session.id,
+          occurredAt: { lt: anchor.occurredAt },
+          text: { not: null },
+        },
+        orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+        take: 12,
+        select: { direction: true, text: true, occurredAt: true },
+      }),
+      this.prisma.tenantDepartment.findMany({
+        where: {
+          companyId,
+          OR: [
+            ...(session.currentDepartmentId
+              ? [{ id: session.currentDepartmentId }]
+              : []),
+            {
+              automaticTargetChannels: {
+                some: { companyId, channelId: session.sourceChannelId },
+              },
+            },
+          ],
+        },
+        orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+        select: { id: true, code: true, name: true },
+      }),
+    ]);
+
+    return {
+      decisionId: decision.id,
+      sourceServiceSessionId: session.id,
+      expectedVersion: session.version,
+      currentDepartmentId: session.currentDepartmentId,
+      previousMessages: previousDescending.reverse().map((message) => ({
+        direction:
+          message.direction === MessageDirection.INBOUND
+            ? ('inbound' as const)
+            : ('outbound' as const),
+        text: message.text?.trim() ?? '',
+        occurredAt: message.occurredAt.toISOString(),
+      })),
+      userMessage:
+        anchor.text?.trim() ||
+        `[mensagem ${anchor.kind.toLowerCase()} sem texto disponível]`,
+      allowedTargetDepartments: allowedDepartments.map((department) => ({
+        id: department.id,
+        code: departmentFromPrisma[department.code],
+        name: department.name,
+      })),
+    };
+  }
+
+  async applyContinuityClassification(
+    input: ApplyContinuityClassificationInput,
+  ): Promise<ApplyContinuityClassificationResult> {
+    const reason = input.reason.trim().slice(0, 500);
+    if (!reason) {
+      throw validationError('A razão da classificação é obrigatória.');
+    }
+    if (
+      input.confidence !== null &&
+      (!Number.isFinite(input.confidence) ||
+        input.confidence < 0 ||
+        input.confidence > 1)
+    ) {
+      throw validationError('A confiança da classificação é inválida.');
+    }
+    if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 1) {
+      throw validationError('A versão esperada da sessão é inválida.');
+    }
+    if (
+      (input.actorAgentId && !input.agentExecutionId) ||
+      (!input.actorAgentId && input.agentExecutionId)
+    ) {
+      throw validationError(
+        'Agente e execução precisam ser informados em conjunto.',
+      );
+    }
+
+    const fingerprint = commandFingerprint({
+      decisionId: input.decisionId,
+      conversationId: input.conversationId,
+      sourceEventId: input.sourceEventId,
+      expectedVersion: input.expectedVersion,
+      classification: input.classification,
+      confidence: input.confidence,
+      reason,
+      targetDepartmentId: input.targetDepartmentId,
+      actorAgentId: input.actorAgentId,
+      agentExecutionId: input.agentExecutionId,
+    });
+
+    return this.prisma.$transaction(async (transaction) => {
+      await this.lockCommand(
+        transaction,
+        input.companyId,
+        'continuity-classification',
+        input.commandId,
+      );
+      const replay = await transaction.serviceSessionEvent.findUnique({
+        where: {
+          companyId_commandId: {
+            companyId: input.companyId,
+            commandId: input.commandId,
+          },
+        },
+        select: {
+          commandFingerprint: true,
+          metadata: true,
+          serviceSessionId: true,
+        },
+      });
+      if (replay) {
+        assertSameFingerprint(
+          replay.commandFingerprint,
+          fingerprint,
+          'commandId',
+        );
+        const metadata = replay.metadata as Record<string, unknown>;
+        const serviceSessionId =
+          typeof metadata.targetServiceSessionId === 'string'
+            ? metadata.targetServiceSessionId
+            : replay.serviceSessionId;
+        const session = await transaction.serviceSession.findUniqueOrThrow({
+          where: {
+            id_companyId: { id: serviceSessionId, companyId: input.companyId },
+          },
+          select: { id: true, version: true },
+        });
+        return {
+          serviceSessionId: session.id,
+          version: session.version,
+          classification: input.classification,
+          idempotent: true,
+        };
+      }
+
+      await this.lockCommand(
+        transaction,
+        input.companyId,
+        'whatsapp-conversation',
+        input.conversationId,
+      );
+      let conversation = await this.findConversationOrThrow(
+        transaction,
+        input.companyId,
+        input.conversationId,
+      );
+      if (!conversation.threadId) {
+        throw new AppError(
+          'CONFLICT',
+          'A conversa não possui thread para classificar continuidade.',
+        );
+      }
+      await this.lockCommand(
+        transaction,
+        input.companyId,
+        'service-session-lifecycle',
+        conversation.threadId,
+      );
+      await this.lockCommand(
+        transaction,
+        input.companyId,
+        'continuity-decision',
+        input.decisionId,
+      );
+      conversation = await this.findConversationOrThrow(
+        transaction,
+        input.companyId,
+        input.conversationId,
+      );
+
+      const decision =
+        await transaction.serviceSessionContinuityDecision.findUnique({
+          where: {
+            id_companyId: {
+              id: input.decisionId,
+              companyId: input.companyId,
+            },
+          },
+        });
+      if (
+        !decision ||
+        decision.classification !== ContinuityClassification.UNCERTAIN ||
+        decision.fallbackAction !== ContinuityFallbackAction.REOPEN_PREVIOUS ||
+        decision.agentExecutionId !== null ||
+        decision.targetServiceSessionId !== decision.sourceServiceSessionId
+      ) {
+        throw new AppError(
+          'CONFLICT',
+          'A decisão de continuidade já foi concluída ou não é classificável.',
+        );
+      }
+      const anchor = await transaction.whatsAppMessage.findUnique({
+        where: {
+          companyId_correlationId: {
+            companyId: input.companyId,
+            correlationId: input.sourceEventId,
+          },
+        },
+        select: {
+          conversationId: true,
+          serviceSessionId: true,
+          direction: true,
+          occurredAt: true,
+        },
+      });
+      if (
+        !anchor ||
+        anchor.conversationId !== input.conversationId ||
+        anchor.serviceSessionId !== decision.sourceServiceSessionId ||
+        anchor.direction !== MessageDirection.INBOUND ||
+        anchor.occurredAt.valueOf() !== decision.createdAt.valueOf()
+      ) {
+        throw new AppError(
+          'CONFLICT',
+          'O evento de origem não corresponde à decisão de continuidade.',
+        );
+      }
+      const source = await transaction.serviceSession.findUnique({
+        where: {
+          id_companyId: {
+            id: decision.sourceServiceSessionId,
+            companyId: input.companyId,
+          },
+        },
+        select: serviceSessionAuthorizationSelect,
+      });
+      if (
+        !source ||
+        source.threadId !== conversation.threadId ||
+        source.version !== input.expectedVersion ||
+        source.status !== ServiceSessionStatus.OPEN ||
+        source.controlMode !== ServiceSessionControlMode.AI ||
+        !source.isForeground
+      ) {
+        throw new AppError(
+          'CONFLICT',
+          'A sessão mudou antes da classificação de continuidade.',
+          { currentVersion: source?.version ?? null },
+        );
+      }
+
+      let classifierExecutionStatus: AgentExecutionStatus | null = null;
+      if (input.actorAgentId && input.agentExecutionId) {
+        const execution = await transaction.agentExecution.findFirst({
+          where: {
+            id: input.agentExecutionId,
+            companyId: input.companyId,
+            agentId: input.actorAgentId,
+            serviceSessionId: source.id,
+            status: {
+              in: [AgentExecutionStatus.SUCCEEDED, AgentExecutionStatus.FAILED],
+            },
+            agent: {
+              code: 'continuity-classifier',
+              type: 'SILENT_CLASSIFIER',
+              customerFacing: false,
+            },
+          },
+          select: { id: true, status: true },
+        });
+        if (!execution) {
+          throw forbidden(
+            'A execução informada não pertence ao classificador deste atendimento.',
+          );
+        }
+        if (
+          execution.status === AgentExecutionStatus.FAILED &&
+          input.classification !== 'uncertain'
+        ) {
+          throw forbidden(
+            'Uma execução falha só pode produzir o fallback UNCERTAIN.',
+          );
+        }
+        classifierExecutionStatus = execution.status;
+      }
+
+      let targetDepartmentId = source.currentDepartmentId;
+      let targetDepartment: { id: string; code: DepartmentCode } | null = null;
+      if (input.classification === 'new-subject') {
+        targetDepartmentId =
+          input.targetDepartmentId ?? source.currentDepartmentId;
+        if (targetDepartmentId) {
+          targetDepartment = await transaction.tenantDepartment.findFirst({
+            where: { id: targetDepartmentId, companyId: input.companyId },
+            select: { id: true, code: true },
+          });
+          if (!targetDepartment) {
+            throw forbidden(
+              'O departamento de destino não pertence ao tenant.',
+            );
+          }
+          if (targetDepartmentId !== source.currentDepartmentId) {
+            const allowed =
+              await transaction.whatsAppChannelAutomaticTargetDepartment.findFirst(
+                {
+                  where: {
+                    companyId: input.companyId,
+                    channelId: source.sourceChannelId,
+                    departmentId: targetDepartmentId,
+                  },
+                  select: { id: true },
+                },
+              );
+            if (!allowed) {
+              throw forbidden(
+                'O departamento não está autorizado para roteamento automático neste canal.',
+              );
+            }
+          }
+        }
+      }
+
+      const now = new Date();
+      const actorType =
+        classifierExecutionStatus === AgentExecutionStatus.SUCCEEDED
+          ? MutationActorType.AI_AGENT
+          : MutationActorType.SERVICE;
+      const storedClassification =
+        input.classification === 'continuation'
+          ? ContinuityClassification.CONTINUATION
+          : input.classification === 'new-subject'
+            ? ContinuityClassification.NEW_SUBJECT
+            : ContinuityClassification.UNCERTAIN;
+      const fallbackAction =
+        input.classification === 'continuation'
+          ? null
+          : input.classification === 'new-subject'
+            ? ContinuityFallbackAction.CREATE_NEW
+            : ContinuityFallbackAction.REOPEN_PREVIOUS;
+      const before = serviceSessionSnapshot(source);
+      let targetSession: ServiceSessionAuthorization;
+
+      if (input.classification === 'new-subject') {
+        const closed = await transaction.serviceSession.updateMany({
+          where: {
+            id: source.id,
+            companyId: input.companyId,
+            version: input.expectedVersion,
+            status: ServiceSessionStatus.OPEN,
+            controlMode: ServiceSessionControlMode.AI,
+            isForeground: true,
+          },
+          data: {
+            status: ServiceSessionStatus.CLOSED,
+            isForeground: false,
+            responsibleUserId: null,
+            queueId: null,
+            publicContinuationCode: null,
+            continuationCodeExpiresAt: null,
+            closingStartedAt: null,
+            closingDeadlineAt: null,
+            closedAt: now,
+            version: { increment: 1 },
+          },
+        });
+        if (closed.count !== 1) {
+          throw new AppError(
+            'CONFLICT',
+            'A sessão mudou durante a classificação de continuidade.',
+          );
+        }
+        const closedSource = await transaction.serviceSession.findUniqueOrThrow(
+          {
+            where: {
+              id_companyId: { id: source.id, companyId: input.companyId },
+            },
+            select: serviceSessionAuthorizationSelect,
+          },
+        );
+        targetSession = await transaction.serviceSession.create({
+          data: {
+            companyId: input.companyId,
+            threadId: source.threadId,
+            sourceChannelId: source.sourceChannelId,
+            currentDepartmentId: targetDepartmentId,
+            relatedServiceSessionId: source.id,
+            status: ServiceSessionStatus.OPEN,
+            controlMode: ServiceSessionControlMode.AI,
+            priority: ServiceSessionPriority.NORMAL,
+            prioritySource: ServiceSessionPrioritySource.SYSTEM,
+            isForeground: true,
+            conversationResolved: false,
+            pendingActions: [],
+            resolutionConfirmedByCustomer: false,
+          },
+          select: serviceSessionAuthorizationSelect,
+        });
+
+        const movedMessages = await transaction.whatsAppMessage.updateMany({
+          where: {
+            companyId: input.companyId,
+            conversationId: input.conversationId,
+            serviceSessionId: source.id,
+            createdAt: { gte: decision.createdAt },
+          },
+          data: { serviceSessionId: targetSession.id },
+        });
+        if (movedMessages.count < 1) {
+          throw new AppError(
+            'CONFLICT',
+            'A mensagem que iniciou o novo assunto não pôde ser relacionada.',
+          );
+        }
+        await transaction.whatsAppConversationTransition.updateMany({
+          where: {
+            companyId: input.companyId,
+            conversationId: input.conversationId,
+            serviceSessionId: source.id,
+            createdAt: { gte: decision.createdAt },
+          },
+          data: { serviceSessionId: targetSession.id },
+        });
+        const participants = await transaction.conversationParticipant.findMany(
+          {
+            where: {
+              companyId: input.companyId,
+              serviceSessionId: source.id,
+              validUntil: null,
+            },
+            select: {
+              whatsappContactId: true,
+              registrationId: true,
+              role: true,
+              isPrimary: true,
+              confidence: true,
+              identificationSource: true,
+              confirmedByUserId: true,
+              confirmedAt: true,
+              metadata: true,
+            },
+          },
+        );
+        if (participants.length > 0) {
+          await transaction.conversationParticipant.createMany({
+            data: participants.map((participant) => ({
+              companyId: input.companyId,
+              serviceSessionId: targetSession.id,
+              ...participant,
+              validFrom: now,
+              metadata: payload({
+                ...(participant.metadata as Record<string, unknown>),
+                continuitySourceServiceSessionId: source.id,
+              }),
+            })),
+          });
+        }
+
+        const closedAfter = serviceSessionSnapshot(closedSource);
+        await transaction.serviceSessionEvent.create({
+          data: {
+            companyId: input.companyId,
+            serviceSessionId: source.id,
+            commandId: input.commandId,
+            commandFingerprint: fingerprint,
+            name: 'continuity-classified-new-subject',
+            expectedVersion: input.expectedVersion,
+            resultingVersion: closedSource.version,
+            actorType,
+            actorAgentId: input.actorAgentId,
+            beforeSnapshot: payload(before),
+            afterSnapshot: payload(closedAfter),
+            metadata: payload({
+              classification: input.classification,
+              confidence: input.confidence,
+              reason,
+              targetServiceSessionId: targetSession.id,
+              targetDepartmentId,
+              ...(input.agentExecutionId
+                ? { agentExecutionId: input.agentExecutionId }
+                : {}),
+            }),
+            createdAt: now,
+          },
+        });
+        const targetAfter = serviceSessionSnapshot(targetSession);
+        const createCommandId = correlation(
+          'continuity-related-session-created',
+          input.commandId,
+        );
+        await transaction.serviceSessionEvent.create({
+          data: {
+            companyId: input.companyId,
+            serviceSessionId: targetSession.id,
+            commandId: createCommandId,
+            commandFingerprint: commandFingerprint({
+              commandId: createCommandId,
+              sourceServiceSessionId: source.id,
+              target: targetAfter,
+            }),
+            name: 'continuity-related-session-created',
+            expectedVersion: 0,
+            resultingVersion: targetSession.version,
+            actorType,
+            actorAgentId: input.actorAgentId,
+            beforeSnapshot: payload({}),
+            afterSnapshot: payload(targetAfter),
+            metadata: payload({
+              sourceServiceSessionId: source.id,
+              continuityDecisionId: decision.id,
+              ...(input.agentExecutionId
+                ? { agentExecutionId: input.agentExecutionId }
+                : {}),
+            }),
+            createdAt: now,
+          },
+        });
+
+        if (
+          targetDepartment &&
+          conversation.department !== targetDepartment.code
+        ) {
+          const from = snapshot(conversation);
+          const expectedConversationVersion = conversation.version;
+          const updated = await transaction.whatsAppConversation.updateMany({
+            where: {
+              id: input.conversationId,
+              companyId: input.companyId,
+              version: expectedConversationVersion,
+            },
+            data: {
+              department: targetDepartment.code,
+              version: { increment: 1 },
+            },
+          });
+          if (updated.count !== 1) {
+            throw currentVersionConflict(expectedConversationVersion);
+          }
+          conversation = await this.findConversationOrThrow(
+            transaction,
+            input.companyId,
+            input.conversationId,
+          );
+          const after = snapshot(conversation);
+          const transitionCommandId = correlation(
+            'continuity-new-subject-route',
+            input.commandId,
+          );
+          await transaction.whatsAppConversationTransition.create({
+            data: {
+              companyId: input.companyId,
+              conversationId: input.conversationId,
+              threadId: source.threadId,
+              serviceSessionId: targetSession.id,
+              commandId: transitionCommandId,
+              commandFingerprint: commandFingerprint({
+                commandId: transitionCommandId,
+                from,
+                after,
+                continuityDecisionId: decision.id,
+              }),
+              name: 'continuity-new-subject-route',
+              expectedVersion: expectedConversationVersion,
+              resultingVersion: conversation.version,
+              actorType: TransitionActorType.SYSTEM,
+              fromDepartment: departmentToPrisma[from.department],
+              toDepartment: targetDepartment.code,
+              fromState: stateToPrisma[from.conversationState],
+              toState: conversation.conversationState,
+              fromFlowStep: flowToPrisma[from.flowStep],
+              toFlowStep: conversation.flowStep,
+              fromRequestStatus: requestToPrisma[from.requestStatus],
+              toRequestStatus: conversation.requestStatus,
+              metadata: payload({
+                continuityDecisionId: decision.id,
+                sourceServiceSessionId: source.id,
+                targetServiceSessionId: targetSession.id,
+                reason,
+              }),
+              resultSnapshot: payload(after),
+              createdAt: now,
+            },
+          });
+        }
+      } else {
+        const updated = await transaction.serviceSession.updateMany({
+          where: {
+            id: source.id,
+            companyId: input.companyId,
+            version: input.expectedVersion,
+            status: ServiceSessionStatus.OPEN,
+            controlMode: ServiceSessionControlMode.AI,
+            isForeground: true,
+          },
+          data: { version: { increment: 1 } },
+        });
+        if (updated.count !== 1) {
+          throw new AppError(
+            'CONFLICT',
+            'A sessão mudou durante a classificação de continuidade.',
+          );
+        }
+        targetSession = await transaction.serviceSession.findUniqueOrThrow({
+          where: {
+            id_companyId: { id: source.id, companyId: input.companyId },
+          },
+          select: serviceSessionAuthorizationSelect,
+        });
+        const after = serviceSessionSnapshot(targetSession);
+        await transaction.serviceSessionEvent.create({
+          data: {
+            companyId: input.companyId,
+            serviceSessionId: source.id,
+            commandId: input.commandId,
+            commandFingerprint: fingerprint,
+            name:
+              input.classification === 'continuation'
+                ? 'continuity-classified-continuation'
+                : 'continuity-classified-uncertain',
+            expectedVersion: input.expectedVersion,
+            resultingVersion: targetSession.version,
+            actorType,
+            actorAgentId: input.actorAgentId,
+            beforeSnapshot: payload(before),
+            afterSnapshot: payload(after),
+            metadata: payload({
+              classification: input.classification,
+              confidence: input.confidence,
+              reason,
+              targetServiceSessionId: targetSession.id,
+              targetDepartmentId,
+              ...(input.agentExecutionId
+                ? { agentExecutionId: input.agentExecutionId }
+                : {}),
+            }),
+            createdAt: now,
+          },
+        });
+      }
+
+      const decisionUpdated =
+        await transaction.serviceSessionContinuityDecision.updateMany({
+          where: {
+            id: decision.id,
+            companyId: input.companyId,
+            classification: ContinuityClassification.UNCERTAIN,
+            fallbackAction: ContinuityFallbackAction.REOPEN_PREVIOUS,
+            agentExecutionId: null,
+          },
+          data: {
+            targetServiceSessionId: targetSession.id,
+            targetDepartmentId,
+            agentExecutionId: input.agentExecutionId,
+            classification: storedClassification,
+            fallbackAction,
+            confidence: input.confidence,
+            reason,
+          },
+        });
+      if (decisionUpdated.count !== 1) {
+        throw new AppError(
+          'CONFLICT',
+          'A decisão de continuidade mudou durante a classificação.',
+        );
+      }
+      return {
+        serviceSessionId: targetSession.id,
+        version: targetSession.version,
+        classification: input.classification,
+        idempotent: false,
+      };
+    });
+  }
+
+  async processServiceSessionLifecycle(
+    input: ProcessServiceSessionLifecycleInput,
+  ): Promise<ProcessServiceSessionLifecycleResult> {
+    const limit = Number.isFinite(input.limit)
+      ? Math.max(1, Math.min(200, Math.trunc(input.limit)))
+      : 50;
+    const due = await this.prisma.serviceSession.findMany({
+      where: {
+        status: ServiceSessionStatus.CLOSING,
+        controlMode: ServiceSessionControlMode.AI,
+        isForeground: true,
+        closingDeadlineAt: { lte: input.now },
+      },
+      orderBy: [{ closingDeadlineAt: 'asc' }, { id: 'asc' }],
+      take: limit,
+      select: { id: true, companyId: true, threadId: true },
+    });
+
+    let closed = 0;
+    let skipped = 0;
+    for (const candidate of due) {
+      try {
+        if (await this.finishAiServiceSessionClosing(candidate, input.now)) {
+          closed += 1;
+        } else {
+          skipped += 1;
+        }
+      } catch (error) {
+        if (!isPrismaUniqueError(error)) throw error;
+        skipped += 1;
+      }
+    }
+
+    const remaining = limit - due.length;
+    let closingStarted = 0;
+    if (remaining > 0) {
+      const eligible = await this.prisma.serviceSession.findMany({
+        where: {
+          status: ServiceSessionStatus.OPEN,
+          controlMode: ServiceSessionControlMode.AI,
+          isForeground: true,
+          conversationResolved: true,
+          closingStartedAt: null,
+          closingDeadlineAt: null,
+        },
+        orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
+        take: remaining,
+        select: { id: true, companyId: true, threadId: true },
+      });
+      for (const candidate of eligible) {
+        try {
+          if (await this.beginAiServiceSessionClosing(candidate, input.now)) {
+            closingStarted += 1;
+          } else {
+            skipped += 1;
+          }
+        } catch (error) {
+          if (!isPrismaUniqueError(error)) throw error;
+          skipped += 1;
+        }
+      }
+    }
+
+    return { closingStarted, closed, skipped };
+  }
+
+  private async beginAiServiceSessionClosing(
+    candidate: { id: string; companyId: string; threadId: string },
+    now: Date,
+  ): Promise<boolean> {
+    return this.prisma.$transaction(async (transaction) => {
+      let conversation = await transaction.whatsAppConversation.findFirst({
+        where: {
+          companyId: candidate.companyId,
+          threadId: candidate.threadId,
+        },
+        orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+        include: conversationInclude,
+      });
+      if (!conversation) return false;
+      await this.lockCommand(
+        transaction,
+        candidate.companyId,
+        'whatsapp-conversation',
+        conversation.id,
+      );
+      await this.lockCommand(
+        transaction,
+        candidate.companyId,
+        'service-session-lifecycle',
+        candidate.threadId,
+      );
+      conversation = await this.findConversationOrThrow(
+        transaction,
+        candidate.companyId,
+        conversation.id,
+      );
+      const session = await transaction.serviceSession.findUnique({
+        where: {
+          id_companyId: { id: candidate.id, companyId: candidate.companyId },
+        },
+        select: serviceSessionAuthorizationSelect,
+      });
+      if (
+        !session ||
+        session.threadId !== candidate.threadId ||
+        session.status !== ServiceSessionStatus.OPEN ||
+        session.controlMode !== ServiceSessionControlMode.AI ||
+        !session.isForeground ||
+        !session.conversationResolved ||
+        !pendingActionsAreEmpty(session.pendingActions) ||
+        conversation.conversationState !== ConversationState.BOT_ACTIVE ||
+        conversation.flowStep === FlowStep.HUMAN_SERVICE ||
+        conversation.assignedToUserId !== null
+      ) {
+        return false;
+      }
+      const [pendingDeliveries, incompleteProposalDocuments] =
+        await Promise.all([
+          transaction.whatsAppMessage.count({
+            where: {
+              companyId: candidate.companyId,
+              serviceSessionId: session.id,
+              direction: MessageDirection.OUTBOUND,
+              deliveryStatus: DeliveryStatus.PENDING,
+            },
+          }),
+          transaction.quoteProposalDocument.count({
+            where: {
+              companyId: candidate.companyId,
+              serviceSessionId: session.id,
+              status: { not: QuoteProposalDocumentStatus.SENT },
+            },
+          }),
+        ]);
+      if (pendingDeliveries > 0 || incompleteProposalDocuments > 0) {
+        return false;
+      }
+
+      const before = serviceSessionSnapshot(session);
+      const deadline = new Date(now.getTime() + AI_CLOSING_WAIT_MS);
+      const updated = await transaction.serviceSession.updateMany({
+        where: {
+          id: session.id,
+          companyId: candidate.companyId,
+          version: session.version,
+          status: ServiceSessionStatus.OPEN,
+          controlMode: ServiceSessionControlMode.AI,
+          isForeground: true,
+          conversationResolved: true,
+        },
+        data: {
+          status: ServiceSessionStatus.CLOSING,
+          closingStartedAt: now,
+          closingDeadlineAt: deadline,
+          version: { increment: 1 },
+        },
+      });
+      if (updated.count !== 1) return false;
+      const closing = await transaction.serviceSession.findUniqueOrThrow({
+        where: {
+          id_companyId: { id: session.id, companyId: candidate.companyId },
+        },
+        select: serviceSessionAuthorizationSelect,
+      });
+      const after = serviceSessionSnapshot(closing);
+      const commandId = correlation(
+        'ai-closing-started',
+        `${session.id}:${session.version}`,
+      );
+      await transaction.serviceSessionEvent.create({
+        data: {
+          companyId: candidate.companyId,
+          serviceSessionId: session.id,
+          commandId,
+          commandFingerprint: commandFingerprint({
+            commandId,
+            before,
+            after,
+          }),
+          name: 'ai-closing-started',
+          expectedVersion: session.version,
+          resultingVersion: closing.version,
+          actorType: MutationActorType.SERVICE,
+          beforeSnapshot: payload(before),
+          afterSnapshot: payload(after),
+          metadata: payload({
+            initiatedBy: 'ai-policy',
+            waitMilliseconds: AI_CLOSING_WAIT_MS,
+          }),
+          createdAt: now,
+        },
+      });
+      await this.createServiceSessionLifecycleOutbound(transaction, {
+        conversation,
+        session: closing,
+        text: LUME_AI_CLOSING_QUESTION,
+        purpose: 'service-session-closing-question',
+        occurredAt: now,
+      });
+      return true;
+    });
+  }
+
+  private async finishAiServiceSessionClosing(
+    candidate: { id: string; companyId: string; threadId: string },
+    now: Date,
+  ): Promise<boolean> {
+    try {
+      return await this.prisma.$transaction(
+        async (transaction) => {
+          let conversation = await transaction.whatsAppConversation.findFirst({
+            where: {
+              companyId: candidate.companyId,
+              threadId: candidate.threadId,
+            },
+            orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+            include: conversationInclude,
+          });
+          if (!conversation) return false;
+          await this.lockCommand(
+            transaction,
+            candidate.companyId,
+            'whatsapp-conversation',
+            conversation.id,
+          );
+          await this.lockCommand(
+            transaction,
+            candidate.companyId,
+            'service-session-lifecycle',
+            candidate.threadId,
+          );
+          await this.lockCommand(
+            transaction,
+            candidate.companyId,
+            'service-session-thread',
+            candidate.threadId,
+          );
+          conversation = await this.findConversationOrThrow(
+            transaction,
+            candidate.companyId,
+            conversation.id,
+          );
+          const session = await transaction.serviceSession.findUnique({
+            where: {
+              id_companyId: {
+                id: candidate.id,
+                companyId: candidate.companyId,
+              },
+            },
+            select: serviceSessionAuthorizationSelect,
+          });
+          if (
+            !session ||
+            session.threadId !== candidate.threadId ||
+            session.status !== ServiceSessionStatus.CLOSING ||
+            session.controlMode !== ServiceSessionControlMode.AI ||
+            !session.isForeground ||
+            !session.conversationResolved ||
+            !pendingActionsAreEmpty(session.pendingActions) ||
+            session.closingStartedAt === null ||
+            session.closingDeadlineAt === null ||
+            session.closingDeadlineAt > now ||
+            conversation.conversationState !== ConversationState.BOT_ACTIVE ||
+            conversation.flowStep === FlowStep.HUMAN_SERVICE ||
+            conversation.assignedToUserId !== null
+          ) {
+            return false;
+          }
+          const closingQuestion = await transaction.whatsAppMessage.findFirst({
+            where: {
+              companyId: candidate.companyId,
+              serviceSessionId: session.id,
+              automationPurpose: 'service-session-closing-question',
+              direction: MessageDirection.OUTBOUND,
+            },
+            orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+            select: { deliveryStatus: true },
+          });
+          if (
+            !closingQuestion ||
+            closingQuestion.deliveryStatus === DeliveryStatus.PENDING ||
+            closingQuestion.deliveryStatus === DeliveryStatus.FAILED
+          ) {
+            return false;
+          }
+          const incompleteProposalDocuments =
+            await transaction.quoteProposalDocument.count({
+              where: {
+                companyId: candidate.companyId,
+                serviceSessionId: session.id,
+                status: { not: QuoteProposalDocumentStatus.SENT },
+              },
+            });
+          if (incompleteProposalDocuments > 0) return false;
+
+          const code = await this.allocatePublicContinuationCode(
+            transaction,
+            candidate.companyId,
+            now,
+          );
+          const expiresAt = publicContinuationCodeExpiresAt(now);
+          const before = serviceSessionSnapshot(session);
+          const updated = await transaction.serviceSession.updateMany({
+            where: {
+              id: session.id,
+              companyId: candidate.companyId,
+              version: session.version,
+              status: ServiceSessionStatus.CLOSING,
+              controlMode: ServiceSessionControlMode.AI,
+              isForeground: true,
+              closingDeadlineAt: { lte: now },
+            },
+            data: {
+              status: ServiceSessionStatus.CLOSED,
+              isForeground: false,
+              responsibleUserId: null,
+              queueId: null,
+              publicContinuationCode: code,
+              continuationCodeExpiresAt: expiresAt,
+              closingStartedAt: null,
+              closingDeadlineAt: null,
+              closedAt: now,
+              version: { increment: 1 },
+            },
+          });
+          if (updated.count !== 1) {
+            throw new AppError(
+              'CONFLICT',
+              'A sessão mudou durante o fechamento automático.',
+            );
+          }
+          const closedSession =
+            await transaction.serviceSession.findUniqueOrThrow({
+              where: {
+                id_companyId: {
+                  id: session.id,
+                  companyId: candidate.companyId,
+                },
+              },
+              select: serviceSessionAuthorizationSelect,
+            });
+          const after = serviceSessionSnapshot(closedSession);
+          const commandId = correlation(
+            'ai-closing-finished',
+            `${session.id}:${session.version}`,
+          );
+          await transaction.serviceSessionEvent.create({
+            data: {
+              companyId: candidate.companyId,
+              serviceSessionId: session.id,
+              commandId,
+              commandFingerprint: commandFingerprint({
+                commandId,
+                before,
+                after,
+              }),
+              name: 'ai-closing-finished',
+              expectedVersion: session.version,
+              resultingVersion: closedSession.version,
+              actorType: MutationActorType.SERVICE,
+              beforeSnapshot: payload(before),
+              afterSnapshot: payload(after),
+              metadata: payload({
+                initiatedBy: 'ai-policy',
+                publicContinuationCodeExpiresAt: expiresAt.toISOString(),
+              }),
+              createdAt: now,
+            },
+          });
+
+          const predecessor = await this.findPriorityResumePredecessor(
+            transaction,
+            {
+              companyId: candidate.companyId,
+              threadId: candidate.threadId,
+              interruptedBySessionId: closedSession.id,
+            },
+          );
+          if (predecessor) {
+            const predecessorBefore = serviceSessionSnapshot(
+              predecessor.session,
+            );
+            const resumedStatus =
+              priorityResumeStatusToPrisma[predecessor.previousStatus];
+            const predecessorUpdated =
+              await transaction.serviceSession.updateMany({
+                where: {
+                  id: predecessor.session.id,
+                  companyId: candidate.companyId,
+                  threadId: candidate.threadId,
+                  version: predecessor.session.version,
+                  status: ServiceSessionStatus.PAUSED_BY_HIGHER_PRIORITY,
+                  isForeground: false,
+                },
+                data: {
+                  status: resumedStatus,
+                  isForeground: true,
+                  version: { increment: 1 },
+                },
+              });
+            if (predecessorUpdated.count !== 1) {
+              throw new AppError(
+                'CONFLICT',
+                'A sessão interrompida mudou durante a retomada automática.',
+              );
+            }
+            const resumedSession =
+              await transaction.serviceSession.findUniqueOrThrow({
+                where: {
+                  id_companyId: {
+                    id: predecessor.session.id,
+                    companyId: candidate.companyId,
+                  },
+                },
+                select: serviceSessionAuthorizationSelect,
+              });
+            const predecessorAfter = serviceSessionSnapshot(resumedSession);
+            const resumeCommandId = correlation(
+              'priority-resumed',
+              `${closedSession.id}:${closedSession.version}:${predecessor.session.id}:${predecessor.session.version}`,
+            );
+            const resumeMetadata = {
+              resumedAfterSessionId: closedSession.id,
+              resumeReason: 'automatic-ai-close',
+              restoredStatus: predecessor.previousStatus,
+              pausedAt: predecessor.pausedAt.toISOString(),
+              priority: servicePriorityFromPrisma[predecessor.session.priority],
+              organizationalWeight:
+                predecessor.session.queue?.priorityWeight ??
+                predecessor.session.currentDepartment?.serviceQueues[0]
+                  ?.priorityWeight ??
+                0,
+              tiePolicy: 'current-foreground-wins',
+            } as const;
+            await transaction.serviceSessionEvent.create({
+              data: {
+                companyId: candidate.companyId,
+                serviceSessionId: resumedSession.id,
+                commandId: resumeCommandId,
+                commandFingerprint: commandFingerprint({
+                  commandId: resumeCommandId,
+                  before: predecessorBefore,
+                  after: predecessorAfter,
+                  metadata: resumeMetadata,
+                }),
+                name: 'priority-resumed',
+                expectedVersion: predecessor.session.version,
+                resultingVersion: resumedSession.version,
+                actorType: MutationActorType.SERVICE,
+                beforeSnapshot: payload(predecessorBefore),
+                afterSnapshot: payload(predecessorAfter),
+                metadata: payload(resumeMetadata),
+                createdAt: now,
+              },
+            });
+            await transaction.tenantAuditLog.create({
+              data: {
+                companyId: candidate.companyId,
+                action: 'service-session.priority-resumed',
+                targetType: 'service-session',
+                targetId: resumedSession.id,
+                metadata: payload({
+                  commandId: resumeCommandId,
+                  expectedVersion: predecessor.session.version,
+                  resultingVersion: resumedSession.version,
+                  ...resumeMetadata,
+                }),
+                createdAt: now,
+              },
+            });
+
+            const resumedDepartment = resumedSession.currentDepartmentId
+              ? await transaction.tenantDepartment.findFirst({
+                  where: {
+                    id: resumedSession.currentDepartmentId,
+                    companyId: candidate.companyId,
+                  },
+                  select: { code: true },
+                })
+              : null;
+            if (resumedSession.currentDepartmentId && !resumedDepartment) {
+              throw new AppError(
+                'CONFLICT',
+                'O departamento da sessão retomada não está mais disponível.',
+              );
+            }
+            const resumedConversationState =
+              resumedSession.controlMode === ServiceSessionControlMode.HUMAN
+                ? resumedSession.responsibleUserId
+                  ? ConversationState.HUMAN_ACTIVE
+                  : ConversationState.SENT_TO_HUMAN
+                : resumedSession.status ===
+                    ServiceSessionStatus.WAITING_CUSTOMER
+                  ? ConversationState.WAITING_FOR_CUSTOMER
+                  : ConversationState.BOT_ACTIVE;
+            const resumedFlowStep =
+              resumedSession.controlMode === ServiceSessionControlMode.HUMAN
+                ? FlowStep.HUMAN_SERVICE
+                : conversation.resumeFlowStep &&
+                    conversation.resumeFlowStep !== FlowStep.HUMAN_SERVICE &&
+                    conversation.resumeFlowStep !== FlowStep.CLOSED
+                  ? conversation.resumeFlowStep
+                  : conversation.flowStep !== FlowStep.CLOSED
+                    ? conversation.flowStep
+                    : FlowStep.MAIN_MENU;
+            const conversationUpdated =
+              await transaction.whatsAppConversation.updateMany({
+                where: {
+                  id: conversation.id,
+                  companyId: candidate.companyId,
+                  threadId: candidate.threadId,
+                  version: conversation.version,
+                },
+                data: {
+                  department:
+                    resumedDepartment?.code ?? conversation.department,
+                  conversationState: resumedConversationState,
+                  flowStep: resumedFlowStep,
+                  assignedToUserId: resumedSession.responsibleUserId,
+                  ...(resumedSession.controlMode ===
+                  ServiceSessionControlMode.AI
+                    ? { resumeState: null, resumeFlowStep: null }
+                    : {}),
+                  closedAt: null,
+                  version: { increment: 1 },
+                },
+              });
+            if (conversationUpdated.count !== 1) {
+              throw currentVersionConflict(conversation.version);
+            }
+            const resumedConversation = await this.findConversationOrThrow(
+              transaction,
+              candidate.companyId,
+              conversation.id,
+            );
+            const facadeCommandId = correlation(
+              'priority-resumed-facade',
+              resumeCommandId,
+            );
+            await transaction.whatsAppConversationTransition.create({
+              data: {
+                companyId: candidate.companyId,
+                conversationId: conversation.id,
+                threadId: candidate.threadId,
+                serviceSessionId: resumedSession.id,
+                commandId: facadeCommandId,
+                commandFingerprint: commandFingerprint({
+                  commandId: facadeCommandId,
+                  resumedAfterSessionId: closedSession.id,
+                  resumedServiceSessionId: resumedSession.id,
+                  expectedVersion: conversation.version,
+                  resultingVersion: resumedConversation.version,
+                }),
+                name: 'priority-resumed',
+                expectedVersion: conversation.version,
+                resultingVersion: resumedConversation.version,
+                actorType: TransitionActorType.SYSTEM,
+                fromDepartment: conversation.department,
+                toDepartment: resumedConversation.department,
+                fromState: conversation.conversationState,
+                toState: resumedConversation.conversationState,
+                fromFlowStep: conversation.flowStep,
+                toFlowStep: resumedConversation.flowStep,
+                fromRequestStatus: conversation.requestStatus,
+                toRequestStatus: resumedConversation.requestStatus,
+                metadata: payload({
+                  resumedAfterSessionId: closedSession.id,
+                  resumedServiceSessionId: resumedSession.id,
+                  resumeCommandId,
+                  reason: 'automatic-ai-close',
+                }),
+                resultSnapshot: payload({
+                  id: resumedConversation.id,
+                  ...snapshot(resumedConversation),
+                  version: resumedConversation.version,
+                }),
+                createdAt: now,
+              },
+            });
+            return true;
+          }
+
+          const conversationUpdated =
+            await transaction.whatsAppConversation.updateMany({
+              where: {
+                id: conversation.id,
+                companyId: candidate.companyId,
+                version: conversation.version,
+              },
+              data: {
+                conversationState: ConversationState.CLOSED,
+                flowStep: FlowStep.CLOSED,
+                assignedToUserId: null,
+                resumeState: null,
+                resumeFlowStep: null,
+                closedAt: now,
+                version: { increment: 1 },
+              },
+            });
+          if (conversationUpdated.count !== 1) {
+            throw currentVersionConflict(conversation.version);
+          }
+          const closedConversation = await this.findConversationOrThrow(
+            transaction,
+            candidate.companyId,
+            conversation.id,
+          );
+          await transaction.whatsAppConversationTransition.create({
+            data: {
+              companyId: candidate.companyId,
+              conversationId: conversation.id,
+              threadId: candidate.threadId,
+              serviceSessionId: closedSession.id,
+              commandId: correlation(
+                'ai-session-closed',
+                `${closedSession.id}:${closedSession.version}`,
+              ),
+              commandFingerprint: commandFingerprint({
+                serviceSessionId: closedSession.id,
+                resultingVersion: closedConversation.version,
+              }),
+              name: 'ai-session-closed',
+              expectedVersion: conversation.version,
+              resultingVersion: closedConversation.version,
+              actorType: TransitionActorType.SYSTEM,
+              fromDepartment: conversation.department,
+              toDepartment: closedConversation.department,
+              fromState: conversation.conversationState,
+              toState: closedConversation.conversationState,
+              fromFlowStep: conversation.flowStep,
+              toFlowStep: closedConversation.flowStep,
+              fromRequestStatus: conversation.requestStatus,
+              toRequestStatus: closedConversation.requestStatus,
+              metadata: payload({
+                reason: 'ai-closing-timeout',
+                serviceSessionId: closedSession.id,
+              }),
+              resultSnapshot: payload({
+                id: closedConversation.id,
+                ...snapshot(closedConversation),
+                version: closedConversation.version,
+              }),
+              createdAt: now,
+            },
+          });
+          await this.createServiceSessionLifecycleOutbound(transaction, {
+            conversation: closedConversation,
+            session: closedSession,
+            text: formatAiClosureMessage(code),
+            purpose: 'service-session-closure',
+            occurredAt: now,
+          });
+          return true;
+        },
+        { isolationLevel: 'Serializable' },
+      );
+    } catch (error) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === 'P2034'
+      ) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  private async findPriorityResumePredecessor(
+    transaction: Prisma.TransactionClient,
+    input: {
+      readonly companyId: string;
+      readonly threadId: string;
+      readonly interruptedBySessionId: string;
+    },
+  ): Promise<PriorityResumePredecessor | null> {
+    const pausedSessions = await transaction.serviceSession.findMany({
+      where: {
+        companyId: input.companyId,
+        threadId: input.threadId,
+        id: { not: input.interruptedBySessionId },
+        status: ServiceSessionStatus.PAUSED_BY_HIGHER_PRIORITY,
+        isForeground: false,
+      },
+      select: priorityResumeSessionSelect,
+    });
+    if (pausedSessions.length === 0) return null;
+
+    const interruptionEvents = await transaction.serviceSessionEvent.findMany({
+      where: {
+        companyId: input.companyId,
+        serviceSessionId: { in: pausedSessions.map((session) => session.id) },
+        name: 'priority-interrupted',
+      },
+      orderBy: [{ resultingVersion: 'desc' }, { createdAt: 'desc' }],
+      select: {
+        serviceSessionId: true,
+        beforeSnapshot: true,
+        metadata: true,
+        createdAt: true,
+      },
+    });
+    const contexts = new Map<
+      string,
+      {
+        readonly interruptedBySessionId: string;
+        readonly previousStatus: RestorablePrioritySessionStatus;
+        readonly pausedAt: Date;
+      }
+    >();
+    for (const event of interruptionEvents) {
+      if (contexts.has(event.serviceSessionId)) continue;
+      const metadata =
+        event.metadata &&
+        typeof event.metadata === 'object' &&
+        !Array.isArray(event.metadata)
+          ? (event.metadata as Record<string, unknown>)
+          : null;
+      const before =
+        event.beforeSnapshot &&
+        typeof event.beforeSnapshot === 'object' &&
+        !Array.isArray(event.beforeSnapshot)
+          ? (event.beforeSnapshot as Record<string, unknown>)
+          : null;
+      const previousStatus = restorablePriorityStatus(before?.status);
+      if (
+        typeof metadata?.interruptedBySessionId !== 'string' ||
+        !previousStatus
+      ) {
+        continue;
+      }
+      contexts.set(event.serviceSessionId, {
+        interruptedBySessionId: metadata.interruptedBySessionId,
+        previousStatus,
+        pausedAt: event.createdAt,
+      });
+    }
+
+    const candidates = pausedSessions.flatMap((session) => {
+      const context = contexts.get(session.id);
+      return context?.interruptedBySessionId === input.interruptedBySessionId
+        ? [
+            {
+              sessionId: session.id,
+              priority: servicePriorityFromPrisma[session.priority],
+              organizationalWeight:
+                session.queue?.priorityWeight ??
+                session.currentDepartment?.serviceQueues[0]?.priorityWeight ??
+                0,
+              previousStatus: context.previousStatus,
+              pausedAt: context.pausedAt,
+            } satisfies PausedPriorityCandidate,
+          ]
+        : [];
+    });
+    const selected = selectPriorityResumeCandidate(candidates);
+    if (!selected) return null;
+    const selectedSession = pausedSessions.find(
+      (session) => session.id === selected.sessionId,
+    );
+    if (!selectedSession) return null;
+    return {
+      session: selectedSession,
+      previousStatus: selected.previousStatus,
+      pausedAt: selected.pausedAt,
+    };
+  }
+
+  private async allocatePublicContinuationCode(
+    transaction: Prisma.TransactionClient,
+    companyId: string,
+    now: Date,
+  ): Promise<string> {
+    await this.lockCommand(
+      transaction,
+      companyId,
+      'public-continuation-code-pool',
+      companyId,
+    );
+    const occupied = await transaction.serviceSession.findMany({
+      where: { companyId, publicContinuationCode: { not: null } },
+      select: serviceSessionAuthorizationSelect,
+    });
+    const byCode = new Map(
+      occupied.flatMap((session) =>
+        session.publicContinuationCode
+          ? [[session.publicContinuationCode, session] as const]
+          : [],
+      ),
+    );
+    const start = Number(createPublicContinuationCode());
+    for (let offset = 0; offset < 900; offset += 1) {
+      const code = String(100 + ((start - 100 + offset) % 900));
+      const owner = byCode.get(code);
+      if (!owner) return code;
+      if (
+        owner.continuationCodeExpiresAt &&
+        owner.continuationCodeExpiresAt <= now
+      ) {
+        const before = serviceSessionSnapshot(owner);
+        const cleared = await transaction.serviceSession.updateMany({
+          where: {
+            id: owner.id,
+            companyId,
+            version: owner.version,
+            publicContinuationCode: code,
+            continuationCodeExpiresAt: { lte: now },
+          },
+          data: {
+            publicContinuationCode: null,
+            continuationCodeExpiresAt: null,
+            version: { increment: 1 },
+          },
+        });
+        if (cleared.count !== 1) continue;
+        const expired = await transaction.serviceSession.findUniqueOrThrow({
+          where: { id_companyId: { id: owner.id, companyId } },
+          select: serviceSessionAuthorizationSelect,
+        });
+        const after = serviceSessionSnapshot(expired);
+        const commandId = correlation(
+          'public-continuation-code-expired',
+          `${owner.id}:${owner.version}`,
+        );
+        await transaction.serviceSessionEvent.create({
+          data: {
+            companyId,
+            serviceSessionId: owner.id,
+            commandId,
+            commandFingerprint: commandFingerprint({
+              commandId,
+              before,
+              after,
+            }),
+            name: 'public-continuation-code-expired',
+            expectedVersion: owner.version,
+            resultingVersion: expired.version,
+            actorType: MutationActorType.SERVICE,
+            beforeSnapshot: payload(before),
+            afterSnapshot: payload(after),
+            metadata: payload({ expiredAt: now.toISOString() }),
+            createdAt: now,
+          },
+        });
+        return code;
+      }
+    }
+    throw new AppError(
+      'CONFLICT',
+      'Não há código público de continuidade disponível para este tenant.',
+    );
+  }
+
+  private async createServiceSessionLifecycleOutbound(
+    transaction: Prisma.TransactionClient,
+    input: {
+      conversation: ConversationWithRelations;
+      session: ServiceSessionAuthorization;
+      text: string;
+      purpose: 'service-session-closing-question' | 'service-session-closure';
+      occurredAt: Date;
+    },
+  ): Promise<void> {
+    const message = await transaction.whatsAppMessage.create({
+      data: {
+        companyId: input.conversation.companyId,
+        conversationId: input.conversation.id,
+        channelId: input.conversation.channelId,
+        contactId: input.conversation.contactId,
+        threadId: input.session.threadId,
+        serviceSessionId: input.session.id,
+        actorType: WhatsAppMessageActorType.SYSTEM,
+        source: WhatsAppMessageSource.AUTOMATION,
+        direction: MessageDirection.OUTBOUND,
+        deliveryStatus: DeliveryStatus.PENDING,
+        kind: MessageKind.TEXT,
+        text: input.text,
+        automationPurpose: input.purpose,
+        recipientPhone: input.conversation.contact.phoneNormalized,
+        correlationId: correlation(
+          input.purpose,
+          `${input.session.id}:${input.session.version}`,
+        ),
+        occurredAt: input.occurredAt,
+      },
+    });
+    const attempt = await transaction.whatsAppMessageAttempt.create({
+      data: {
+        companyId: input.conversation.companyId,
+        messageId: message.id,
+        attemptNumber: 1,
+        status: MessageAttemptStatus.PENDING,
+      },
+    });
+    await transaction.whatsAppConversation.updateMany({
+      where: {
+        id: input.conversation.id,
+        companyId: input.conversation.companyId,
+      },
+      data: {
+        lastOutboundAt: input.occurredAt,
+        lastMessagePreview: input.text.slice(0, 240),
+      },
+    });
+    await this.createOrderedOutbox(transaction, {
+      companyId: input.conversation.companyId,
+      topic: 'whatsapp.outbound.requested',
+      aggregateType: 'whatsapp-conversation',
+      aggregateId: input.conversation.id,
+      correlationId: correlation(
+        `${input.purpose}-requested`,
+        `${input.session.id}:${input.session.version}`,
+      ),
+      payload: {
+        eventId: message.id,
+        commandId: message.id,
+        messageId: message.id,
+        attemptId: attempt.id,
+        conversationId: input.conversation.id,
+        threadId: input.session.threadId,
+        serviceSessionId: input.session.id,
+        channelId: input.conversation.channelId,
+        companyId: input.conversation.companyId,
+        contact: {
+          id: input.conversation.contact.id,
+          phone: input.conversation.contact.phoneNormalized,
+          displayName: input.conversation.contact.displayName,
+        },
+        message: {
+          providerMessageId: null,
+          direction: 'outbound',
+          deliveryStatus: 'pending',
+          kind: 'text',
+          text: input.text,
+          media: null,
+          occurredAt: input.occurredAt.toISOString(),
+        },
+        conversation: {
+          id: input.conversation.id,
+          ...snapshot(input.conversation),
+          version: input.conversation.version,
+        },
+        automatic: true,
+        automationAllowed: false,
+        canGenerateReply: false,
+        canSendReply: true,
+        contextualTransition: false,
+        isFirstContact: false,
+      },
+    });
+  }
+
+  private async upsertWebhookGroupParticipant(
+    transaction: Prisma.TransactionClient,
+    input: {
+      companyId: string;
+      groupId: string;
+      occurredAt: Date;
+      participant: SyncWebhookGroupInput['participants'][number];
+    },
+  ) {
+    const registrationCandidates = input.participant.phoneNormalized
+      ? await transaction.registrationPhone.findMany({
+          where: {
+            companyId: input.companyId,
+            normalizedValue: input.participant.phoneNormalized,
+            AND: [
+              {
+                OR: [
+                  { activeFrom: null },
+                  { activeFrom: { lte: input.occurredAt } },
+                ],
+              },
+              {
+                OR: [
+                  { activeUntil: null },
+                  { activeUntil: { gte: input.occurredAt } },
+                ],
+              },
+            ],
+          },
+          distinct: ['registrationId'],
+          orderBy: { registrationId: 'asc' },
+          take: 2,
+          select: { registrationId: true },
+        })
+      : [];
+    const linkedRegistrationId =
+      registrationCandidates.length === 1
+        ? registrationCandidates[0]?.registrationId
+        : null;
+
+    return transaction.whatsAppGroupParticipant.upsert({
+      where: {
+        companyId_groupId_whatsappId: {
+          companyId: input.companyId,
+          groupId: input.groupId,
+          whatsappId: input.participant.whatsappId,
+        },
+      },
+      create: {
+        companyId: input.companyId,
+        groupId: input.groupId,
+        whatsappId: input.participant.whatsappId,
+        phoneNumber: input.participant.phoneNormalized,
+        displayName: input.participant.displayName,
+        isAdmin: input.participant.isAdmin ?? false,
+        linkedRegistrationId,
+        joinedAt: input.participant.removed ? undefined : input.occurredAt,
+        leftAt: input.participant.removed ? input.occurredAt : null,
+      },
+      update: {
+        ...(input.participant.phoneNormalized
+          ? { phoneNumber: input.participant.phoneNormalized }
+          : {}),
+        ...(input.participant.displayName
+          ? { displayName: input.participant.displayName }
+          : {}),
+        ...(input.participant.isAdmin === undefined
+          ? {}
+          : { isAdmin: input.participant.isAdmin }),
+        linkedRegistrationId,
+        leftAt: input.participant.removed ? input.occurredAt : null,
+      },
+      select: { id: true, whatsappId: true },
+    });
+  }
+
+  async syncWebhookGroup(input: SyncWebhookGroupInput): Promise<unknown> {
+    const result = await this.prisma.$transaction(async (transaction) => {
+      await this.lockCommand(
+        transaction,
+        input.channel.companyId,
+        'whatsapp-group',
+        `${input.channel.id}:${input.whatsappId}`,
+      );
+      const inboxKey = {
+        companyId_source_externalEventId: {
+          companyId: input.channel.companyId,
+          source: 'evolution.group-sync',
+          externalEventId: input.externalEventId,
+        },
+      };
+      const duplicate = await transaction.integrationInbox.findUnique({
+        where: inboxKey,
+      });
+      if (duplicate?.resultSnapshot) {
+        assertSameFingerprint(
+          duplicate.payloadHash,
+          input.payloadHash,
+          'externalEventId',
+        );
+        return {
+          ...(duplicate.resultSnapshot as Record<string, unknown>),
+          duplicate: true,
+        };
+      }
+      if (!duplicate) {
+        await transaction.integrationInbox.create({
+          data: {
+            companyId: input.channel.companyId,
+            channelId: input.channel.id,
+            source: 'evolution.group-sync',
+            externalEventId: input.externalEventId,
+            payloadHash: input.payloadHash,
+            correlationId: input.correlationId,
+          },
+        });
+      }
+      const group = await transaction.whatsAppGroup.upsert({
+        where: {
+          companyId_channelId_whatsappId: {
+            companyId: input.channel.companyId,
+            channelId: input.channel.id,
+            whatsappId: input.whatsappId,
+          },
+        },
+        create: {
+          companyId: input.channel.companyId,
+          channelId: input.channel.id,
+          whatsappId: input.whatsappId,
+          displayName: input.displayName,
+          aiMode: WhatsAppGroupAiMode.OFF,
+          syncedAt: input.occurredAt,
+        },
+        update: {
+          ...(input.displayName ? { displayName: input.displayName } : {}),
+          aiMode: WhatsAppGroupAiMode.OFF,
+          syncedAt: input.occurredAt,
+          archivedAt: null,
+        },
+        select: { id: true, whatsappId: true, aiMode: true },
+      });
+      const activeWhatsappIds: string[] = [];
+      for (const participant of input.participants) {
+        await this.upsertWebhookGroupParticipant(transaction, {
+          companyId: input.channel.companyId,
+          groupId: group.id,
+          occurredAt: input.occurredAt,
+          participant,
+        });
+        if (!participant.removed)
+          activeWhatsappIds.push(participant.whatsappId);
+      }
+      if (input.replaceParticipants) {
+        await transaction.whatsAppGroupParticipant.updateMany({
+          where: {
+            companyId: input.channel.companyId,
+            groupId: group.id,
+            leftAt: null,
+            ...(activeWhatsappIds.length > 0
+              ? { whatsappId: { notIn: activeWhatsappIds } }
+              : {}),
+          },
+          data: { leftAt: input.occurredAt },
+        });
+      }
+      const snapshot = {
+        accepted: true,
+        duplicate: false,
+        groupId: group.id,
+        whatsappId: group.whatsappId,
+        aiMode: group.aiMode.toLowerCase(),
+        participantsSeen: input.participants.length,
+      };
+      await transaction.integrationInbox.update({
+        where: inboxKey,
+        data: {
+          processedAt: new Date(),
+          resultSnapshot: payload(snapshot),
+        },
+      });
+      return snapshot;
+    });
+    return result;
+  }
+
+  async persistWebhookGroupMessage(
+    input: PersistWebhookGroupMessageInput,
+  ): Promise<PersistWebhookGroupMessageResult> {
+    try {
+      return await this.prisma.$transaction(async (transaction) => {
+        await this.lockCommand(
+          transaction,
+          input.channel.companyId,
+          'whatsapp-group',
+          `${input.channel.id}:${input.groupWhatsappId}`,
+        );
+        const existingMessage =
+          await transaction.whatsAppGroupMessage.findUnique({
+            where: {
+              companyId_channelId_providerMessageId: {
+                companyId: input.channel.companyId,
+                channelId: input.channel.id,
+                providerMessageId: input.providerMessageId,
+              },
+            },
+            select: { id: true, groupId: true },
+          });
+        if (existingMessage) {
+          return {
+            accepted: true,
+            duplicate: true,
+            groupId: existingMessage.groupId,
+            groupMessageId: existingMessage.id,
+            conversationId: null,
+            threadId: null,
+            serviceSessionId: null,
+            automationAllowed: false,
+            canGenerateReply: false,
+            canSendReply: false,
+          };
+        }
+        const inbox = await transaction.integrationInbox.create({
+          data: {
+            companyId: input.channel.companyId,
+            channelId: input.channel.id,
+            source: 'evolution.group-message',
+            externalEventId: input.externalEventId,
+            payloadHash: input.payloadHash,
+            correlationId: input.correlationId,
+          },
+        });
+        const group = await transaction.whatsAppGroup.upsert({
+          where: {
+            companyId_channelId_whatsappId: {
+              companyId: input.channel.companyId,
+              channelId: input.channel.id,
+              whatsappId: input.groupWhatsappId,
+            },
+          },
+          create: {
+            companyId: input.channel.companyId,
+            channelId: input.channel.id,
+            whatsappId: input.groupWhatsappId,
+            displayName: input.groupDisplayName,
+            aiMode: WhatsAppGroupAiMode.OFF,
+            syncedAt: input.occurredAt,
+          },
+          update: {
+            ...(input.groupDisplayName
+              ? { displayName: input.groupDisplayName }
+              : {}),
+            aiMode: WhatsAppGroupAiMode.OFF,
+            syncedAt: input.occurredAt,
+            archivedAt: null,
+          },
+          select: { id: true },
+        });
+        const participant = input.participant
+          ? await this.upsertWebhookGroupParticipant(transaction, {
+              companyId: input.channel.companyId,
+              groupId: group.id,
+              occurredAt: input.occurredAt,
+              participant: input.participant,
+            })
+          : null;
+        const mediaAssetId = await createWebhookMediaAsset(transaction, {
+          companyId: input.channel.companyId,
+          kind: input.kind,
+          media: input.media,
+          occurredAt: input.occurredAt,
+          group: true,
+        });
+        const message = await transaction.whatsAppGroupMessage.create({
+          data: {
+            companyId: input.channel.companyId,
+            channelId: input.channel.id,
+            groupId: group.id,
+            participantId: participant?.id,
+            mediaAssetId,
+            providerMessageId: input.providerMessageId,
+            direction:
+              input.direction === 'inbound'
+                ? MessageDirection.INBOUND
+                : MessageDirection.OUTBOUND,
+            kind: kindToPrisma[input.kind],
+            text: input.text,
+            media: input.media ? payload(input.media) : undefined,
+            correlationId: input.correlationId,
+            occurredAt: input.occurredAt,
+          },
+          select: { id: true },
+        });
+        await transaction.integrationInbox.update({
+          where: { id: inbox.id },
+          data: { processedAt: new Date() },
+        });
+        return {
+          accepted: true,
+          duplicate: false,
+          groupId: group.id,
+          groupMessageId: message.id,
+          conversationId: null,
+          threadId: null,
+          serviceSessionId: null,
+          automationAllowed: false,
+          canGenerateReply: false,
+          canSendReply: false,
+        };
+      });
+    } catch (error) {
+      if (isPrismaUniqueError(error)) {
+        const existing = await this.prisma.whatsAppGroupMessage.findUnique({
+          where: {
+            companyId_channelId_providerMessageId: {
+              companyId: input.channel.companyId,
+              channelId: input.channel.id,
+              providerMessageId: input.providerMessageId,
+            },
+          },
+          select: { id: true, groupId: true },
+        });
+        if (existing) {
+          return {
+            accepted: true,
+            duplicate: true,
+            groupId: existing.groupId,
+            groupMessageId: existing.id,
+            conversationId: null,
+            threadId: null,
+            serviceSessionId: null,
+            automationAllowed: false,
+            canGenerateReply: false,
+            canSendReply: false,
+          };
+        }
+      }
+      throw error;
+    }
   }
 
   async ensureConversationForPhone(
@@ -877,6 +4132,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             duplicate: true,
             messageId: existingMessage?.id ?? null,
             conversationId: existingMessage?.conversationId ?? null,
+            threadId: existingMessage?.threadId ?? null,
+            serviceSessionId: existingMessage?.serviceSessionId ?? null,
           };
         }
 
@@ -911,6 +4168,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             duplicate: true,
             messageId: messageAlreadyPersisted.id,
             conversationId: messageAlreadyPersisted.conversationId,
+            threadId: messageAlreadyPersisted.threadId,
+            serviceSessionId: messageAlreadyPersisted.serviceSessionId,
           };
         }
 
@@ -966,12 +4225,39 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         const isFirstContact = !conversation;
         let reopenedAfterClosure = false;
         if (!conversation) {
+          const channelRouting =
+            await transaction.whatsAppChannel.findFirstOrThrow({
+              where: {
+                id: input.channel.id,
+                companyId: input.channel.companyId,
+              },
+              select: {
+                department: { select: { code: true } },
+                company: {
+                  select: {
+                    departments: {
+                      orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+                      take: 1,
+                      select: { code: true },
+                    },
+                  },
+                },
+              },
+            });
+          const initialDepartment =
+            channelRouting.department?.code ??
+            channelRouting.company.departments[0]?.code;
+          if (!initialDepartment) {
+            throw validationError(
+              'O canal precisa de um departamento proprietário ou de um departamento padrão do tenant.',
+            );
+          }
           conversation = await transaction.whatsAppConversation.create({
             data: {
               companyId: input.channel.companyId,
               channelId: input.channel.id,
               contactId: contact.id,
-              department: DepartmentCode.COMMERCIAL,
+              department: initialDepartment,
               conversationState: ConversationState.BOT_ACTIVE,
               flowStep: FlowStep.MAIN_MENU,
               requestStatus: RequestStatus.NOT_STARTED,
@@ -979,13 +4265,168 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           });
         }
 
+        await this.lockCommand(
+          transaction,
+          input.channel.companyId,
+          'whatsapp-conversation',
+          conversation.id,
+        );
+        conversation = await transaction.whatsAppConversation.findUniqueOrThrow(
+          {
+            where: {
+              id_companyId: {
+                id: conversation.id,
+                companyId: input.channel.companyId,
+              },
+            },
+          },
+        );
+        let foundation = await this.ensureFoundationForConversation(
+          transaction,
+          conversation,
+          {
+            commandSeed: input.correlationId,
+            occurredAt: input.occurredAt,
+            direction:
+              input.direction === 'inbound'
+                ? MessageDirection.INBOUND
+                : MessageDirection.OUTBOUND,
+            messageText: input.direction === 'inbound' ? input.text : undefined,
+            desiredConversationState:
+              input.direction === 'outbound'
+                ? ConversationState.SENT_TO_HUMAN
+                : conversation.conversationState === ConversationState.CLOSED
+                  ? ConversationState.BOT_ACTIVE
+                  : conversation.conversationState,
+          },
+        );
+
+        if (input.direction === 'inbound') {
+          await this.resolveRegistrationCandidates(transaction, {
+            companyId: input.channel.companyId,
+            serviceSessionId: foundation.session.id,
+            whatsappContactId: contact.id,
+            phoneNormalized: contact.phoneNormalized,
+            occurredAt: input.occurredAt,
+          });
+        }
+
         if (input.direction === 'outbound') {
+          const takeoverCommandId = correlation(
+            'external-human-takeover',
+            `${input.channel.id}:${input.providerMessageId}`,
+          );
+          const session = await this.updateFoundationSession(transaction, {
+            companyId: input.channel.companyId,
+            session: foundation.session,
+            commandId: takeoverCommandId,
+            name: 'external-human-takeover',
+            actorType: MutationActorType.EXTERNAL_HUMAN,
+            status: ServiceSessionStatus.OPEN,
+            controlMode: ServiceSessionControlMode.HUMAN,
+            isForeground: true,
+            responsibleUserId: null,
+            occurredAt: input.occurredAt,
+            metadata: {
+              providerMessageId: input.providerMessageId,
+              source: 'whatsapp-app',
+            },
+          });
+          foundation = { ...foundation, session };
+
+          if (
+            conversation.conversationState !== ConversationState.HUMAN_ACTIVE &&
+            conversation.conversationState !== ConversationState.SENT_TO_HUMAN
+          ) {
+            const from = snapshot(conversation);
+            const expectedVersion = conversation.version;
+            const updated = await transaction.whatsAppConversation.updateMany({
+              where: {
+                id: conversation.id,
+                companyId: input.channel.companyId,
+                version: expectedVersion,
+              },
+              data: {
+                conversationState: ConversationState.SENT_TO_HUMAN,
+                flowStep: FlowStep.HUMAN_SERVICE,
+                assignedToUserId: null,
+                resumeState: null,
+                resumeFlowStep: null,
+                closedAt: null,
+                archivedAt: null,
+                archiveReason: null,
+                archivedByUserId: null,
+                version: { increment: 1 },
+              },
+            });
+            if (updated.count !== 1) {
+              throw currentVersionConflict(expectedVersion);
+            }
+            conversation =
+              await transaction.whatsAppConversation.findUniqueOrThrow({
+                where: {
+                  id_companyId: {
+                    id: conversation.id,
+                    companyId: input.channel.companyId,
+                  },
+                },
+              });
+            await transaction.whatsAppConversationTransition.create({
+              data: {
+                companyId: input.channel.companyId,
+                conversationId: conversation.id,
+                threadId: foundation.threadId,
+                serviceSessionId: foundation.session.id,
+                commandId: takeoverCommandId,
+                commandFingerprint: commandFingerprint({
+                  commandId: takeoverCommandId,
+                  conversationId: conversation.id,
+                  providerMessageId: input.providerMessageId,
+                }),
+                name: 'external-human-takeover',
+                expectedVersion,
+                resultingVersion: conversation.version,
+                actorType: TransitionActorType.WEBHOOK,
+                fromDepartment: departmentToPrisma[from.department],
+                toDepartment: conversation.department,
+                fromState: stateToPrisma[from.conversationState],
+                toState: conversation.conversationState,
+                fromFlowStep: flowToPrisma[from.flowStep],
+                toFlowStep: conversation.flowStep,
+                fromRequestStatus: requestToPrisma[from.requestStatus],
+                toRequestStatus: conversation.requestStatus,
+                metadata: payload({
+                  providerMessageId: input.providerMessageId,
+                  source: 'whatsapp-app',
+                }),
+                resultSnapshot: payload({
+                  id: conversation.id,
+                  ...snapshot(conversation),
+                  version: conversation.version,
+                }),
+                createdAt: input.occurredAt,
+              },
+            });
+          }
+
+          const mediaAssetId = await createWebhookMediaAsset(transaction, {
+            companyId: input.channel.companyId,
+            kind: input.kind,
+            media: input.media,
+            occurredAt: input.occurredAt,
+            group: false,
+          });
           const message = await transaction.whatsAppMessage.create({
             data: {
               companyId: input.channel.companyId,
               conversationId: conversation.id,
               channelId: input.channel.id,
               contactId: contact.id,
+              threadId: foundation.threadId,
+              serviceSessionId: foundation.session.id,
+              mediaAssetId,
+              actorType: WhatsAppMessageActorType.EXTERNAL_HUMAN,
+              source: WhatsAppMessageSource.WHATSAPP_APP,
               providerMessageId: input.providerMessageId,
               direction: MessageDirection.OUTBOUND,
               deliveryStatus: DeliveryStatus.SENT,
@@ -1028,6 +4469,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             reopenedAfterClosure: false,
             messageId: message.id,
             conversationId: conversation.id,
+            threadId: foundation.threadId,
+            serviceSessionId: foundation.session.id,
             version: conversation.version,
           };
         }
@@ -1071,6 +4514,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             data: {
               companyId: input.channel.companyId,
               conversationId: conversation.id,
+              threadId: foundation.threadId,
+              serviceSessionId: foundation.session.id,
               commandId: correlation(
                 'reopen-after-customer-message',
                 `${input.channel.id}:${input.providerMessageId}`,
@@ -1208,6 +4653,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             data: {
               companyId: input.channel.companyId,
               conversationId: conversation.id,
+              threadId: foundation.threadId,
+              serviceSessionId: foundation.session.id,
               commandId: correlation(
                 'inbound',
                 `${input.channel.id}:${input.providerMessageId}`,
@@ -1250,12 +4697,64 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             automaticResumeName === 'resume-contextual-contact';
         }
 
+        const desiredSession = serviceSessionStateForConversation(
+          conversation.conversationState,
+        );
+        if (
+          foundation.session.controlMode === ServiceSessionControlMode.AI ||
+          desiredSession.controlMode === ServiceSessionControlMode.HUMAN
+        ) {
+          const currentDepartment =
+            await transaction.tenantDepartment.findUnique({
+              where: {
+                companyId_code: {
+                  companyId: input.channel.companyId,
+                  code: conversation.department,
+                },
+              },
+              select: { id: true },
+            });
+          const synchronized = await this.updateFoundationSession(transaction, {
+            companyId: input.channel.companyId,
+            session: foundation.session,
+            commandId: correlation(
+              'webhook-session-sync',
+              `${input.channel.id}:${input.providerMessageId}`,
+            ),
+            name: 'webhook-conversation-synchronized',
+            actorType: MutationActorType.SERVICE,
+            status: desiredSession.status,
+            controlMode: desiredSession.controlMode,
+            isForeground: desiredSession.isForeground,
+            responsibleUserId:
+              desiredSession.controlMode === ServiceSessionControlMode.HUMAN
+                ? conversation.assignedToUserId
+                : null,
+            currentDepartmentId: currentDepartment?.id ?? null,
+            occurredAt: input.occurredAt,
+            metadata: { providerMessageId: input.providerMessageId },
+          });
+          foundation = { ...foundation, session: synchronized };
+        }
+
+        const mediaAssetId = await createWebhookMediaAsset(transaction, {
+          companyId: input.channel.companyId,
+          kind: input.kind,
+          media: input.media,
+          occurredAt: input.occurredAt,
+          group: false,
+        });
         const message = await transaction.whatsAppMessage.create({
           data: {
             companyId: input.channel.companyId,
             conversationId: conversation.id,
             channelId: input.channel.id,
             contactId: contact.id,
+            threadId: foundation.threadId,
+            serviceSessionId: foundation.session.id,
+            mediaAssetId,
+            actorType: WhatsAppMessageActorType.CUSTOMER,
+            source: WhatsAppMessageSource.WHATSAPP_APP,
             providerMessageId: input.providerMessageId,
             direction: MessageDirection.INBOUND,
             deliveryStatus: DeliveryStatus.RECEIVED,
@@ -1289,11 +4788,15 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         });
 
         const humanRouted =
+          foundation.session.controlMode === ServiceSessionControlMode.HUMAN ||
           conversation.conversationState === ConversationState.HUMAN_ACTIVE ||
           conversation.conversationState === ConversationState.SENT_TO_HUMAN ||
           conversation.flowStep === FlowStep.HUMAN_SERVICE;
         const automationAllowed =
           input.automationEnabled &&
+          foundation.session.controlMode === ServiceSessionControlMode.AI &&
+          foundation.session.status === ServiceSessionStatus.OPEN &&
+          foundation.session.isForeground &&
           conversation.conversationState === ConversationState.BOT_ACTIVE &&
           !humanRouted;
         const canGenerateReply = automationAllowed;
@@ -1312,6 +4815,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             eventId: input.correlationId,
             messageId: message.id,
             conversationId: conversation.id,
+            threadId: foundation.threadId,
+            serviceSessionId: foundation.session.id,
             channelId: input.channel.id,
             companyId: input.channel.companyId,
             contact: {
@@ -1358,6 +4863,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           reopenedAfterClosure,
           messageId: message.id,
           conversationId: conversation.id,
+          threadId: foundation.threadId,
+          serviceSessionId: foundation.session.id,
           version: conversation.version,
         };
       });
@@ -1378,6 +4885,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             duplicate: true,
             messageId: existingMessage.id,
             conversationId: existingMessage.conversationId,
+            threadId: existingMessage.threadId,
+            serviceSessionId: existingMessage.serviceSessionId,
           };
         }
       }
@@ -1521,11 +5030,200 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           actorUser = { id: actor.id, name: actor.name };
         }
 
+        if (
+          input.automaticHumanHandoff &&
+          (input.name !== 'forward' || input.actorType !== 'system')
+        ) {
+          throw validationError(
+            'Handoff automático é permitido somente em forward executado pelo sistema.',
+          );
+        }
+        const automaticHandoffMessage =
+          input.automaticHumanHandoff?.customerMessage.trim() ?? null;
+        if (
+          input.automaticHumanHandoff &&
+          (!automaticHandoffMessage || automaticHandoffMessage.length > 4096)
+        ) {
+          throw validationError(
+            'A mensagem contextual do handoff deve possuir entre 1 e 4096 caracteres.',
+          );
+        }
+        if (
+          input.automaticHumanHandoff &&
+          !Number.isFinite(input.automaticHumanHandoff.occurredAt.valueOf())
+        ) {
+          throw validationError('O instante do handoff é inválido.');
+        }
+        if (
+          input.automaticHumanHandoff &&
+          Boolean(input.automaticHumanHandoff.actorAgentId) !==
+            Boolean(input.automaticHumanHandoff.agentExecutionId)
+        ) {
+          throw validationError(
+            'A autoria de IA do handoff exige agente e execução correspondentes.',
+          );
+        }
+        const automaticPriorityReason =
+          input.automaticHumanHandoff?.sessionPriority?.reason.trim() ?? null;
+        if (
+          input.automaticHumanHandoff?.sessionPriority &&
+          (!automaticPriorityReason || automaticPriorityReason.length > 500)
+        ) {
+          throw validationError(
+            'O motivo da prioridade de IA deve possuir entre 1 e 500 caracteres.',
+          );
+        }
+        if (
+          input.automaticHumanHandoff?.sessionPriority &&
+          !input.automaticHumanHandoff.actorAgentId
+        ) {
+          throw validationError(
+            'A prioridade de IA exige autoria de agente auditável.',
+          );
+        }
+
+        let resolvedTargetDepartment = input.targetDepartment;
+        let automaticHandoff: {
+          readonly occurredAt: Date;
+          readonly humanServiceOpen: boolean;
+          readonly scheduleSource: 'tenant' | 'department' | 'always-open';
+          readonly targetDepartmentId: string;
+          readonly targetDepartmentCode: DepartmentCode;
+          readonly queueId: string;
+          readonly customerMessage: string;
+        } | null = null;
+        if (input.automaticHumanHandoff && automaticHandoffMessage) {
+          const departmentSelect = {
+            id: true,
+            code: true,
+            humanServiceHoursOverride: true,
+            serviceQueues: {
+              where: { enabled: true },
+              orderBy: [{ priorityWeight: 'desc' }, { name: 'asc' }],
+              take: 1,
+              select: { id: true },
+            },
+          } satisfies Prisma.TenantDepartmentSelect;
+          const requestedDepartment = input.targetDepartment
+            ? await transaction.tenantDepartment.findUnique({
+                where: {
+                  companyId_code: {
+                    companyId: input.companyId,
+                    code: departmentToPrisma[input.targetDepartment],
+                  },
+                },
+                select: departmentSelect,
+              })
+            : null;
+          const currentDepartment = requestedDepartment
+            ? null
+            : await transaction.tenantDepartment.findUnique({
+                where: {
+                  companyId_code: {
+                    companyId: input.companyId,
+                    code: conversation.department,
+                  },
+                },
+                select: departmentSelect,
+              });
+          const channelOwnerId =
+            requestedDepartment || currentDepartment
+              ? null
+              : await transaction.whatsAppChannel.findUnique({
+                  where: {
+                    id_companyId: {
+                      id: conversation.channelId,
+                      companyId: input.companyId,
+                    },
+                  },
+                  select: { departmentId: true },
+                });
+          const channelOwner = channelOwnerId?.departmentId
+            ? await transaction.tenantDepartment.findUnique({
+                where: {
+                  id_companyId: {
+                    id: channelOwnerId.departmentId,
+                    companyId: input.companyId,
+                  },
+                },
+                select: departmentSelect,
+              })
+            : null;
+          const department =
+            requestedDepartment ?? currentDepartment ?? channelOwner;
+          if (!department) {
+            throw validationError(
+              'Configure um departamento proprietário no canal para o handoff humano.',
+            );
+          }
+          const queue =
+            department.serviceQueues[0] ??
+            (await transaction.serviceQueue.upsert({
+              where: {
+                companyId_departmentId_name: {
+                  companyId: input.companyId,
+                  departmentId: department.id,
+                  name: 'Atendimento',
+                },
+              },
+              create: {
+                companyId: input.companyId,
+                departmentId: department.id,
+                name: 'Atendimento',
+              },
+              update: { enabled: true },
+              select: { id: true },
+            }));
+          const company = await transaction.company.findUnique({
+            where: { id: input.companyId },
+            select: {
+              humanServiceHours: true,
+              offHoursHandoffMessage: true,
+            },
+          });
+          if (!company) throw notFound('Tenant');
+          const tenantSchedule = parseHumanServiceHours(
+            company.humanServiceHours,
+            'Horário padrão do tenant',
+          );
+          const departmentSchedule = parseHumanServiceHours(
+            department.humanServiceHoursOverride,
+            'Horário do departamento',
+          );
+          const humanServiceOpen = isHumanServiceOpen({
+            at: input.automaticHumanHandoff.occurredAt,
+            tenantDefault: tenantSchedule,
+            departmentOverride: departmentSchedule,
+          });
+          const offHoursMessage = company.offHoursHandoffMessage.trim();
+          if (!humanServiceOpen && !offHoursMessage) {
+            throw validationError(
+              'Configure a mensagem de encaminhamento fora do horário.',
+            );
+          }
+          resolvedTargetDepartment = departmentFromPrisma[department.code];
+          automaticHandoff = {
+            occurredAt: input.automaticHumanHandoff.occurredAt,
+            humanServiceOpen,
+            scheduleSource: departmentSchedule
+              ? 'department'
+              : tenantSchedule
+                ? 'tenant'
+                : 'always-open',
+            targetDepartmentId: department.id,
+            targetDepartmentCode: department.code,
+            queueId: queue.id,
+            customerMessage: humanServiceOpen
+              ? automaticHandoffMessage
+              : offHoursMessage,
+          };
+        }
+
         const from = snapshot(conversation);
         const to = resolveConversationTransition({
           current: from,
           name: input.name,
-          targetDepartment: input.targetDepartment,
+          targetDepartment: resolvedTargetDepartment,
           departmentOption:
             typeof input.metadata?.departmentOption === 'string'
               ? input.metadata.departmentOption
@@ -1534,9 +5232,41 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             preventCloseWithApprovedQuote: this.preventCloseWithApprovedQuote,
           },
         });
+        const transitionedAt = automaticHandoff?.occurredAt ?? new Date();
+        const foundation = await this.ensureFoundationForConversation(
+          transaction,
+          conversation,
+          {
+            commandSeed: input.commandId,
+            occurredAt: transitionedAt,
+            desiredConversationState: stateToPrisma[to.conversationState],
+          },
+        );
+        const automaticAgentAttribution =
+          input.automaticHumanHandoff?.actorAgentId &&
+          input.automaticHumanHandoff.agentExecutionId
+            ? await transaction.agentExecution.findFirst({
+                where: {
+                  id: input.automaticHumanHandoff.agentExecutionId,
+                  companyId: input.companyId,
+                  agentId: input.automaticHumanHandoff.actorAgentId,
+                  serviceSessionId: foundation.session.id,
+                  status: AgentExecutionStatus.SUCCEEDED,
+                },
+                select: { id: true, agentId: true },
+              })
+            : null;
+        if (
+          input.automaticHumanHandoff?.actorAgentId &&
+          input.automaticHumanHandoff.agentExecutionId &&
+          !automaticAgentAttribution
+        ) {
+          throw forbidden(
+            'A execução de IA do handoff não pertence à sessão ou ainda não foi concluída.',
+          );
+        }
         const nextVersion = conversation.version + 1;
         const transitionId = randomUUID();
-        const transitionedAt = new Date();
         const departmentContactCompleted =
           input.name === 'return-to-main-menu' &&
           input.metadata?.reason === 'department-contact-forwarded';
@@ -1561,6 +5291,16 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
                 channelId: conversation.channelId,
                 contactId: conversation.contactId,
                 actorUserId: input.actorUserId,
+                threadId: foundation.threadId,
+                serviceSessionId: foundation.session.id,
+                actorType:
+                  input.actorType === 'user'
+                    ? WhatsAppMessageActorType.HUMAN_USER
+                    : WhatsAppMessageActorType.SYSTEM,
+                source:
+                  input.actorType === 'user'
+                    ? WhatsAppMessageSource.LUME_WEB
+                    : WhatsAppMessageSource.AUTOMATION,
                 direction: MessageDirection.OUTBOUND,
                 deliveryStatus: DeliveryStatus.PENDING,
                 kind: MessageKind.TEXT,
@@ -1582,6 +5322,57 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               data: {
                 companyId: input.companyId,
                 messageId: closureMessage.id,
+                attemptNumber: 1,
+                status: MessageAttemptStatus.PENDING,
+              },
+            })
+          : null;
+        const offHoursNotificationClaimed = Boolean(
+          automaticHandoff &&
+          !automaticHandoff.humanServiceOpen &&
+          foundation.session.offHoursHandoffNotifiedAt === null,
+        );
+        const handoffMessageText =
+          automaticHandoff &&
+          (automaticHandoff.humanServiceOpen || offHoursNotificationClaimed)
+            ? automaticHandoff.customerMessage
+            : null;
+        const handoffMessage = handoffMessageText
+          ? await transaction.whatsAppMessage.create({
+              data: {
+                companyId: input.companyId,
+                conversationId: input.conversationId,
+                channelId: conversation.channelId,
+                contactId: conversation.contactId,
+                actorAgentId: automaticAgentAttribution?.agentId,
+                agentExecutionId: automaticAgentAttribution?.id,
+                threadId: foundation.threadId,
+                serviceSessionId: foundation.session.id,
+                actorType: automaticAgentAttribution
+                  ? WhatsAppMessageActorType.AI_AGENT
+                  : WhatsAppMessageActorType.SYSTEM,
+                source: WhatsAppMessageSource.AUTOMATION,
+                direction: MessageDirection.OUTBOUND,
+                deliveryStatus: DeliveryStatus.PENDING,
+                kind: MessageKind.TEXT,
+                text: handoffMessageText,
+                automationPurpose: automaticHandoff?.humanServiceOpen
+                  ? 'human-handoff'
+                  : 'off-hours-handoff',
+                recipientPhone: conversation.contact.phoneNormalized,
+                correlationId: correlation(
+                  'human-handoff-outbound',
+                  input.commandId,
+                ),
+                occurredAt: transitionedAt,
+              },
+            })
+          : null;
+        const handoffAttempt = handoffMessage
+          ? await transaction.whatsAppMessageAttempt.create({
+              data: {
+                companyId: input.companyId,
+                messageId: handoffMessage.id,
                 attemptNumber: 1,
                 status: MessageAttemptStatus.PENDING,
               },
@@ -1652,6 +5443,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             data: {
               companyId: input.companyId,
               conversationId: input.conversationId,
+              threadId: foundation.threadId,
+              serviceSessionId: foundation.session.id,
               sequence: (latest._max.sequence ?? 0) + 1,
               status: RequestStatus.COLLECTING_INFORMATION,
             },
@@ -1678,6 +5471,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               id_companyId: { id: quote.id, companyId: input.companyId },
             },
             data: {
+              threadId: foundation.threadId,
+              serviceSessionId: foundation.session.id,
               status: requestToPrisma[to.requestStatus],
               ...(input.name === 'confirm-quote'
                 ? {
@@ -1796,8 +5591,15 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               departmentContactCompleted
                 ? 0
                 : conversation.unreadCount,
-            ...(closureMessageText
-              ? { lastMessagePreview: closureMessageText.slice(0, 240) }
+            ...(closureMessageText || handoffMessageText
+              ? {
+                  lastMessagePreview: (
+                    closureMessageText ??
+                    handoffMessageText ??
+                    ''
+                  ).slice(0, 240),
+                  lastOutboundAt: transitionedAt,
+                }
               : {}),
             closedAt:
               input.name === 'take-over'
@@ -1827,6 +5629,132 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           input.companyId,
           input.conversationId,
         );
+        const targetDepartment = automaticHandoff
+          ? { id: automaticHandoff.targetDepartmentId }
+          : await transaction.tenantDepartment.findUnique({
+              where: {
+                companyId_code: {
+                  companyId: input.companyId,
+                  code: updated.department,
+                },
+              },
+              select: { id: true },
+            });
+        const targetSessionState = serviceSessionStateForConversation(
+          updated.conversationState,
+        );
+        const synchronizedSession = await this.updateFoundationSession(
+          transaction,
+          {
+            companyId: input.companyId,
+            session: foundation.session,
+            commandId: input.commandId,
+            name: `legacy-${input.name}`,
+            actorType:
+              automaticAgentAttribution !== null
+                ? MutationActorType.AI_AGENT
+                : input.actorType === 'user'
+                  ? MutationActorType.HUMAN_USER
+                  : input.actorType === 'system'
+                    ? MutationActorType.SYSTEM
+                    : MutationActorType.SERVICE,
+            actorUserId: input.actorUserId,
+            actorAgentId: automaticAgentAttribution?.agentId,
+            status: targetSessionState.status,
+            controlMode: targetSessionState.controlMode,
+            isForeground: targetSessionState.isForeground,
+            responsibleUserId:
+              targetSessionState.controlMode === ServiceSessionControlMode.HUMAN
+                ? updated.assignedToUserId
+                : null,
+            currentDepartmentId: targetDepartment?.id ?? null,
+            ...(automaticHandoff
+              ? {
+                  queueId: automaticHandoff.queueId,
+                  offHoursHandoffNotifiedAt: offHoursNotificationClaimed
+                    ? transitionedAt
+                    : undefined,
+                  ...(input.automaticHumanHandoff?.sessionPriority &&
+                  automaticPriorityReason
+                    ? {
+                        priority:
+                          servicePriorityToPrisma[
+                            input.automaticHumanHandoff.sessionPriority.priority
+                          ],
+                        priorityReason: automaticPriorityReason,
+                        prioritySource: ServiceSessionPrioritySource.AI_AGENT,
+                      }
+                    : {}),
+                }
+              : {}),
+            occurredAt: transitionedAt,
+            metadata: {
+              conversationId: input.conversationId,
+              transitionName: input.name,
+              ...(automaticHandoff
+                ? {
+                    humanServiceOpen: automaticHandoff.humanServiceOpen,
+                    scheduleSource: automaticHandoff.scheduleSource,
+                    targetDepartmentId: automaticHandoff.targetDepartmentId,
+                    queueId: automaticHandoff.queueId,
+                    offHoursNotificationClaimed,
+                    handoffMessageId: handoffMessage?.id ?? null,
+                    ...(input.automaticHumanHandoff?.sessionPriority
+                      ? {
+                          priority:
+                            input.automaticHumanHandoff.sessionPriority
+                              .priority,
+                          priorityReason: automaticPriorityReason,
+                          prioritySource: 'ai-agent',
+                          agentExecutionId:
+                            automaticAgentAttribution?.id ?? null,
+                        }
+                      : {}),
+                  }
+                : {}),
+            },
+          },
+        );
+        if (automaticHandoff) {
+          const previousAssignment =
+            await transaction.serviceSessionAssignment.findFirst({
+              where: {
+                companyId: input.companyId,
+                serviceSessionId: synchronizedSession.id,
+                status: ServiceAssignmentStatus.ACTIVE,
+              },
+              orderBy: [{ startedAt: 'desc' }, { id: 'desc' }],
+              select: { id: true },
+            });
+          await transaction.serviceSessionAssignment.updateMany({
+            where: {
+              companyId: input.companyId,
+              serviceSessionId: synchronizedSession.id,
+              status: ServiceAssignmentStatus.ACTIVE,
+            },
+            data: {
+              status: ServiceAssignmentStatus.RETURNED_TO_QUEUE,
+              endedAt: transitionedAt,
+            },
+          });
+          await transaction.serviceSessionAssignment.create({
+            data: {
+              companyId: input.companyId,
+              serviceSessionId: synchronizedSession.id,
+              departmentId: automaticHandoff.targetDepartmentId,
+              assignedUserId: null,
+              queueId: automaticHandoff.queueId,
+              previousAssignmentId: previousAssignment?.id ?? null,
+              status: ServiceAssignmentStatus.ACTIVE,
+              source: ServiceAssignmentSource.AUTOMATIC,
+              reason:
+                typeof input.metadata?.reason === 'string'
+                  ? input.metadata.reason.slice(0, 500)
+                  : 'automatic-human-handoff',
+              startedAt: transitionedAt,
+            },
+          });
+        }
         if (closureMessage && closureAttempt && closureMessageText) {
           await this.createOrderedOutbox(transaction, {
             companyId: input.companyId,
@@ -1843,6 +5771,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               messageId: closureMessage.id,
               attemptId: closureAttempt.id,
               conversationId: input.conversationId,
+              threadId: foundation.threadId,
+              serviceSessionId: synchronizedSession.id,
               channelId: conversation.channelId,
               companyId: input.companyId,
               contact: {
@@ -1873,6 +5803,54 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             },
           });
         }
+        if (handoffMessage && handoffAttempt && handoffMessageText) {
+          await this.createOrderedOutbox(transaction, {
+            companyId: input.companyId,
+            topic: 'whatsapp.outbound.requested',
+            aggregateType: 'whatsapp-conversation',
+            aggregateId: input.conversationId,
+            correlationId: correlation(
+              'human-handoff-request',
+              input.commandId,
+            ),
+            payload: {
+              eventId: handoffMessage.id,
+              commandId: handoffMessage.id,
+              messageId: handoffMessage.id,
+              attemptId: handoffAttempt.id,
+              conversationId: input.conversationId,
+              threadId: foundation.threadId,
+              serviceSessionId: synchronizedSession.id,
+              channelId: conversation.channelId,
+              companyId: input.companyId,
+              contact: {
+                id: conversation.contact.id,
+                phone: conversation.contact.phoneNormalized,
+                displayName: conversation.contact.displayName,
+              },
+              message: {
+                providerMessageId: null,
+                direction: 'outbound',
+                deliveryStatus: 'pending',
+                kind: 'text',
+                text: handoffMessageText,
+                media: null,
+                occurredAt: handoffMessage.occurredAt.toISOString(),
+              },
+              conversation: {
+                id: updated.id,
+                ...snapshot(updated),
+                version: updated.version,
+              },
+              automatic: true,
+              automationAllowed: false,
+              canGenerateReply: false,
+              canSendReply: true,
+              contextualTransition: false,
+              isFirstContact: false,
+            },
+          });
+        }
         const closure = closing
           ? {
               transitionId,
@@ -1886,14 +5864,28 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               messageId: closureMessage?.id ?? null,
             }
           : null;
+        const humanHandoff = automaticHandoff
+          ? {
+              serviceSessionId: synchronizedSession.id,
+              targetDepartmentId: automaticHandoff.targetDepartmentId,
+              queueId: automaticHandoff.queueId,
+              humanServiceOpen: automaticHandoff.humanServiceOpen,
+              scheduleSource: automaticHandoff.scheduleSource,
+              offHoursNotificationClaimed,
+              messageId: handoffMessage?.id ?? null,
+              occurredAt: transitionedAt.toISOString(),
+            }
+          : null;
         const persistedResult = {
           ...presentConversation(updated),
           ...(closing ? { closure } : {}),
+          ...(humanHandoff ? { humanHandoff } : {}),
         };
         const transitionMetadata = {
           ...(input.metadata ?? {}),
           ...(closing ? { reason: resolvedClosingReason } : {}),
           quoteRequestId: quote?.id ?? null,
+          ...(humanHandoff ? { humanHandoff } : {}),
           ...(supersededQuote
             ? {
                 supersededQuoteRequest: {
@@ -1911,6 +5903,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             id: transitionId,
             companyId: input.companyId,
             conversationId: input.conversationId,
+            threadId: foundation.threadId,
+            serviceSessionId: synchronizedSession.id,
             commandId: input.commandId,
             commandFingerprint: fingerprint,
             name: input.name,
@@ -1931,6 +5925,38 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             createdAt: transitionedAt,
           },
         });
+        if (automaticHandoff) {
+          await transaction.tenantAuditLog.create({
+            data: {
+              companyId: input.companyId,
+              action: 'whatsapp.service-session.handoff',
+              targetType: 'service-session',
+              targetId: synchronizedSession.id,
+              metadata: payload({
+                transitionId,
+                commandId: input.commandId,
+                conversationId: input.conversationId,
+                expectedConversationVersion: input.expectedVersion,
+                resultingConversationVersion: nextVersion,
+                resultingServiceSessionVersion: synchronizedSession.version,
+                targetDepartmentId: automaticHandoff.targetDepartmentId,
+                queueId: automaticHandoff.queueId,
+                humanServiceOpen: automaticHandoff.humanServiceOpen,
+                scheduleSource: automaticHandoff.scheduleSource,
+                offHoursNotificationClaimed,
+                handoffMessageId: handoffMessage?.id ?? null,
+                actorAgentId: automaticAgentAttribution?.agentId ?? null,
+                agentExecutionId: automaticAgentAttribution?.id ?? null,
+                priority:
+                  input.automaticHumanHandoff?.sessionPriority?.priority ??
+                  null,
+                priorityReason: automaticPriorityReason,
+                occurredAt: transitionedAt.toISOString(),
+              }),
+              createdAt: transitionedAt,
+            },
+          });
+        }
         if (closing) {
           await transaction.tenantAuditLog.create({
             data: {
@@ -2241,6 +6267,12 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           );
         }
 
+        await this.lockCommand(
+          transaction,
+          input.companyId,
+          'whatsapp-conversation',
+          input.conversationId,
+        );
         const conversation = await this.findConversationOrThrow(
           transaction,
           input.companyId,
@@ -2248,6 +6280,93 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         );
         if (conversation.version !== input.expectedVersion) {
           throw currentVersionConflict(conversation.version);
+        }
+        const outboundOccurredAt = new Date();
+        let foundation = await this.ensureFoundationForConversation(
+          transaction,
+          conversation,
+          {
+            commandSeed: input.commandId,
+            occurredAt: outboundOccurredAt,
+            direction: MessageDirection.OUTBOUND,
+          },
+        );
+        this.assertSessionAllowsAutomaticReply(
+          conversation,
+          foundation.session,
+        );
+        if (Boolean(input.actorAgentId) !== Boolean(input.agentExecutionId)) {
+          throw validationError(
+            'A autoria da IA exige agente e execução correspondentes.',
+          );
+        }
+        const agentAttribution =
+          input.actorAgentId && input.agentExecutionId
+            ? await transaction.agentExecution.findFirst({
+                where: {
+                  id: input.agentExecutionId,
+                  companyId: input.companyId,
+                  agentId: input.actorAgentId,
+                  serviceSessionId: foundation.session.id,
+                  status: AgentExecutionStatus.SUCCEEDED,
+                },
+                select: { id: true, agentId: true },
+              })
+            : null;
+        if (input.actorAgentId && input.agentExecutionId && !agentAttribution) {
+          throw forbidden(
+            'A execução de IA não pertence a esta sessão ou ainda não foi concluída.',
+          );
+        }
+        if (input.conversationResolved && !agentAttribution) {
+          throw validationError(
+            'A resolução automática exige uma execução de agente auditável.',
+          );
+        }
+        const sessionPriorityReason = input.sessionPriority?.reason.trim();
+        if (
+          input.sessionPriority &&
+          (!sessionPriorityReason || sessionPriorityReason.length > 500)
+        ) {
+          throw validationError(
+            'O motivo da prioridade de IA deve possuir entre 1 e 500 caracteres.',
+          );
+        }
+        if (input.sessionPriority && !agentAttribution) {
+          throw validationError(
+            'A prioridade de IA exige uma execução de agente auditável.',
+          );
+        }
+        if (
+          input.sessionPriority &&
+          sessionPriorityReason &&
+          agentAttribution
+        ) {
+          const prioritizedSession = await this.updateFoundationSession(
+            transaction,
+            {
+              companyId: input.companyId,
+              session: foundation.session,
+              commandId: correlation('ai-priority', input.commandId),
+              name: 'ai-priority-classified',
+              actorType: MutationActorType.AI_AGENT,
+              actorAgentId: agentAttribution.agentId,
+              status: foundation.session.status,
+              controlMode: foundation.session.controlMode,
+              isForeground: foundation.session.isForeground,
+              priority: servicePriorityToPrisma[input.sessionPriority.priority],
+              priorityReason: sessionPriorityReason,
+              prioritySource: ServiceSessionPrioritySource.AI_AGENT,
+              occurredAt: outboundOccurredAt,
+              metadata: {
+                conversationId: input.conversationId,
+                agentExecutionId: agentAttribution.id,
+                priority: input.sessionPriority.priority,
+                priorityReason: sessionPriorityReason,
+              },
+            },
+          );
+          foundation = { ...foundation, session: prioritizedSession };
         }
         const unsupportedMessageKindReply =
           input.purpose === 'unsupported-message-kind';
@@ -2343,6 +6462,14 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             conversationId: input.conversationId,
             channelId: conversation.channelId,
             contactId: conversation.contactId,
+            threadId: foundation.threadId,
+            serviceSessionId: foundation.session.id,
+            actorAgentId: agentAttribution?.agentId,
+            agentExecutionId: agentAttribution?.id,
+            actorType: agentAttribution
+              ? WhatsAppMessageActorType.AI_AGENT
+              : WhatsAppMessageActorType.SYSTEM,
+            source: WhatsAppMessageSource.AUTOMATION,
             direction: MessageDirection.OUTBOUND,
             deliveryStatus: DeliveryStatus.PENDING,
             kind: kindToPrisma[input.kind],
@@ -2351,7 +6478,7 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             automationPurpose: input.purpose,
             recipientPhone,
             correlationId: messageCorrelation,
-            occurredAt: new Date(),
+            occurredAt: outboundOccurredAt,
           },
         });
         const attempt = await transaction.whatsAppMessageAttempt.create({
@@ -2362,6 +6489,35 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             status: MessageAttemptStatus.PENDING,
           },
         });
+        if (input.conversationResolved && agentAttribution) {
+          const resolvedSession = await this.updateFoundationSession(
+            transaction,
+            {
+              companyId: input.companyId,
+              session: foundation.session,
+              commandId: correlation(
+                'ai-conversation-resolved',
+                input.commandId,
+              ),
+              name: 'ai-conversation-resolved',
+              actorType: MutationActorType.AI_AGENT,
+              actorAgentId: agentAttribution.agentId,
+              status: foundation.session.status,
+              controlMode: foundation.session.controlMode,
+              isForeground: foundation.session.isForeground,
+              conversationResolved: true,
+              resolutionConfirmedByCustomer: false,
+              occurredAt: outboundOccurredAt,
+              metadata: {
+                conversationId: input.conversationId,
+                messageId: message.id,
+                agentExecutionId: agentAttribution.id,
+                signal: 'structured-ai-completed',
+              },
+            },
+          );
+          foundation = { ...foundation, session: resolvedSession };
+        }
         const persistedResult = this.presentMessage(
           { ...message, attempts: [attempt] },
           false,
@@ -2463,6 +6619,45 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             'A resposta exige atendimento humano ativo atribuído ao usuário.',
           );
         }
+        const humanOccurredAt = new Date();
+        let foundation = await this.ensureFoundationForConversation(
+          transaction,
+          conversation,
+          {
+            commandSeed: input.commandId,
+            occurredAt: humanOccurredAt,
+            direction: MessageDirection.OUTBOUND,
+            desiredConversationState: ConversationState.HUMAN_ACTIVE,
+          },
+        );
+        const department = await transaction.tenantDepartment.findUnique({
+          where: {
+            companyId_code: {
+              companyId: input.companyId,
+              code: conversation.department,
+            },
+          },
+          select: { id: true },
+        });
+        const humanSession = await this.updateFoundationSession(transaction, {
+          companyId: input.companyId,
+          session: foundation.session,
+          commandId: correlation(
+            'human-outbound-session',
+            input.idempotencyKey,
+          ),
+          name: 'human-user-outbound',
+          actorType: MutationActorType.HUMAN_USER,
+          actorUserId: input.actorUserId,
+          status: ServiceSessionStatus.OPEN,
+          controlMode: ServiceSessionControlMode.HUMAN,
+          isForeground: true,
+          responsibleUserId: input.actorUserId,
+          currentDepartmentId: department?.id ?? null,
+          occurredAt: humanOccurredAt,
+          metadata: { conversationId: input.conversationId },
+        });
+        foundation = { ...foundation, session: humanSession };
 
         await transaction.integrationInbox.create({
           data: {
@@ -2487,6 +6682,10 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             channelId: conversation.channelId,
             contactId: conversation.contactId,
             actorUserId: input.actorUserId,
+            threadId: foundation.threadId,
+            serviceSessionId: foundation.session.id,
+            actorType: WhatsAppMessageActorType.HUMAN_USER,
+            source: WhatsAppMessageSource.LUME_WEB,
             direction: MessageDirection.OUTBOUND,
             deliveryStatus: DeliveryStatus.PENDING,
             kind: attachment ? kindToPrisma[attachment.kind] : MessageKind.TEXT,
@@ -2509,7 +6708,7 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               : {}),
             recipientPhone: conversation.contact.phoneNormalized,
             correlationId: messageCorrelation,
-            occurredAt: new Date(),
+            occurredAt: humanOccurredAt,
           },
         });
         const attempt = await transaction.whatsAppMessageAttempt.create({
@@ -2568,6 +6767,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             messageId: message.id,
             attemptId: attempt.id,
             conversationId: input.conversationId,
+            threadId: foundation.threadId,
+            serviceSessionId: foundation.session.id,
             channelId: conversation.channelId,
             companyId: input.companyId,
             contact: {
@@ -2689,15 +6890,17 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             },
           });
         }
+        let dispatchRoute: Readonly<Record<string, string>> = {};
         const completeClaim = async (result: Record<string, unknown>) => {
+          const routedResult = { ...result, ...dispatchRoute };
           await transaction.integrationInbox.update({
             where: inboxKey,
             data: {
               processedAt: new Date(),
-              resultSnapshot: payload(result),
+              resultSnapshot: payload(routedResult),
             },
           });
-          return result;
+          return routedResult;
         };
         const message = await transaction.whatsAppMessage.findUnique({
           where: {
@@ -2705,15 +6908,141 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           },
           select: {
             id: true,
+            channelId: true,
+            conversationId: true,
+            serviceSessionId: true,
+            actorUserId: true,
+            actorType: true,
+            source: true,
+            automationPurpose: true,
             direction: true,
             deliveryStatus: true,
+            channel: { select: { instanceName: true } },
           },
         });
         if (!message) throw notFound('Mensagem');
+        dispatchRoute = {
+          sourceChannelId: message.channelId,
+          instanceName: message.channel.instanceName,
+        };
         if (message.direction !== MessageDirection.OUTBOUND) {
           throw validationError(
             'Somente mensagens outbound podem ser reservadas para envio.',
           );
+        }
+        const bypassSessionGate = [
+          'conversation-closure',
+          'department-contact-finalization',
+          'quote-proposal',
+        ].includes(message.automationPurpose ?? '');
+        const lifecyclePurpose = message.automationPurpose as
+          'service-session-closing-question' | 'service-session-closure' | null;
+        if (
+          lifecyclePurpose === 'service-session-closing-question' ||
+          lifecyclePurpose === 'service-session-closure'
+        ) {
+          if (!message.serviceSessionId) {
+            throw new AppError(
+              'CONFLICT',
+              'A mensagem de lifecycle não está vinculada à sessão.',
+            );
+          }
+          await this.lockCommand(
+            transaction,
+            input.companyId,
+            'whatsapp-conversation',
+            message.conversationId,
+          );
+          const sessionBeforeLock = await transaction.serviceSession.findUnique(
+            {
+              where: {
+                id_companyId: {
+                  id: message.serviceSessionId,
+                  companyId: input.companyId,
+                },
+              },
+              select: serviceSessionAuthorizationSelect,
+            },
+          );
+          if (!sessionBeforeLock) {
+            throw new AppError('CONFLICT', 'A sessão de lifecycle não existe.');
+          }
+          await this.lockCommand(
+            transaction,
+            input.companyId,
+            'service-session-lifecycle',
+            sessionBeforeLock.threadId,
+          );
+          const lifecycleSession = await transaction.serviceSession.findUnique({
+            where: {
+              id_companyId: {
+                id: message.serviceSessionId,
+                companyId: input.companyId,
+              },
+            },
+            select: serviceSessionAuthorizationSelect,
+          });
+          const lifecycleAllowed =
+            lifecyclePurpose === 'service-session-closing-question'
+              ? lifecycleSession?.status === ServiceSessionStatus.CLOSING &&
+                lifecycleSession.controlMode === ServiceSessionControlMode.AI &&
+                lifecycleSession.isForeground
+              : lifecycleSession?.status === ServiceSessionStatus.CLOSED &&
+                !lifecycleSession.isForeground &&
+                lifecycleSession.publicContinuationCode !== null &&
+                lifecycleSession.continuationCodeExpiresAt !== null &&
+                lifecycleSession.continuationCodeExpiresAt >= new Date();
+          if (!lifecycleAllowed) {
+            throw new AppError(
+              'CONFLICT',
+              'A mensagem de lifecycle ficou obsoleta pelo estado atual da sessão.',
+            );
+          }
+        }
+        const automaticReply =
+          !bypassSessionGate &&
+          lifecyclePurpose !== 'service-session-closing-question' &&
+          lifecyclePurpose !== 'service-session-closure' &&
+          message.actorUserId === null &&
+          (message.source === WhatsAppMessageSource.AUTOMATION ||
+            message.actorType === WhatsAppMessageActorType.AI_AGENT ||
+            message.actorType === WhatsAppMessageActorType.SYSTEM ||
+            message.automationPurpose !== null);
+        if (automaticReply) {
+          await this.lockCommand(
+            transaction,
+            input.companyId,
+            'whatsapp-conversation',
+            message.conversationId,
+          );
+          const conversation = await this.findConversationOrThrow(
+            transaction,
+            input.companyId,
+            message.conversationId,
+          );
+          const session = conversation.threadId
+            ? await transaction.serviceSession.findFirst({
+                where: {
+                  companyId: input.companyId,
+                  threadId: conversation.threadId,
+                  isForeground: true,
+                  status: { not: ServiceSessionStatus.CLOSED },
+                },
+                orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+                select: serviceSessionAuthorizationSelect,
+              })
+            : null;
+          if (
+            !session ||
+            (message.serviceSessionId !== null &&
+              message.serviceSessionId !== session.id)
+          ) {
+            throw new AppError(
+              'CONFLICT',
+              'A resposta automática pertence a uma sessão que não está mais ativa.',
+            );
+          }
+          this.assertSessionAllowsAutomaticReply(conversation, session);
         }
 
         const attempt = await transaction.whatsAppMessageAttempt.findUnique({
@@ -4597,6 +8926,41 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         if (!actor?.isActive) {
           throw forbidden('O atendente não pertence ao tenant.');
         }
+        const requestedAt = new Date();
+        let foundation = await this.ensureFoundationForConversation(
+          transaction,
+          conversation,
+          {
+            commandSeed: input.commandId,
+            occurredAt: requestedAt,
+            desiredConversationState: ConversationState.HUMAN_ACTIVE,
+          },
+        );
+        const department = await transaction.tenantDepartment.findUnique({
+          where: {
+            companyId_code: {
+              companyId: input.companyId,
+              code: conversation.department,
+            },
+          },
+          select: { id: true },
+        });
+        const humanSession = await this.updateFoundationSession(transaction, {
+          companyId: input.companyId,
+          session: foundation.session,
+          commandId: correlation('quote-proposal-session', input.commandId),
+          name: 'human-user-quote-proposal',
+          actorType: MutationActorType.HUMAN_USER,
+          actorUserId: actor.id,
+          status: ServiceSessionStatus.OPEN,
+          controlMode: ServiceSessionControlMode.HUMAN,
+          isForeground: true,
+          responsibleUserId: actor.id,
+          currentDepartmentId: department?.id ?? null,
+          occurredAt: requestedAt,
+          metadata: { conversationId: conversation.id },
+        });
+        foundation = { ...foundation, session: humanSession };
         await transaction.integrationInbox.create({
           data: {
             companyId: input.companyId,
@@ -4614,7 +8978,6 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         const nextSequence =
           pendingQuote?.sequence ??
           (conversation.quoteRequests[0]?.sequence ?? 0) + 1;
-        const requestedAt = new Date();
         const confirmedSummary = {
           contactName: normalized.contactName,
           document: normalized.document,
@@ -4636,6 +8999,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         const quoteData = {
           companyId: input.companyId,
           conversationId: conversation.id,
+          threadId: foundation.threadId,
+          serviceSessionId: foundation.session.id,
           sequence: nextSequence,
           status: RequestStatus.UNDER_REVIEW,
           contactName: normalized.contactName,
@@ -4730,6 +9095,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             data: {
               companyId: input.companyId,
               conversationId: conversation.id,
+              threadId: foundation.threadId,
+              serviceSessionId: foundation.session.id,
               commandId: correlation(
                 'quote-proposal-create-human-take-over',
                 input.commandId,
@@ -5471,6 +9838,15 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         if (!actor?.isActive) {
           throw forbidden('O atendente não pertence ao tenant.');
         }
+        const uploadedAt = new Date();
+        const foundation = await this.ensureFoundationForConversation(
+          transaction,
+          quote.conversation,
+          {
+            commandSeed: input.commandId,
+            occurredAt: uploadedAt,
+          },
+        );
         const activeBatchDocuments =
           await transaction.quoteProposalDocument.count({
             where: {
@@ -5517,6 +9893,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           data: {
             companyId: input.companyId,
             conversationId: quote.conversationId,
+            threadId: foundation.threadId,
+            serviceSessionId: foundation.session.id,
             quoteRequestId: input.quoteRequestId,
             uploadedByUserId: input.actorUserId,
             sequence: (latest._max.sequence ?? 0) + 1,
@@ -5709,6 +10087,7 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         if (!actor?.isActive) {
           throw forbidden('O atendente não pertence ao tenant.');
         }
+        const occurredAt = new Date();
         const document = await transaction.quoteProposalDocument.findUnique({
           where: {
             id_companyId: {
@@ -5811,6 +10190,48 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             'Existe outro lote de proposta aguardando conclusão.',
           );
         }
+        let foundation = await this.ensureFoundationForConversation(
+          transaction,
+          conversation,
+          {
+            commandSeed: input.commandId,
+            occurredAt,
+            direction: MessageDirection.OUTBOUND,
+            desiredConversationState: ConversationState.HUMAN_ACTIVE,
+          },
+        );
+        const department = await transaction.tenantDepartment.findUnique({
+          where: {
+            companyId_code: {
+              companyId: input.companyId,
+              code: conversation.department,
+            },
+          },
+          select: { id: true },
+        });
+        const humanSession = await this.updateFoundationSession(transaction, {
+          companyId: input.companyId,
+          session: foundation.session,
+          commandId: correlation(
+            'quote-proposal-send-session',
+            input.commandId,
+          ),
+          name: 'human-user-quote-proposal-send',
+          actorType: MutationActorType.HUMAN_USER,
+          actorUserId: actor.id,
+          status: ServiceSessionStatus.OPEN,
+          controlMode: ServiceSessionControlMode.HUMAN,
+          isForeground: true,
+          responsibleUserId: actor.id,
+          currentDepartmentId: department?.id ?? null,
+          occurredAt,
+          metadata: {
+            conversationId: conversation.id,
+            quoteRequestId: quote.id,
+            proposalDocumentId: document.id,
+          },
+        });
+        foundation = { ...foundation, session: humanSession };
         await transaction.quoteProposalDocument.updateMany({
           where: {
             companyId: input.companyId,
@@ -5835,7 +10256,6 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           },
         });
         const caption = 'Segue o orçamento solicitado.';
-        const occurredAt = new Date();
         const media = {
           documentId: document.id,
           fileName: document.fileName,
@@ -5851,6 +10271,10 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             channelId: conversation.channelId,
             contactId: conversation.contactId,
             actorUserId: input.actorUserId,
+            threadId: foundation.threadId,
+            serviceSessionId: foundation.session.id,
+            actorType: WhatsAppMessageActorType.HUMAN_USER,
+            source: WhatsAppMessageSource.LUME_WEB,
             direction: MessageDirection.OUTBOUND,
             deliveryStatus: DeliveryStatus.PENDING,
             kind: MessageKind.DOCUMENT,
@@ -5883,6 +10307,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
           data: {
             status: QuoteProposalDocumentStatus.QUEUED,
             messageId: message.id,
+            threadId: foundation.threadId,
+            serviceSessionId: foundation.session.id,
             deliveryBatchId: input.batchId,
             queuedAt: occurredAt,
             sentByUserId: input.actorUserId,
@@ -5951,6 +10377,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             data: {
               companyId: input.companyId,
               conversationId: conversation.id,
+              threadId: foundation.threadId,
+              serviceSessionId: foundation.session.id,
               commandId: correlation(
                 'quote-proposal-human-take-over',
                 input.commandId,
@@ -5993,6 +10421,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
             messageId: message.id,
             attemptId: attempt.id,
             conversationId: conversation.id,
+            threadId: foundation.threadId,
+            serviceSessionId: foundation.session.id,
             channelId: conversation.channelId,
             companyId: input.companyId,
             contact: {
@@ -6293,6 +10723,7 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         text: true,
         occurredAt: true,
         createdAt: true,
+        mediaAsset: { include: messageMediaAssetInclude },
       },
     });
     if (
@@ -6326,6 +10757,7 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
               text: true,
               occurredAt: true,
               createdAt: true,
+              mediaAsset: { include: messageMediaAssetInclude },
             },
             orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
             take: 50,
@@ -6359,14 +10791,18 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         windowStartedAt: anchor.createdAt.toISOString(),
         windowEndsAt: windowEndsAt.toISOString(),
         pendingQuestion: pendingQuestion?.text?.trim() || null,
-        messages: messages.map((message) => ({
-          messageId: message.id,
-          sourceEventId: message.correlationId,
-          kind: kindFromPrisma[message.kind],
-          text: message.text,
-          occurredAt: message.occurredAt.toISOString(),
-          persistedAt: message.createdAt.toISOString(),
-        })),
+        messages: messages.map((message) => {
+          const mediaContext = automationMediaContext(message.mediaAsset);
+          return {
+            messageId: message.id,
+            sourceEventId: message.correlationId,
+            kind: kindFromPrisma[message.kind],
+            text: message.text,
+            ...mediaContext,
+            occurredAt: message.occurredAt.toISOString(),
+            persistedAt: message.createdAt.toISOString(),
+          };
+        }),
       },
     };
   }
@@ -6409,6 +10845,7 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
         include: {
           actorUser: { select: { id: true, name: true } },
           attempts: { orderBy: { attemptNumber: 'asc' } },
+          mediaAsset: { include: messageMediaAssetInclude },
         },
         orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
         skip: (query.page - 1) * query.pageSize,
@@ -6592,6 +11029,50 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
       current: snapshot(conversation),
       name: 'proposal-delivery-confirmed',
     });
+    const completedAt = sentDocuments[0].sentAt ?? new Date();
+    let foundation = await this.ensureFoundationForConversation(
+      transaction,
+      conversation,
+      {
+        commandSeed: correlation(
+          'quote-proposal-batch-delivered',
+          input.triggeringDocumentId,
+        ),
+        occurredAt: completedAt,
+        desiredConversationState: stateToPrisma[next.conversationState],
+      },
+    );
+    const department = await transaction.tenantDepartment.findUnique({
+      where: {
+        companyId_code: {
+          companyId: input.companyId,
+          code: departmentToPrisma[next.department],
+        },
+      },
+      select: { id: true },
+    });
+    const resumedSession = await this.updateFoundationSession(transaction, {
+      companyId: input.companyId,
+      session: foundation.session,
+      commandId: correlation(
+        'quote-proposal-delivery-session',
+        input.triggeringDocumentId,
+      ),
+      name: 'quote-proposal-delivery-return-to-ai',
+      actorType: MutationActorType.SERVICE,
+      status: ServiceSessionStatus.WAITING_CUSTOMER,
+      controlMode: ServiceSessionControlMode.AI,
+      isForeground: true,
+      responsibleUserId: null,
+      currentDepartmentId: department?.id ?? null,
+      occurredAt: completedAt,
+      metadata: {
+        conversationId: conversation.id,
+        quoteRequestId: quote.id,
+        deliveryBatchId: input.deliveryBatchId,
+      },
+    });
+    foundation = { ...foundation, session: resumedSession };
     const quoteUpdated = await transaction.quoteRequest.updateMany({
       where: {
         id: quote.id,
@@ -6613,7 +11094,6 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
       );
     }
 
-    const completedAt = sentDocuments[0].sentAt ?? new Date();
     const nextVersion = conversation.version + 1;
     const transitioned = await transaction.whatsAppConversation.updateMany({
       where: {
@@ -6660,6 +11140,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
       data: {
         companyId: input.companyId,
         conversationId: conversation.id,
+        threadId: foundation.threadId,
+        serviceSessionId: foundation.session.id,
         commandId: correlation(
           'quote-proposal-batch-delivered',
           input.triggeringDocumentId,
@@ -6843,6 +11325,7 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
     row: {
       id: string;
       conversationId: string;
+      mediaAssetId?: string | null;
       actorUserId: string | null;
       providerMessageId: string | null;
       direction: MessageDirection;
@@ -6857,6 +11340,7 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
       createdAt: Date;
       updatedAt: Date;
       actorUser?: { id: string; name: string } | null;
+      mediaAsset?: MessageMediaAssetRow | null;
       attempts: Array<{
         id: string;
         attemptNumber: number;
@@ -6886,6 +11370,8 @@ export class PrismaWhatsAppRepository extends WhatsAppRepository {
       kind: kindFromPrisma[row.kind],
       text: row.text,
       media: row.media,
+      mediaAssetId: row.mediaAssetId ?? row.mediaAsset?.id ?? null,
+      mediaAsset: presentMessageMediaAsset(row.mediaAsset ?? null),
       automationPurpose: row.automationPurpose,
       recipientPhone: row.recipientPhone,
       sentBy: row.actorUser

@@ -40,12 +40,126 @@ export interface PersistWebhookMessageResult {
   readonly duplicate: boolean;
   readonly messageId: string | null;
   readonly conversationId: string | null;
+  readonly threadId?: string | null;
+  readonly serviceSessionId?: string | null;
   readonly automationAllowed?: boolean;
   readonly canGenerateReply?: boolean;
   readonly canSendReply?: boolean;
   readonly isFirstContact?: boolean;
   readonly reopenedAfterClosure?: boolean;
   readonly version?: number;
+}
+
+export interface WebhookGroupParticipantInput {
+  readonly whatsappId: string;
+  readonly phoneNormalized?: string;
+  readonly displayName?: string;
+  readonly isAdmin?: boolean;
+  readonly removed?: boolean;
+}
+
+export interface SyncWebhookGroupInput {
+  readonly channel: WebhookChannelConfiguration;
+  readonly externalEventId: string;
+  readonly correlationId: string;
+  readonly payloadHash: string;
+  readonly whatsappId: string;
+  readonly displayName?: string;
+  readonly occurredAt: Date;
+  readonly participants: readonly WebhookGroupParticipantInput[];
+  readonly replaceParticipants?: boolean;
+}
+
+export interface PersistWebhookGroupMessageInput {
+  readonly channel: WebhookChannelConfiguration;
+  readonly externalEventId: string;
+  readonly providerMessageId: string;
+  readonly correlationId: string;
+  readonly payloadHash: string;
+  readonly groupWhatsappId: string;
+  readonly groupDisplayName?: string;
+  readonly participant?: WebhookGroupParticipantInput;
+  readonly direction: MessageDirection;
+  readonly occurredAt: Date;
+  readonly kind: MessageKind;
+  readonly text?: string;
+  readonly media?: Readonly<Record<string, unknown>>;
+}
+
+export interface PersistWebhookGroupMessageResult {
+  readonly accepted: true;
+  readonly duplicate: boolean;
+  readonly groupId: string;
+  readonly groupMessageId: string | null;
+  readonly conversationId: null;
+  readonly threadId: null;
+  readonly serviceSessionId: null;
+  readonly automationAllowed: false;
+  readonly canGenerateReply: false;
+  readonly canSendReply: false;
+}
+
+export interface AutomaticReplyAuthorization {
+  readonly allowed: true;
+  readonly threadId: string;
+  readonly serviceSessionId: string;
+  readonly serviceSessionVersion: number;
+}
+
+export type ContinuityClassificationValue =
+  'continuation' | 'new-subject' | 'uncertain';
+
+export interface ContinuityClassificationMessage {
+  readonly direction: 'inbound' | 'outbound';
+  readonly text: string;
+  readonly occurredAt: string;
+}
+
+export interface ContinuityClassificationCandidate {
+  readonly decisionId: string;
+  readonly sourceServiceSessionId: string;
+  readonly expectedVersion: number;
+  readonly currentDepartmentId: string | null;
+  readonly previousMessages: readonly ContinuityClassificationMessage[];
+  readonly userMessage: string;
+  readonly allowedTargetDepartments: readonly {
+    readonly id: string;
+    readonly code: string;
+    readonly name: string;
+  }[];
+}
+
+export interface ApplyContinuityClassificationInput {
+  readonly companyId: string;
+  readonly conversationId: string;
+  readonly sourceEventId: string;
+  readonly decisionId: string;
+  readonly commandId: string;
+  readonly expectedVersion: number;
+  readonly classification: ContinuityClassificationValue;
+  readonly confidence: number | null;
+  readonly reason: string;
+  readonly targetDepartmentId: string | null;
+  readonly actorAgentId?: string;
+  readonly agentExecutionId?: string;
+}
+
+export interface ApplyContinuityClassificationResult {
+  readonly serviceSessionId: string;
+  readonly version: number;
+  readonly classification: ContinuityClassificationValue;
+  readonly idempotent: boolean;
+}
+
+export interface ProcessServiceSessionLifecycleInput {
+  readonly now: Date;
+  readonly limit: number;
+}
+
+export interface ProcessServiceSessionLifecycleResult {
+  readonly closingStarted: number;
+  readonly closed: number;
+  readonly skipped: number;
 }
 
 export interface TransitionCommand {
@@ -58,6 +172,19 @@ export interface TransitionCommand {
   actorUserId?: string;
   targetDepartment?: Department;
   metadata?: Readonly<Record<string, unknown>>;
+  automaticHumanHandoff?: {
+    /** Contextual response used during human service hours. */
+    customerMessage: string;
+    /** Availability is evaluated at the handoff instant, never on a timer. */
+    occurredAt: Date;
+    /** Optional durable AI attribution for the handoff response and priority. */
+    actorAgentId?: string;
+    agentExecutionId?: string;
+    sessionPriority?: {
+      priority: 'low' | 'normal' | 'high' | 'urgent';
+      reason: string;
+    };
+  };
 }
 
 export interface QuoteRequestPatch {
@@ -87,6 +214,14 @@ export interface CreateOutboundInput {
   commandId: string;
   expectedVersion: number;
   automatic: true;
+  actorAgentId?: string;
+  agentExecutionId?: string;
+  sessionPriority?: {
+    priority: 'low' | 'normal' | 'high' | 'urgent';
+    reason: string;
+  };
+  /** Structured AI completion signal; false is reset only by a new inbound. */
+  conversationResolved?: true;
   purpose?:
     | 'main-menu'
     | 'commercial-follow-up-menu'
@@ -310,6 +445,25 @@ export abstract class WhatsAppRepository {
   abstract persistWebhookMessage(
     input: PersistWebhookMessageInput,
   ): Promise<PersistWebhookMessageResult>;
+  abstract persistWebhookGroupMessage(
+    input: PersistWebhookGroupMessageInput,
+  ): Promise<PersistWebhookGroupMessageResult>;
+  abstract syncWebhookGroup(input: SyncWebhookGroupInput): Promise<unknown>;
+  abstract assertAutomaticReplyAllowed(
+    companyId: string,
+    conversationId: string,
+  ): Promise<AutomaticReplyAuthorization>;
+  abstract getPendingContinuityClassification(
+    companyId: string,
+    conversationId: string,
+    sourceEventId: string,
+  ): Promise<ContinuityClassificationCandidate | null>;
+  abstract applyContinuityClassification(
+    input: ApplyContinuityClassificationInput,
+  ): Promise<ApplyContinuityClassificationResult>;
+  abstract processServiceSessionLifecycle(
+    input: ProcessServiceSessionLifecycleInput,
+  ): Promise<ProcessServiceSessionLifecycleResult>;
   abstract transition(input: TransitionCommand): Promise<unknown>;
   abstract ensureConversationForPhone(
     companyId: string,

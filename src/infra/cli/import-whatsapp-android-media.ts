@@ -2,6 +2,7 @@ import 'dotenv/config';
 
 import { ConfigService } from '@nestjs/config';
 
+import { loadEnvironment } from '../../config/env';
 import { PrismaService } from '../database/prisma/prisma.service';
 import { WhatsAppAndroidMediaImportService } from '../imports/whatsapp-android-media-import.service';
 import { FileSystemWhatsAppMediaStorage } from '../storage/file-system-whatsapp-media.storage';
@@ -43,7 +44,7 @@ export async function runWhatsAppAndroidMediaImport(
   if (required(values, 'confirm') !== `ATTACH:${batchId}`) {
     throw new Error(`Confirmação inválida. Use --confirm ATTACH:${batchId}`);
   }
-  const config = new ConfigService(process.env);
+  const config = new ConfigService(loadEnvironment());
   const prisma = new PrismaService(config);
   await prisma.$connect();
   try {

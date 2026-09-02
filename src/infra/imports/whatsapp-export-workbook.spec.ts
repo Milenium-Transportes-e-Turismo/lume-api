@@ -57,7 +57,7 @@ describe('createWhatsAppImportWorkbook', () => {
       '553432236060',
     );
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(generated.content);
+    await workbook.xlsx.load(generated.content as never);
 
     expect(generated).toMatchObject({
       conversationCount: 2,
@@ -106,8 +106,8 @@ describe('createWhatsAppImportWorkbook', () => {
     );
     const firstWorkbook = new ExcelJS.Workbook();
     const secondWorkbook = new ExcelJS.Workbook();
-    await firstWorkbook.xlsx.load(first.content);
-    await secondWorkbook.xlsx.load(second.content);
+    await firstWorkbook.xlsx.load(first.content as never);
+    await secondWorkbook.xlsx.load(second.content as never);
 
     expect(firstWorkbook.getWorksheet('Mensagens')?.getCell('B2').text).toBe(
       secondWorkbook.getWorksheet('Mensagens')?.getCell('B2').text,
@@ -140,7 +140,7 @@ describe('createWhatsAppImportWorkbook', () => {
       '553432236060',
     );
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(generated.content);
+    await workbook.xlsx.load(generated.content as never);
     const messages = workbook.getWorksheet('Mensagens');
 
     expect(messages?.getCell('D2').text).toBe('unknown');

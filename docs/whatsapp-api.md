@@ -13,7 +13,7 @@ A Tenant API é a única responsável pelo fluxo de WhatsApp. O módulo concentr
 - recuperação autenticada de imagens, áudios, vídeos, figurinhas e documentos.
 
 O Tenant Web consome somente os endpoints autenticados da Tenant API. Segredos
-da Evolution e dos provedores de IA permanecem no servidor.
+da Evolution e as credenciais individuais OpenAI permanecem no servidor.
 
 ## Importação de históricos
 
@@ -73,10 +73,13 @@ pela própria API com lease, tentativas e backoff. Apenas uma execução ativa p
 tratar cada evento. O provedor registrado nas novas execuções é sempre `api`.
 
 Em `messages.upsert`, `data.key.fromMe=false` é entrada do cliente e pode gerar
-automação conforme o estado da conversa. `fromMe=true` é uma saída já enviada
-pelo WhatsApp App, Web ou outro dispositivo conectado: ela é persistida como
-`outbound/sent`, mas nunca cria outbox inbound, não aumenta não lidas e não muda
-o estado do atendimento. O contato é resolvido pelo JID telefônico em
+automação somente quando a `ServiceSession` foreground está sob controle `AI`.
+`fromMe=true` é uma saída já enviada pelo WhatsApp App, Web ou outro dispositivo
+conectado. Quando o `providerMessageId` pertence a uma mensagem já criada pelo
+Lume, o eco apenas reconcilia esse registro. Caso contrário, a mensagem é
+classificada como `EXTERNAL_HUMAN/WHATSAPP_APP`, assume a sessão como `HUMAN`
+com evento auditável e bloqueia a automação subsequente. Ela não cria outbox
+inbound nem aumenta não lidas. O contato é resolvido pelo JID telefônico em
 `remoteJid` ou `remoteJidAlt`; um `remoteJid` terminado em `@lid` só é aceito
 quando o payload também contém a identidade telefônica alternativa. O
 `participant` é validado, mas não substitui o contato de uma conversa direta.
@@ -85,11 +88,72 @@ Quando a mensagem já foi criada pelo painel, o mesmo `providerMessageId`
 retornado pela Evolution identifica o eco do webhook e o registro existente é
 reutilizado. Reentregas posteriores continuam idempotentes.
 
+Eventos e mensagens de `@g.us` usam a infraestrutura separada de
+`WhatsAppGroup`, participantes e mensagens. O canal precisa receber esses
+eventos para manter o espelho do grupo, mas o modo de IA permanece `OFF`: não
+se cria conversa individual, `WhatsAppThread`, `ServiceSession`, Registration
+ou outbox de automação para grupos.
+
+No primeiro inbound direto, o dual-write garante `WhatsAppThread` e uma
+`ServiceSession` foreground no mesmo lock/transação da conversa. Telefones de
+Registration são usados apenas para gravar candidatos tenant-scoped em
+`ConversationParticipant`; o webhook não cria Registration e esses candidatos
+não são expostos na outbox. Antes de gerar, criar ou reivindicar um envio
+automático, a sessão é relida sob lock e precisa continuar em controle `AI`.
+
+## Gestão de canais
+
+As rotas autenticadas de `/api/v1/whatsapp/channels` permitem listar, consultar,
+criar e atualizar um canal antes da leitura do QR. As ações versionadas ficam em
+`/:channelId/actions/request-qr`, `reconnect`, `synchronize-connection`,
+`disconnect`, `cancel-setup` e `disable`. Cada comando recebe `commandId` e
+`expectedVersion`; uma repetição idêntica é segura, enquanto uma versão antiga
+retorna conflito para recarga autoritativa.
+
+O nome técnico `{tenant}-production-{channel}` é imutável. Falha da Evolution
+não apaga o cadastro pendente no Lume. Cancelamento e desativação são estados,
+nunca exclusão física. A criação registra o webhook individual em
+`${TENANT_API_PUBLIC_URL}/webhooks/evolution/:channelId`, com secret server-side,
+e o número WhatsApp possui unicidade global.
+
 A migração `20260806000600_consolidate_whatsapp_api_and_conversations` converte
 marcadores legados, devolve execuções interrompidas para processamento seguro e
 consolida conversas duplicadas antes de criar a chave única canônica.
 
 ## Conversa e atendimento
+
+O contrato canônico operacional fica em `/api/v1/service/sessions`: listagem,
+detalhe e `assignment-targets` são limitados ao tenant e aos departamentos do
+usuário. As ações versionadas são `assume`, `return-to-queue`, `return-to-ai`,
+`transfer`, `change-priority` e `close`. A resposta publica responsável, fila,
+prioridade, modo de controle, canal de origem, deadlines e `availableActions`;
+o navegador não inventa capacidades ausentes. Transferências preservam a mesma
+Thread e o mesmo `sourceChannelId`.
+
+O lifecycle automático é conduzido por estado persistido, nunca por heurística
+do menu legado. Quando a IA já marcou a sessão resolvida e não há ação ou
+entrega pendente, a API pergunta “Precisa de mais alguma coisa?” e entra em
+`CLOSING` por 30 minutos. Qualquer inbound cancela o prazo de forma versionada e
+bloqueia o claim da pergunta que tenha ficado obsoleta. Sem resposta, a sessão
+e a conversa são fechadas atomicamente e a mensagem final publica um código
+`CONTINUAR NNN`, válido por sete dias.
+
+O código só reabre uma sessão encerrada da mesma empresa, canal e contato; uma
+tentativa de outro número ou um código inválido/expirado segue o fluxo normal
+sem revelar que o código pertence a alguém. Sem código, contato em menos de duas
+horas é classificado silenciosamente pelo agente `continuity-classifier` antes
+da resposta: continuidade e incerteza reabrem a sessão anterior; um novo assunto
+justificado cria outra sessão relacionada e pode usar somente um departamento
+autorizado no canal. Falha do classificador preserva o fallback seguro
+`UNCERTAIN`. Depois de duas horas nasce deterministicamente uma nova sessão na
+Thread permanente, sem chamada ao modelo. A decisão guarda confiança, razão,
+fallback, destino e `agentExecutionId`, com idempotência, versão e auditoria.
+
+Filas `MANUAL` permanecem sem responsável. `ROUND_ROBIN` e `LEAST_LOAD`
+selecionam somente usuário ativo, autorizado e abaixo do limite configurado;
+`maxConcurrentAttendances=null` significa ilimitado. Logout e fechamento do
+navegador não liberam assignment. Toda mutação usa lock, versão otimista,
+histórico de assignment e evento com snapshots anterior/posterior.
 
 A listagem autenticada de conversas é sempre paginada e aceita pesquisa e
 filtros de departamento, condução e situação comercial. A resposta inclui um
@@ -174,13 +238,18 @@ Quando `WHATSAPP_ENABLED=true`, configure:
 - canal, número e limites `WHATSAPP_*`;
 - diretório persistente `WHATSAPP_MEDIA_STORAGE_PATH` em produção;
 - `EVOLUTION_BASE_URL`, instância, chave e segredo do webhook;
-- ao menos uma chave listada em `WHATSAPP_AI_PROVIDER_ORDER`;
-- telefones `MILENIUM_DEPARTMENT_*_PHONE` usados pelos menus; mensagens
-  recebidas desses números e de `MILENIUM_DIRECTOR_PHONE` são aceitas pelo
-  webhook como ignoradas, sem persistência nem execução do bot.
+- `TENANT_API_PUBLIC_URL`, incluindo o prefixo público `/api/v1`;
+- uma chave individual em `LUME_AGENT_*_OPENAI_API_KEY` para cada um dos sete
+  agentes do catálogo inicial.
 
-Não existe seletor de provedor de automação. Os arquivos `.env.example` e
-`.env.production.example` são a referência vigente.
+Não existe seletor de provider nesta etapa. OpenAI é o único adapter registrado
+agora. Os campos `WHATSAPP_AI_*` e `MILENIUM_*` são lidos somente pelo caminho
+de compatibilidade de conversas históricas que já estavam em estados de menu;
+novos atendimentos não entram em menus numéricos nem dependem dessas chaves.
+Cada `LumeAgent` referencia sua própria credencial server-side, que nunca é
+devolvida ao navegador ou persistida em `AgentExecution`. O runtime usa um
+registro de adapters para permitir uma integração futura sem compartilhar
+credenciais ou enfraquecer as mesmas políticas de autorização.
 
 ## Checklist operacional
 
@@ -188,13 +257,14 @@ Antes da publicação, confirme:
 
 1. migrações aplicadas, chave única das conversas criada e volume de mídia montado;
 2. webhook válido recebido uma única vez, inclusive após reenvio;
-3. menu inicial, coleta por IA e encaminhamento funcionando;
+3. primeira resposta contextual, conversa natural e encaminhamento funcionando;
 4. assumir, responder, devolver ao bot e encerrar registrados no histórico;
 5. envio de texto e de proposta PDF refletido imediatamente no painel;
 6. imagem, áudio, vídeo, figurinha, documento e PDF abertos pelo proxy seguro;
 7. a mesma mídia continua abrindo após reiniciar a API e sem acesso à URL externa;
 8. mídia antiga expirada apresenta estado indisponível e mídia ainda válida é migrada;
-9. anexos em cada etapa não avançam o fluxo nem são enviados à IA;
+9. anexos são preservados e interpretados conforme a política multimodal, sem
+   alterar o `controlMode`;
 10. falha temporária da Evolution é reprocessada sem mensagem ou evento duplicado.
 
 ## Recuperação

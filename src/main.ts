@@ -6,7 +6,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 
 import { AppModule } from './app.module';
-import { parseCorsOrigins } from './infra/config/environment';
+import { parseCorsOrigins } from './config/env';
 import { configureBodyParsers } from './shared/http/configure-body-parsers';
 
 async function bootstrap() {

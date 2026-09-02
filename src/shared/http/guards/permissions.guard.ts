@@ -28,8 +28,7 @@ export class PermissionsGuard implements CanActivate {
 
     if (
       !user ||
-      (!user.isAdministrator &&
-        !required.some((permission) => user.permissions.includes(permission)))
+      !required.some((permission) => user.permissions.includes(permission))
     ) {
       throw new ForbiddenException(
         'Você não possui permissão para esta operação.',

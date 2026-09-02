@@ -3,12 +3,14 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 
-import { validateEnvironment } from './infra/config/environment';
+import { validateEnvironment } from './config/env';
 import { DatabaseModule } from './infra/database/database.module';
 import { SecurityModule } from './infra/security.module';
 import { AccessModule } from './modules/access/access.module';
+import { AgentsRuntimeModule } from './modules/agents/agents-runtime.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { HealthModule } from './modules/health/health.module';
+import { KnowledgeModule } from './modules/knowledge/knowledge.module';
 import { LicenseModule } from './modules/license/license.module';
 import { SupportModule } from './modules/support/support.module';
 import { TenantBootstrapModule } from './modules/tenant-bootstrap.module';
@@ -21,6 +23,7 @@ import { AppErrorFilter } from './shared/http/filters/app-error.filter';
 import { ClientsModule } from './modules/clients/clients.module';
 import { RoutePlannerModule } from './modules/route-planner/route-planner.module';
 import { RegistrationsModule } from './modules/registrations/registrations.module';
+import { CustomerContextModule } from './modules/customer-context/customer-context.module';
 
 @Module({
   imports: [
@@ -42,6 +45,7 @@ import { RegistrationsModule } from './modules/registrations/registrations.modul
     }),
     DatabaseModule,
     SecurityModule,
+    AgentsRuntimeModule,
     TenantBootstrapModule,
     AuthModule,
     UsersModule,
@@ -51,11 +55,13 @@ import { RegistrationsModule } from './modules/registrations/registrations.modul
     HealthModule,
     WhatsAppModule,
     DataExchangeModule,
+    KnowledgeModule,
     DocumentManagementModule,
     PlatformAdministrationModule,
     ClientsModule,
     RoutePlannerModule,
     RegistrationsModule,
+    CustomerContextModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AppErrorFilter },

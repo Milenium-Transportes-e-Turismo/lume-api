@@ -585,16 +585,7 @@ function sameDistribution(
 }
 
 export class WhatsAppImportService {
-  private readonly applyConcurrency = Math.min(
-    8,
-    Math.max(
-      1,
-      Number.parseInt(
-        process.env.WHATSAPP_IMPORT_APPLY_CONCURRENCY ?? '4',
-        10,
-      ) || 4,
-    ),
-  );
+  private readonly applyConcurrency: number;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -604,7 +595,13 @@ export class WhatsAppImportService {
       'imports',
       'whatsapp',
     ),
-  ) {}
+    applyConcurrency = 4,
+  ) {
+    this.applyConcurrency = Math.min(
+      8,
+      Math.max(1, Number.isFinite(applyConcurrency) ? applyConcurrency : 4),
+    );
+  }
 
   async validate(
     input: WhatsAppImportInput,

@@ -1,4 +1,5 @@
 import type { Department } from '../access/access.constants';
+import type { ServicePriority } from './service-session';
 import {
   UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT,
   type ConversationState,
@@ -223,6 +224,7 @@ export const ACTIVE_QUOTE_REQUEST_STATUSES: ReadonlySet<RequestStatus> =
   new Set(['waiting-for-customer', 'under-review', 'approved', 'rejected']);
 
 export type AiMode =
+  | 'natural-service'
   | 'eventual-quote'
   | 'continuous-pretriage'
   | 'quote-correction-or-confirmation';
@@ -258,6 +260,10 @@ export interface AiProviderOutput {
   readonly summaryPresented: boolean;
   readonly customerDecision:
     'undecided' | 'confirmed' | 'correction-requested' | 'human-requested';
+  /** Silent orchestration classification persisted on the active service session. */
+  readonly priority?: ServicePriority;
+  /** Auditable explanation for the orchestration priority. */
+  readonly priorityReason?: string;
 }
 
 export interface AiValidationResult {
@@ -272,6 +278,11 @@ export interface BufferedMessage {
   readonly occurredAt: string;
   readonly kind: string;
   readonly text: string | null;
+  readonly mediaInterpretationStatus?:
+    'not-requested' | 'pending' | 'succeeded' | 'failed' | 'unsupported';
+  readonly interpretedText?: string | null;
+  readonly interpretationSource?: 'human' | 'machine' | 'none';
+  readonly mediaInterpretationId?: string | null;
   readonly isFirstContact: boolean;
 }
 
@@ -280,6 +291,7 @@ export function decideAutomationPlan(input: {
   readonly conversation?: AutomationConversation;
   readonly bufferedText?: string | null;
   readonly pendingQuestion?: string | null;
+  readonly mediaInterpretationAvailable?: boolean;
 }): AutomationPlan {
   const { envelope } = input;
   const currentConversation =
@@ -329,14 +341,25 @@ export function decideAutomationPlan(input: {
     !currentConversation.mainMenuPresentedAt;
 
   if (initialMenuRequired) {
+    if (
+      (envelope.payload.message.kind === 'text' ||
+        input.mediaInterpretationAvailable === true) &&
+      messageText
+    ) {
+      return aiPlan(
+        'natural-service',
+        null,
+        envelope.payload.reopenedAfterClosure
+          ? 'natural-language-after-closure'
+          : 'natural-language-first-contact',
+      );
+    }
     return {
       kind: 'static-reply',
       responseMessage:
-        envelope.payload.message.kind === 'text'
-          ? MAIN_MENU
-          : `${MAIN_MENU}\n\n${UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT}`,
+        'Recebi sua mensagem. O conteúdo continuará disponível no atendimento; se precisar, descreva em texto o que deseja enquanto a análise é preparada.',
       transitionBeforeAi: null,
-      transitionAfterSend: 'present-main-menu',
+      transitionAfterSend: null,
       transitionMetadata: {
         reason: envelope.payload.reopenedAfterClosure
           ? 'main-menu-after-closure'
@@ -346,11 +369,14 @@ export function decideAutomationPlan(input: {
       reason: envelope.payload.reopenedAfterClosure
         ? 'reopened-conversation-menu-pending-durable-confirmation'
         : 'initial-menu-pending-durable-confirmation',
-      outboundPurpose: 'main-menu',
+      outboundPurpose: null,
     };
   }
 
-  if (envelope.payload.message.kind !== 'text') {
+  if (
+    envelope.payload.message.kind !== 'text' &&
+    input.mediaInterpretationAvailable !== true
+  ) {
     const pendingQuestion = input.pendingQuestion?.trim();
     const inQuoteCollection = [
       'quote-data-collection',
@@ -415,7 +441,7 @@ export function decideAutomationPlan(input: {
 
   switch (routingConversation.flowStep) {
     case 'main-menu':
-      return decideMainMenu(messageText, routingConversation);
+      return aiPlan('natural-service', null, 'natural-language-service');
     case 'commercial-menu':
       return decideCommercialMenu(messageText);
     case 'quote-data-collection':
@@ -500,6 +526,23 @@ export function validateAiProviderOutput(value: unknown): AiValidationResult {
     errors.push('customerDecision é inválido');
   }
 
+  const priorities = new Set(['low', 'normal', 'high', 'urgent']);
+  const hasPriority = output.priority !== undefined;
+  const hasPriorityReason = output.priorityReason !== undefined;
+  if (hasPriority !== hasPriorityReason) {
+    errors.push('priority e priorityReason devem ser informados juntos');
+  }
+  if (hasPriority && !priorities.has(String(output.priority))) {
+    errors.push('priority é inválida');
+  }
+  const priorityReason =
+    typeof output.priorityReason === 'string'
+      ? output.priorityReason.trim()
+      : '';
+  if (hasPriorityReason && (!priorityReason || priorityReason.length > 500)) {
+    errors.push('priorityReason deve possuir entre 1 e 500 caracteres');
+  }
+
   if (errors.length > 0) {
     return { valid: false, errors, output: null };
   }
@@ -516,8 +559,32 @@ export function validateAiProviderOutput(value: unknown): AiValidationResult {
       summaryPresented: output.summaryPresented as boolean,
       customerDecision:
         output.customerDecision as AiProviderOutput['customerDecision'],
+      ...(hasPriority
+        ? {
+            priority: output.priority as ServicePriority,
+            priorityReason,
+          }
+        : {}),
     },
   };
+}
+
+/**
+ * Converts only the provider's structured natural-service completion signal
+ * into a lifecycle resolution. Quote completion and handoff still have
+ * durable downstream work and therefore cannot close the service session.
+ */
+export function aiOutputResolvesConversation(
+  output: AiProviderOutput,
+  aiMode: AiMode,
+): boolean {
+  return (
+    aiMode === 'natural-service' &&
+    output.collectionStatus === 'completed' &&
+    output.missingFields.length === 0 &&
+    (output.customerDecision === 'undecided' ||
+      output.customerDecision === 'confirmed')
+  );
 }
 
 export function deriveAiActions(
@@ -529,6 +596,18 @@ export function deriveAiActions(
   readonly transitionAfterSend: TransitionName | null;
   readonly humanReason: string | null;
 } {
+  if (aiMode === 'natural-service') {
+    const humanRequested =
+      output.customerDecision === 'human-requested' ||
+      output.collectionStatus === 'human-handoff';
+    return {
+      sendMessage: true,
+      transitionBeforeSend: null,
+      transitionAfterSend: humanRequested ? 'forward' : null,
+      humanReason: humanRequested ? 'customer-requested-human' : null,
+    };
+  }
+
   if (output.customerDecision === 'confirmed') {
     return {
       sendMessage: true,
@@ -651,9 +730,40 @@ export function buildBufferedText(
   messages: readonly BufferedMessage[],
 ): string {
   return messages
-    .map((message) => message.text?.trim())
+    .map((message) => message.interpretedText?.trim() || message.text?.trim())
     .filter((text): text is string => Boolean(text))
     .join('\n');
+}
+
+export function mediaInterpretationsUsedInBufferedText(
+  messages: readonly BufferedMessage[],
+): readonly {
+  readonly interpretationId: string;
+  readonly effectiveSource: 'machine' | 'human';
+}[] {
+  const sources = new Map<
+    string,
+    {
+      readonly interpretationId: string;
+      readonly effectiveSource: 'machine' | 'human';
+    }
+  >();
+  for (const message of messages) {
+    const interpretationId = message.mediaInterpretationId?.trim();
+    const effectiveSource = message.interpretationSource;
+    if (
+      !interpretationId ||
+      !message.interpretedText?.trim() ||
+      (effectiveSource !== 'machine' && effectiveSource !== 'human')
+    ) {
+      continue;
+    }
+    sources.set(interpretationId, {
+      interpretationId,
+      effectiveSource,
+    });
+  }
+  return [...sources.values()];
 }
 
 export function deterministicCommandId(
@@ -705,7 +815,7 @@ export function redisConversationPrefix(input: {
   ].join(':');
 }
 
-function decideMainMenu(
+export function decideMainMenu(
   messageText: string,
   conversation: AutomationConversation,
 ): AutomationPlan {

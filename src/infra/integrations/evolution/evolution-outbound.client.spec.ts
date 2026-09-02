@@ -72,6 +72,57 @@ describe('HttpEvolutionOutboundGateway', () => {
     });
   });
 
+  it('routes independent channels through their persisted Evolution instances', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({ key: { id: 'channel-a-message' } }, { status: 201 }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ key: { id: 'channel-b-message' } }, { status: 201 }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const subject = gateway({ EVOLUTION_INSTANCE_NAME: 'legacy-instance' });
+
+    await subject.send({
+      kind: 'text',
+      recipientPhone: '5534999999999',
+      sourceChannelId: '00000000-0000-4000-8000-000000000011',
+      instanceName: 'channel alpha',
+      text: 'Canal A',
+    });
+    await subject.send({
+      kind: 'text',
+      recipientPhone: '5534888888888',
+      sourceChannelId: '00000000-0000-4000-8000-000000000012',
+      instanceName: 'channel-beta',
+      text: 'Canal B',
+    });
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'https://evolution.example.test/message/sendText/channel%20alpha',
+      'https://evolution.example.test/message/sendText/channel-beta',
+    ]);
+  });
+
+  it('fails closed when a known channel has no resolved instance', async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      gateway({ EVOLUTION_INSTANCE_NAME: 'legacy-instance' }).send({
+        kind: 'text',
+        recipientPhone: '5534999999999',
+        sourceChannelId: '00000000-0000-4000-8000-000000000011',
+        text: 'Sem rota persistida',
+      }),
+    ).resolves.toMatchObject({
+      outcome: 'not-sent',
+      errorCode: 'EVOLUTION_CONFIGURATION_INVALID',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('mantém legacy-text como alias do payload number-text', async () => {
     const fetchMock = mockFetch(
       new Response(JSON.stringify({ key: { id: 'legacy-message-id' } }), {

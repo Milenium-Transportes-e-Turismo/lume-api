@@ -33,11 +33,21 @@ function config(
 }
 
 function prismaWithMessage(message: unknown): PrismaService {
-  return {
+  const prisma = {
     whatsAppMessage: {
       findUnique: vi.fn().mockResolvedValue(message),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
+    mediaAsset: {
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
+  };
+  return {
+    ...prisma,
+    $transaction: vi.fn(
+      async (callback: (transaction: typeof prisma) => unknown) =>
+        callback(prisma),
+    ),
   } as unknown as PrismaService;
 }
 
@@ -104,6 +114,76 @@ describe('EvolutionMediaContentService', () => {
         }),
       }),
     );
+  });
+
+  it('fetches media from each message source channel instead of the legacy instance', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({
+          fileName: 'alpha.jpg',
+          mimetype: 'image/jpeg',
+          base64: Buffer.from('alpha').toString('base64'),
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          fileName: 'beta.jpg',
+          mimetype: 'image/jpeg',
+          base64: Buffer.from('beta').toString('base64'),
+        }),
+      );
+    vi.stubGlobal('fetch', fetcher);
+    const message = (channelId: string, instanceName: string, id: string) => ({
+      id,
+      companyId,
+      conversationId,
+      channelId,
+      channel: { instanceName },
+      providerMessageId: `provider-${id}`,
+      direction: MessageDirection.INBOUND,
+      kind: MessageKind.IMAGE,
+      media: { mimeType: 'image/jpeg' },
+      proposalDocument: null,
+    });
+    const first = new EvolutionMediaContentService(
+      prismaWithMessage(
+        message(
+          '00000000-0000-4000-8000-000000000011',
+          'instance alpha',
+          '00000000-0000-4000-8000-000000000511',
+        ),
+      ),
+      mediaStorage(),
+      config({ EVOLUTION_INSTANCE_NAME: 'legacy-instance' }),
+    );
+    const second = new EvolutionMediaContentService(
+      prismaWithMessage(
+        message(
+          '00000000-0000-4000-8000-000000000012',
+          'instance-beta',
+          '00000000-0000-4000-8000-000000000512',
+        ),
+      ),
+      mediaStorage(),
+      config({ EVOLUTION_INSTANCE_NAME: 'legacy-instance' }),
+    );
+
+    await first.getContent(
+      companyId,
+      conversationId,
+      '00000000-0000-4000-8000-000000000511',
+    );
+    await second.getContent(
+      companyId,
+      conversationId,
+      '00000000-0000-4000-8000-000000000512',
+    );
+
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      'https://evolution.example.test/chat/getBase64FromMediaMessage/instance%20alpha',
+      'https://evolution.example.test/chat/getBase64FromMediaMessage/instance-beta',
+    ]);
   });
 
   it('normaliza o nome de um PDF recebido', async () => {
@@ -184,7 +264,7 @@ describe('EvolutionMediaContentService', () => {
     const storage = {
       ...mediaStorage(),
       read: vi.fn().mockResolvedValue(content),
-    } as WhatsAppMediaStorage;
+    } as unknown as WhatsAppMediaStorage;
     const service = new EvolutionMediaContentService(
       prismaWithMessage({
         id: messageId,
@@ -259,7 +339,7 @@ describe('EvolutionMediaContentService', () => {
     const storage = {
       ...mediaStorage(),
       read: readStoredContent,
-    } as WhatsAppMediaStorage;
+    } as unknown as WhatsAppMediaStorage;
     const service = new EvolutionMediaContentService(
       prismaWithMessage({
         id: messageId,
@@ -298,7 +378,7 @@ describe('EvolutionMediaContentService', () => {
     const storage = {
       ...mediaStorage(),
       read: vi.fn().mockResolvedValue(content),
-    } as WhatsAppMediaStorage;
+    } as unknown as WhatsAppMediaStorage;
     const service = new EvolutionMediaContentService(
       prismaWithMessage({
         id: messageId,

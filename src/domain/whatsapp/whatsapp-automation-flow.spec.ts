@@ -5,11 +5,13 @@ import {
   COMMERCIAL_MENU,
   MAIN_MENU,
   appendBufferedMessage,
+  aiOutputResolvesConversation,
   buildBufferedText,
   decideAutomationPlan,
   deriveAiActions,
   deterministicCommandId,
   isExplicitPositiveConfirmation,
+  mediaInterpretationsUsedInBufferedText,
   validateAiProviderOutput,
   type AutomationConversation,
   type WhatsAppAutomationEnvelope,
@@ -122,7 +124,7 @@ describe('fluxo de automação do WhatsApp', () => {
     );
   });
 
-  it('mostra o menu principal no primeiro contato', () => {
+  it('entende a primeira mensagem em linguagem natural sem impor menu', () => {
     const current = conversation({ mainMenuPresentedAt: null });
 
     expect(
@@ -130,10 +132,11 @@ describe('fluxo de automação do WhatsApp', () => {
         envelope: envelope('Olá', current, { firstContact: true }),
       }),
     ).toMatchObject({
-      kind: 'static-reply',
-      responseMessage: MAIN_MENU,
-      transitionAfterSend: 'present-main-menu',
-      reason: 'initial-menu-pending-durable-confirmation',
+      kind: 'ai',
+      aiMode: 'natural-service',
+      responseMessage: null,
+      transitionAfterSend: null,
+      reason: 'natural-language-first-contact',
     });
   });
 
@@ -157,24 +160,17 @@ describe('fluxo de automação do WhatsApp', () => {
     });
   });
 
-  it.each([
-    ['2', 'purchasing'],
-    ['3', 'controlling'],
-    ['4', 'personnel-department'],
-    ['5', 'financial'],
-    ['6', 'management'],
-    ['7', 'maintenance'],
-    ['8', 'monitoring'],
-    ['9', 'operations'],
-  ] as const)(
-    'coleta nome e motivo antes de encaminhar a opção %s para %s',
-    (option, targetDepartment) => {
+  it.each(['2', '3', '4', '5', '6', '7', '8', '9'] as const)(
+    'não transforma o texto %s em transferência automática de departamento',
+    (option) => {
       expect(
         decideAutomationPlan({ envelope: envelope(option) }),
       ).toMatchObject({
-        transitionBeforeAi: 'start-department-contact',
-        transitionMetadata: { targetDepartment, departmentOption: option },
-        reason: 'department-contact-requested',
+        kind: 'ai',
+        aiMode: 'natural-service',
+        transitionBeforeAi: null,
+        transitionMetadata: null,
+        reason: 'natural-language-service',
       });
     },
   );
@@ -271,7 +267,7 @@ describe('fluxo de automação do WhatsApp', () => {
     });
   });
 
-  it('apresenta o menu antes de orientar uma mídia após encerramento', () => {
+  it('orienta mídia após encerramento sem reintroduzir menu numérico', () => {
     const current = conversation({ mainMenuPresentedAt: null });
     const plan = decideAutomationPlan({
       envelope: envelope(null, current, {
@@ -283,13 +279,11 @@ describe('fluxo de automação do WhatsApp', () => {
 
     expect(plan).toMatchObject({
       kind: 'static-reply',
-      transitionAfterSend: 'present-main-menu',
-      outboundPurpose: 'main-menu',
+      transitionAfterSend: null,
+      outboundPurpose: null,
       reason: 'reopened-conversation-menu-pending-durable-confirmation',
     });
-    expect(plan.responseMessage).toBe(
-      `${MAIN_MENU}\n\n${UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT}`,
-    );
+    expect(plan.responseMessage).not.toContain('1 - Comercial');
   });
 
   it('repete a pergunta pendente do orçamento quando recebe mídia', () => {
@@ -424,11 +418,42 @@ describe('fluxo de automação do WhatsApp', () => {
 
     expect(
       validateAiProviderOutput({
+        message: 'Sua solicitação é urgente.',
+        collectionStatus: 'collecting',
+        extractedDataPatch: {},
+        missingFields: [],
+        summaryPresented: false,
+        customerDecision: 'undecided',
+        priority: 'urgent',
+        priorityReason: 'Risco operacional informado pelo cliente.',
+      }),
+    ).toMatchObject({
+      valid: true,
+      output: {
+        priority: 'urgent',
+        priorityReason: 'Risco operacional informado pelo cliente.',
+      },
+    });
+
+    expect(
+      validateAiProviderOutput({
         message: 'Sem decisão',
         collectionStatus: 'collecting',
         extractedDataPatch: {},
         missingFields: [],
         summaryPresented: false,
+      }),
+    ).toMatchObject({ valid: false, output: null });
+
+    expect(
+      validateAiProviderOutput({
+        message: 'Sem justificativa.',
+        collectionStatus: 'collecting',
+        extractedDataPatch: {},
+        missingFields: [],
+        summaryPresented: false,
+        customerDecision: 'undecided',
+        priority: 'high',
       }),
     ).toMatchObject({ valid: false, output: null });
   });
@@ -452,6 +477,36 @@ describe('fluxo de automação do WhatsApp', () => {
       transitionAfterSend: 'forward',
       humanReason: 'continuous-pretriage-completed',
     });
+  });
+
+  it('derives lifecycle resolution only from a complete natural-service signal without pending fields', () => {
+    const completed = {
+      message: 'A demanda foi concluída.',
+      collectionStatus: 'completed' as const,
+      extractedDataPatch: {},
+      missingFields: [],
+      summaryPresented: false,
+      customerDecision: 'undecided' as const,
+    };
+
+    expect(aiOutputResolvesConversation(completed, 'natural-service')).toBe(
+      true,
+    );
+    expect(
+      aiOutputResolvesConversation(completed, 'continuous-pretriage'),
+    ).toBe(false);
+    expect(
+      aiOutputResolvesConversation(
+        { ...completed, missingFields: ['customer-confirmation'] },
+        'natural-service',
+      ),
+    ).toBe(false);
+    expect(
+      aiOutputResolvesConversation(
+        { ...completed, customerDecision: 'human-requested' },
+        'natural-service',
+      ),
+    ).toBe(false);
   });
 
   it('gera commandId UUID v5 estável e distinto por ação', () => {
@@ -493,5 +548,110 @@ describe('fluxo de automação do WhatsApp', () => {
     expect(buildBufferedText(buffered)).toBe(
       'Meu nome é Ana\nSaída de Campinas',
     );
+  });
+
+  it('prioriza a correção humana efetiva ao compor o contexto multimodal', () => {
+    expect(
+      buildBufferedText([
+        {
+          sourceEventId: 'event-media-1',
+          messageId: 'message-media-1',
+          occurredAt: '2026-07-25T12:00:00.000Z',
+          kind: 'document',
+          text: null,
+          mediaInterpretationStatus: 'succeeded',
+          interpretedText: 'Correção humana validada do pedido 456',
+          interpretationSource: 'human',
+          isFirstContact: false,
+        },
+      ]),
+    ).toBe('Correção humana validada do pedido 456');
+  });
+
+  it('retorna somente as interpretações estruturadas efetivamente consumidas', () => {
+    expect(
+      mediaInterpretationsUsedInBufferedText([
+        {
+          sourceEventId: 'event-media-machine',
+          messageId: 'message-media-machine',
+          occurredAt: '2026-07-25T12:00:00.000Z',
+          kind: 'audio',
+          text: null,
+          mediaInterpretationId: 'interpretation-machine',
+          mediaInterpretationStatus: 'succeeded',
+          interpretedText: 'Transcrição automática usada',
+          interpretationSource: 'machine',
+          isFirstContact: false,
+        },
+        {
+          sourceEventId: 'event-media-human',
+          messageId: 'message-media-human',
+          occurredAt: '2026-07-25T12:00:01.000Z',
+          kind: 'document',
+          text: null,
+          mediaInterpretationId: 'interpretation-human',
+          mediaInterpretationStatus: 'succeeded',
+          interpretedText: 'Correção humana usada',
+          interpretationSource: 'human',
+          isFirstContact: false,
+        },
+        {
+          sourceEventId: 'event-media-present-only',
+          messageId: 'message-media-present-only',
+          occurredAt: '2026-07-25T12:00:02.000Z',
+          kind: 'video',
+          text: null,
+          mediaInterpretationId: 'interpretation-unused',
+          mediaInterpretationStatus: 'unsupported',
+          interpretedText: null,
+          interpretationSource: 'none',
+          isFirstContact: false,
+        },
+      ]),
+    ).toEqual([
+      {
+        interpretationId: 'interpretation-machine',
+        effectiveSource: 'machine',
+      },
+      {
+        interpretationId: 'interpretation-human',
+        effectiveSource: 'human',
+      },
+    ]);
+  });
+
+  it('não cria provenance quando o contexto não usa mídia', () => {
+    expect(
+      mediaInterpretationsUsedInBufferedText([
+        {
+          sourceEventId: 'event-text',
+          messageId: 'message-text',
+          occurredAt: '2026-07-25T12:00:00.000Z',
+          kind: 'text',
+          text: 'Mensagem sem mídia',
+          isFirstContact: false,
+        },
+      ]),
+    ).toEqual([]);
+  });
+
+  it('encaminha mídia interpretada para a IA sem resposta fixa de unsupported', () => {
+    const current = conversation({ mainMenuPresentedAt: null });
+
+    expect(
+      decideAutomationPlan({
+        envelope: envelope(null, current, {
+          firstContact: true,
+          kind: 'document',
+          media: { mimeType: 'application/pdf' },
+        }),
+        bufferedText: 'Solicitação de orçamento extraída do documento',
+        mediaInterpretationAvailable: true,
+      }),
+    ).toMatchObject({
+      kind: 'ai',
+      aiMode: 'natural-service',
+      reason: 'natural-language-first-contact',
+    });
   });
 });

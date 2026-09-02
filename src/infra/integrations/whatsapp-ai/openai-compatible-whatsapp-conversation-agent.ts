@@ -10,24 +10,17 @@ import {
   validateAiProviderOutput,
   type AiProviderOutput,
 } from '../../../domain/whatsapp/whatsapp-automation-flow';
+import { redactPotentialSecrets } from '../../../domain/agents/agent-runtime';
 import { sanitizeLogText } from '../../../shared/utils/sensitive-data';
 import {
   COMMERCIAL_QUOTE_SYSTEM_PROMPT,
   COMMERCIAL_QUOTE_SYSTEM_PROMPT_VERSION,
 } from './commercial-quote-system-prompt';
 
-const AI_PROVIDERS = ['openai', 'cerebras', 'gemini', 'groq'] as const;
+export type WhatsAppAiProvider = 'openai';
 
-export type WhatsAppAiProvider = (typeof AI_PROVIDERS)[number];
-
-const DEFAULT_PROVIDER_ORDER: readonly WhatsAppAiProvider[] = AI_PROVIDERS;
-
-const DEFAULT_BASE_URLS: Readonly<Record<WhatsAppAiProvider, string>> = {
-  openai: 'https://api.openai.com/v1',
-  cerebras: 'https://api.cerebras.ai/v1',
-  gemini: 'https://generativelanguage.googleapis.com/v1beta/openai',
-  groq: 'https://api.groq.com/openai/v1',
-};
+const DEFAULT_PROVIDER_ORDER: readonly WhatsAppAiProvider[] = ['openai'];
+const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 
 interface ProviderConfiguration {
   readonly provider: WhatsAppAiProvider;
@@ -41,14 +34,10 @@ export class OpenAiCompatibleWhatsAppConversationAgent extends WhatsAppConversat
   private readonly logger = new Logger(
     OpenAiCompatibleWhatsAppConversationAgent.name,
   );
-  private readonly providerOrder: readonly WhatsAppAiProvider[];
   private readonly requestTimeoutMs: number;
 
   constructor(private readonly config: ConfigService) {
     super();
-    this.providerOrder = parseProviderOrder(
-      config.get<string>('WHATSAPP_AI_PROVIDER_ORDER'),
-    );
     this.requestTimeoutMs = positiveInteger(
       config.get<string | number>('WHATSAPP_AI_REQUEST_TIMEOUT_MS'),
       30_000,
@@ -62,33 +51,29 @@ export class OpenAiCompatibleWhatsAppConversationAgent extends WhatsAppConversat
       throw new Error('Mensagem processável não informada.');
     }
 
-    let attempt = 0;
-    for (const provider of this.providerOrder) {
-      const providerConfig = this.getProviderConfiguration(provider);
-      if (!providerConfig) {
-        this.logger.warn(
-          `Provedor de IA ignorado por configuração incompleta provider=${provider}`,
-        );
-        continue;
-      }
+    const providerConfig = this.getProviderConfiguration();
+    if (!providerConfig) {
+      this.logger.warn('OpenAI ignorada por configuração incompleta.');
+      throw new Error(
+        'Não foi possível gerar uma resposta automática no momento.',
+      );
+    }
 
-      attempt += 1;
-      try {
-        const output = await this.requestProvider(providerConfig, input);
-        this.logger.log(
-          `Resposta de IA validada provider=${provider} attempt=${attempt} promptVersion=${COMMERCIAL_QUOTE_SYSTEM_PROMPT_VERSION} correlationId=${safeCorrelationId(input.correlationId)}`,
-        );
-        return {
-          output,
-          provider,
-          model: providerConfig.model,
-          attempt,
-        };
-      } catch (error) {
-        this.logger.warn(
-          `Fallback de IA acionado provider=${provider} attempt=${attempt} correlationId=${safeCorrelationId(input.correlationId)} reason=${safeFailureReason(error)}`,
-        );
-      }
+    try {
+      const output = await this.requestProvider(providerConfig, input);
+      this.logger.log(
+        `Resposta de IA validada provider=openai attempt=1 promptVersion=${COMMERCIAL_QUOTE_SYSTEM_PROMPT_VERSION} correlationId=${safeCorrelationId(input.correlationId)}`,
+      );
+      return {
+        output,
+        provider: 'openai',
+        model: providerConfig.model,
+        attempt: 1,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `Falha da OpenAI attempt=1 correlationId=${safeCorrelationId(input.correlationId)} reason=${safeFailureReason(error)}`,
+      );
     }
 
     throw new Error(
@@ -96,21 +81,19 @@ export class OpenAiCompatibleWhatsAppConversationAgent extends WhatsAppConversat
     );
   }
 
-  private getProviderConfiguration(
-    provider: WhatsAppAiProvider,
-  ): ProviderConfiguration | null {
-    const prefix = `WHATSAPP_AI_${provider.toUpperCase()}`;
+  private getProviderConfiguration(): ProviderConfiguration | null {
+    const prefix = 'WHATSAPP_AI_OPENAI';
     const apiKey = cleanConfigValue(
       this.config.get<string>(`${prefix}_API_KEY`),
     );
     const model = cleanConfigValue(this.config.get<string>(`${prefix}_MODEL`));
     const baseUrl =
       cleanConfigValue(this.config.get<string>(`${prefix}_BASE_URL`)) ??
-      DEFAULT_BASE_URLS[provider];
+      DEFAULT_OPENAI_BASE_URL;
 
     if (!apiKey || !model) return null;
 
-    return { provider, apiKey, baseUrl, model };
+    return { provider: 'openai', apiKey, baseUrl, model };
   }
 
   private async requestProvider(
@@ -162,16 +145,8 @@ export class OpenAiCompatibleWhatsAppConversationAgent extends WhatsAppConversat
 export function parseProviderOrder(
   value: string | null | undefined,
 ): readonly WhatsAppAiProvider[] {
-  const configured = (value ?? '')
-    .split(',')
-    .map((item) => item.trim().toLowerCase())
-    .filter(isWhatsAppAiProvider);
-  const unique = [...new Set(configured)];
-  return unique.length > 0 ? unique : DEFAULT_PROVIDER_ORDER;
-}
-
-function isWhatsAppAiProvider(value: string): value is WhatsAppAiProvider {
-  return AI_PROVIDERS.includes(value as WhatsAppAiProvider);
+  void value;
+  return DEFAULT_PROVIDER_ORDER;
 }
 
 function cleanConfigValue(value: string | null | undefined): string | null {
@@ -271,5 +246,8 @@ function safeCorrelationId(value: string): string {
 
 function safeFailureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : 'falha desconhecida';
-  return sanitizeLogText(message, 200).replace(/[\r\n]/g, ' ');
+  return sanitizeLogText(redactPotentialSecrets(message), 200).replace(
+    /[\r\n]/g,
+    ' ',
+  );
 }

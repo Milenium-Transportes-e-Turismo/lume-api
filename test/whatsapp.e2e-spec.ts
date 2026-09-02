@@ -1645,6 +1645,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         data: {
           companyId: tenantId,
           phoneNormalized: fixture.phone,
+          phoneDisplay: fixture.phone,
           displayName: fixture.department,
         },
       });
@@ -2353,6 +2354,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       data: {
         companyId: foreignCompanyId,
         phoneNormalized: '5511966666666',
+        phoneDisplay: '5511966666666',
       },
     });
     const foreignConversation = await prisma.whatsAppConversation.create({
@@ -2720,6 +2722,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       data: {
         companyId: tenantId,
         phoneNormalized: '5511977773131',
+        phoneDisplay: '5511977773131',
         displayName: 'Cliente ciclo substituído',
       },
     });
@@ -2957,6 +2960,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       data: {
         companyId: tenantId,
         phoneNormalized: '5511987654321',
+        phoneDisplay: '5511987654321',
         displayName: 'Cliente proposta após acompanhamento',
       },
     });
@@ -3122,6 +3126,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         data: {
           companyId: tenantId,
           phoneNormalized: `551197777${suffix}`,
+          phoneDisplay: `551197777${suffix}`,
           displayName: `Cliente bloqueado ${suffix}`,
         },
       });
@@ -3216,6 +3221,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       data: {
         companyId: tenantId,
         phoneNormalized: '5511977773232',
+        phoneDisplay: '5511977773232',
         displayName: 'Cliente status manual',
       },
     });
@@ -3345,6 +3351,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       data: {
         companyId: tenantId,
         phoneNormalized: '5511977773333',
+        phoneDisplay: '5511977773333',
         displayName: 'Cliente proposta PDF',
       },
     });
@@ -4695,6 +4702,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       data: {
         companyId: tenantId,
         phoneNormalized: '5534996305110',
+        phoneDisplay: '5534996305110',
         displayName: 'Cliente ciclo múltiplo',
       },
     });
@@ -5052,6 +5060,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       data: {
         companyId: tenantId,
         phoneNormalized: '5534996305220',
+        phoneDisplay: '5534996305220',
         displayName: 'Cliente encerrado',
       },
     });
@@ -5174,6 +5183,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         data: {
           companyId: tenantId,
           phoneNormalized: phone,
+          phoneDisplay: phone,
           displayName: 'Nome atual do contato',
         },
       });
@@ -5316,9 +5326,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       await expect(
         service.validate({
           ...laterInput,
-          batchId: repeatedBatchId,
           batchName: `overlap-repeated-${repeatedBatchId}`,
-          confirmation: `APPLY:${repeatedBatchId}`,
         }),
       ).resolves.toMatchObject({
         valid: true,

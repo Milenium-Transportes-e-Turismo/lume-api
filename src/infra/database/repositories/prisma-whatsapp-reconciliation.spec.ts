@@ -49,13 +49,16 @@ function createHarness() {
   const event = {
     id: ids.event,
     companyId: ids.company,
-    topic: 'whatsapp.outbound.requested',
+    topic: 'whatsapp.outbound.requested' as string,
     aggregateType: 'whatsapp-conversation',
     aggregateId: ids.conversation,
     aggregateSequence: 1,
     correlationId: 'outbound:test',
-    payload: { messageId: ids.message, attemptId: ids.attempt },
-    status: IntegrationOutboxStatus.DEAD,
+    payload: {
+      messageId: ids.message,
+      attemptId: ids.attempt,
+    } as Record<string, unknown>,
+    status: IntegrationOutboxStatus.DEAD as IntegrationOutboxStatus,
     attempts: 1,
     maxAttempts: 8,
     availableAt: new Date(0),
@@ -66,7 +69,7 @@ function createHarness() {
     executionLeaseUntil: null,
     processingProvider: null as WhatsAppAutomationProvider | null,
     deliveredAt: null,
-    lastError: 'Requer reconciliação',
+    lastError: 'Requer reconciliação' as string | null,
     createdAt: new Date(0),
     updatedAt: new Date(0),
   };
@@ -79,7 +82,7 @@ function createHarness() {
     actorUserId: null,
     providerMessageId: null as string | null,
     direction: MessageDirection.OUTBOUND,
-    deliveryStatus: DeliveryStatus.PENDING,
+    deliveryStatus: DeliveryStatus.PENDING as DeliveryStatus,
     kind: MessageKind.TEXT,
     text: 'Mensagem de teste',
     media: null,
@@ -95,14 +98,14 @@ function createHarness() {
     companyId: ids.company,
     messageId: ids.message,
     attemptNumber: 1,
-    status: MessageAttemptStatus.PENDING,
+    status: MessageAttemptStatus.PENDING as MessageAttemptStatus,
     providerMessageId: null as string | null,
     errorCode: null as string | null,
     errorMessage: null as string | null,
     dispatchClaimId: 'claim-1',
     dispatchFingerprint: 'a'.repeat(64),
     dispatchClaimedAt: new Date(0),
-    dispatchState: EvolutionDispatchState.UNKNOWN,
+    dispatchState: EvolutionDispatchState.UNKNOWN as EvolutionDispatchState,
     dispatchOwnerId: ids.service,
     dispatchLeaseUntil: null,
     startedAt: new Date(0),
@@ -207,7 +210,7 @@ describe('PrismaWhatsAppRepository.reconcileAutomationOutbox', () => {
       processingProvider: null,
       executionId: null,
     });
-    const reopenedPayload = harness.event.payload as Record<string, unknown>;
+    const reopenedPayload = harness.event.payload;
     expect(reopenedPayload).toMatchObject({
       eventId: expect.stringMatching(
         /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
@@ -357,10 +360,8 @@ describe('PrismaWhatsAppRepository.reconcileAutomationOutbox', () => {
     const first = await harness.repository.reconcileAutomationOutbox(input);
     const second = await harness.repository.reconcileAutomationOutbox(input);
 
-    expect(second).toMatchObject({
-      ...first,
-      idempotent: true,
-    });
+    expect(first).toMatchObject({ idempotent: false });
+    expect(second).toMatchObject({ idempotent: true });
     expect(
       harness.transaction.whatsAppMessageAttempt.create,
     ).toHaveBeenCalledTimes(1);
@@ -447,7 +448,8 @@ describe('PrismaWhatsAppRepository.reconcileAutomationOutbox', () => {
     const first = await harness.repository.reconcileAutomationOutbox(input);
     const second = await harness.repository.reconcileAutomationOutbox(input);
 
-    expect(second).toMatchObject({ ...first, idempotent: true });
+    expect(first).toMatchObject({ idempotent: false });
+    expect(second).toMatchObject({ idempotent: true });
     expect(harness.transaction.integrationOutbox.update).toHaveBeenCalledTimes(
       1,
     );

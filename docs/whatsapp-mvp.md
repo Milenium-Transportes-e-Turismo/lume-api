@@ -2,7 +2,7 @@
 
 O WhatsApp é um módulo interno da Tenant API. PostgreSQL é a fonte de verdade
 para conversas, mensagens, anexos, orçamentos, histórico e atendimento. A
-Evolution transporta mensagens; provedores de IA ajudam na coleta comercial,
+Evolution transporta mensagens; agentes com modelos OpenAI ajudam na coleta comercial,
 mas não definem estados de domínio nem recebem acesso direto ao painel.
 
 Consulte [whatsapp-api.md](./whatsapp-api.md) para configuração, garantias de

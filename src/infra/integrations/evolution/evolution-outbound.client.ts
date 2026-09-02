@@ -96,23 +96,27 @@ export class HttpEvolutionOutboundGateway extends EvolutionOutboundGateway {
   }
 
   async send(input: EvolutionOutboundInput): Promise<EvolutionOutboundResult> {
-    const invalidConfiguration = this.validateConfiguration();
+    const instanceName = this.resolveInstanceName(input);
+    const invalidConfiguration = this.validateConfiguration(instanceName);
     if (invalidConfiguration) return invalidConfiguration;
 
     const invalidInput = this.validateInput(input);
     if (invalidInput) return invalidInput;
 
-    if (input.kind === 'text') return this.sendText(input);
-    if (input.kind === 'document') return this.sendDocument(input);
-    if (input.kind === 'sticker') return this.sendSticker(input);
-    return this.sendMedia(input);
+    if (input.kind === 'text') return this.sendText(input, instanceName);
+    if (input.kind === 'document') {
+      return this.sendDocument(input, instanceName);
+    }
+    if (input.kind === 'sticker') return this.sendSticker(input, instanceName);
+    return this.sendMedia(input, instanceName);
   }
 
   private async sendSticker(
     input: Extract<EvolutionOutboundInput, { kind: 'sticker' }>,
+    instanceName: string,
   ): Promise<EvolutionOutboundResult> {
     return this.sendOnce(
-      `${this.baseUrl}/message/sendSticker/${encodeURIComponent(this.instanceName)}`,
+      `${this.baseUrl}/message/sendSticker/${encodeURIComponent(instanceName)}`,
       {
         method: 'POST',
         headers: {
@@ -130,9 +134,10 @@ export class HttpEvolutionOutboundGateway extends EvolutionOutboundGateway {
 
   private async sendText(
     input: Extract<EvolutionOutboundInput, { kind: 'text' }>,
+    instanceName: string,
   ): Promise<EvolutionOutboundResult> {
     return this.sendOnce(
-      `${this.baseUrl}/message/sendText/${encodeURIComponent(this.instanceName)}`,
+      `${this.baseUrl}/message/sendText/${encodeURIComponent(instanceName)}`,
       {
         method: 'POST',
         headers: {
@@ -153,20 +158,25 @@ export class HttpEvolutionOutboundGateway extends EvolutionOutboundGateway {
 
   private async sendDocument(
     input: Extract<EvolutionOutboundInput, { kind: 'document' }>,
+    instanceName: string,
   ): Promise<EvolutionOutboundResult> {
-    return this.sendMedia({
-      ...input,
-      kind: 'media',
-      mediaType: 'document',
-    });
+    return this.sendMedia(
+      {
+        ...input,
+        kind: 'media',
+        mediaType: 'document',
+      },
+      instanceName,
+    );
   }
 
   private async sendMedia(
     input: Extract<EvolutionOutboundInput, { kind: 'media' }>,
+    instanceName: string,
   ): Promise<EvolutionOutboundResult> {
     if (input.mediaType === 'audio') {
       return this.sendOnce(
-        `${this.baseUrl}/message/sendWhatsAppAudio/${encodeURIComponent(this.instanceName)}`,
+        `${this.baseUrl}/message/sendWhatsAppAudio/${encodeURIComponent(instanceName)}`,
         {
           method: 'POST',
           headers: {
@@ -198,7 +208,7 @@ export class HttpEvolutionOutboundGateway extends EvolutionOutboundGateway {
     );
 
     return this.sendOnce(
-      `${this.baseUrl}/message/sendMedia/${encodeURIComponent(this.instanceName)}`,
+      `${this.baseUrl}/message/sendMedia/${encodeURIComponent(instanceName)}`,
       {
         method: 'POST',
         headers: { apikey: this.apiKey },
@@ -291,9 +301,20 @@ export class HttpEvolutionOutboundGateway extends EvolutionOutboundGateway {
     }
   }
 
-  private validateConfiguration():
-    Extract<EvolutionOutboundResult, { outcome: 'not-sent' }> | undefined {
-    if (this.baseUrl && this.instanceName && this.apiKey) return undefined;
+  private resolveInstanceName(input: EvolutionOutboundInput): string {
+    const routedInstanceName = nonEmptyString(input.instanceName);
+    if (routedInstanceName) return routedInstanceName;
+
+    // A persisted source channel is authoritative: an unresolved route must
+    // fail closed instead of sending through another tenant/channel instance.
+    if (nonEmptyString(input.sourceChannelId)) return '';
+    return this.instanceName;
+  }
+
+  private validateConfiguration(
+    instanceName: string,
+  ): Extract<EvolutionOutboundResult, { outcome: 'not-sent' }> | undefined {
+    if (this.baseUrl && instanceName && this.apiKey) return undefined;
 
     return {
       outcome: 'not-sent',

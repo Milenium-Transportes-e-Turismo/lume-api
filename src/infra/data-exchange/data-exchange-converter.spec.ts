@@ -1,7 +1,6 @@
 import ExcelJS from 'exceljs';
 import { describe, expect, it } from 'vitest';
 
-import { AppError } from '../../core/errors/app-error';
 import { DataExchangeConverter } from './data-exchange-converter';
 
 describe('DataExchangeConverter', () => {
@@ -50,12 +49,12 @@ describe('DataExchangeConverter', () => {
   it('rejeita conversão sem adaptador e XLSX estruturalmente inválido', async () => {
     await expect(
       converter.convert('pdf', 'xlsx', Buffer.from('%PDF-1.4\n%%EOF\n')),
-    ).rejects.toMatchObject<AppError>({
+    ).rejects.toMatchObject({
       code: 'CONVERSION_NOT_SUPPORTED',
     });
     await expect(
       converter.convert('xlsx', 'csv', Buffer.from('PK\u0003\u0004broken')),
-    ).rejects.toMatchObject<AppError>({
+    ).rejects.toMatchObject({
       code: 'UNSUPPORTED_FILE_FORMAT',
     });
 
@@ -70,7 +69,7 @@ describe('DataExchangeConverter', () => {
   it('rejeita XLSX malformado também na validação anterior ao armazenamento', async () => {
     await expect(
       converter.validate('xlsx', Buffer.from('PK\u0003\u0004broken')),
-    ).rejects.toMatchObject<AppError>({
+    ).rejects.toMatchObject({
       code: 'UNSUPPORTED_FILE_FORMAT',
     });
   });
@@ -100,9 +99,7 @@ describe('DataExchangeConverter', () => {
     workbook.addWorksheet('Segunda').addRow(['segunda']);
     const xlsx = Buffer.from(await workbook.xlsx.writeBuffer());
 
-    await expect(
-      converter.convert('xlsx', 'csv', xlsx),
-    ).rejects.toMatchObject<AppError>({
+    await expect(converter.convert('xlsx', 'csv', xlsx)).rejects.toMatchObject({
       code: 'UNSUPPORTED_FILE_FORMAT',
     });
     const selected = await converter.convert('xlsx', 'csv', xlsx, {

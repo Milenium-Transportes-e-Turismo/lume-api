@@ -20,7 +20,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
 COPY scripts/routing ./scripts/routing
 
-RUN mkdir -p /app/var/whatsapp-media /app/var/imports/whatsapp \
+RUN mkdir -p /app/var/whatsapp-media /app/var/imports/whatsapp /app/var/knowledge \
   && chown -R node:node /app/var
 
 USER node

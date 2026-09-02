@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+import { Logger } from '@nestjs/common';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { WhatsAppConversationAgentInput } from '../../../application/contracts/whatsapp-conversation-agent';
@@ -21,6 +22,7 @@ const input: WhatsAppConversationAgentInput = {
   correlationId: 'correlation-1',
   companyId: 'company-1',
   conversationId: 'conversation-1',
+  serviceSessionId: 'service-session-1',
   aiMode: 'eventual-quote',
   userMessage: 'Preciso de um orçamento.',
   currentConversation: null,
@@ -46,23 +48,23 @@ function configuredAgent(
 ): OpenAiCompatibleWhatsAppConversationAgent {
   return new OpenAiCompatibleWhatsAppConversationAgent(
     configService({
-      WHATSAPP_AI_PROVIDER_ORDER: 'openai,cerebras,gemini,groq',
+      WHATSAPP_AI_PROVIDER_ORDER: 'openai',
       WHATSAPP_AI_OPENAI_API_KEY: 'openai-secret-key',
       WHATSAPP_AI_OPENAI_BASE_URL: 'https://openai.example/v1/',
       WHATSAPP_AI_OPENAI_MODEL: 'openai-model',
-      WHATSAPP_AI_CEREBRAS_API_KEY: 'cerebras-secret-key',
-      WHATSAPP_AI_CEREBRAS_BASE_URL: 'https://cerebras.example/v1',
-      WHATSAPP_AI_CEREBRAS_MODEL: 'cerebras-model',
-      WHATSAPP_AI_GEMINI_API_KEY: 'gemini-secret-key',
-      WHATSAPP_AI_GEMINI_BASE_URL: 'https://gemini.example/v1',
-      WHATSAPP_AI_GEMINI_MODEL: 'gemini-model',
-      WHATSAPP_AI_GROQ_API_KEY: 'groq-secret-key',
-      WHATSAPP_AI_GROQ_BASE_URL: 'https://groq.example/v1',
-      WHATSAPP_AI_GROQ_MODEL: 'groq-model',
       WHATSAPP_AI_REQUEST_TIMEOUT_MS: '1000',
       ...overrides,
     }),
   );
+}
+
+async function captureFailure(operation: () => Promise<unknown>) {
+  try {
+    await operation();
+  } catch (error) {
+    return error;
+  }
+  throw new Error('A operação deveria ter falhado.');
 }
 
 describe('OpenAiCompatibleWhatsAppConversationAgent', () => {
@@ -71,7 +73,7 @@ describe('OpenAiCompatibleWhatsAppConversationAgent', () => {
     vi.restoreAllMocks();
   });
 
-  it('usa o primeiro provedor configurado e valida o schema canônico', async () => {
+  it('usa exclusivamente OpenAI e valida o schema canônico', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValue(
@@ -81,7 +83,6 @@ describe('OpenAiCompatibleWhatsAppConversationAgent', () => {
 
     const result = await configuredAgent().complete(input);
     const [url, request] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(typeof request.body).toBe('string');
     const body = JSON.parse(request.body as string) as {
       model: string;
       messages: Array<{ role: string; content: string }>;
@@ -92,8 +93,7 @@ describe('OpenAiCompatibleWhatsAppConversationAgent', () => {
       'Bearer openai-secret-key',
     );
     expect(body.model).toBe('openai-model');
-    expect(body.messages[0].content).toContain('Agente Comercial da Milenium');
-    expect(body.messages[0].content).toContain('Modo atual: eventual-quote');
+    expect(body.messages[0]?.content).toContain('Agente Comercial da Milenium');
     expect(result).toMatchObject({
       provider: 'openai',
       model: 'openai-model',
@@ -102,95 +102,74 @@ describe('OpenAiCompatibleWhatsAppConversationAgent', () => {
     });
   });
 
-  it('faz fallback OpenAI para Cerebras após erro HTTP', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(providerResponse('{}', 503))
-      .mockResolvedValueOnce(providerResponse(JSON.stringify(validOutput)));
-    vi.stubGlobal('fetch', fetchMock);
-
-    const result = await configuredAgent().complete(input);
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls[0][0]).toBe(
-      'https://openai.example/v1/chat/completions',
-    );
-    expect(fetchMock.mock.calls[1][0]).toBe(
-      'https://cerebras.example/v1/chat/completions',
-    );
-    expect(result).toMatchObject({ provider: 'cerebras', attempt: 2 });
+  it('ignora qualquer lista legada e mantém OpenAI como único provider', () => {
+    expect(parseProviderOrder('groq,cerebras,gemini')).toEqual(['openai']);
+    expect(parseProviderOrder(undefined)).toEqual(['openai']);
   });
 
-  it('faz fallback quando a resposta não atende ao schema', async () => {
+  it('não tenta provider alternativo depois de erro HTTP', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(providerResponse('{}', 503));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const failure = await captureFailure(() =>
+      configuredAgent().complete(input),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(failure).toMatchObject({
+      message: 'Não foi possível gerar uma resposta automática no momento.',
+    });
+  });
+
+  it('não tenta provider alternativo quando a resposta OpenAI é inválida', async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(
+      .mockResolvedValue(
         providerResponse(
           JSON.stringify({ message: 'Resposta sem campos obrigatórios.' }),
         ),
-      )
-      .mockResolvedValueOnce(providerResponse(JSON.stringify(validOutput)));
+      );
     vi.stubGlobal('fetch', fetchMock);
 
-    const result = await configuredAgent().complete(input);
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result.provider).toBe('cerebras');
-    expect(result.output).toEqual(validOutput);
-  });
-
-  it('respeita a ordem configurável e remove provedores repetidos ou inválidos', () => {
-    expect(parseProviderOrder('groq,openai,groq,desconhecido')).toEqual([
-      'groq',
-      'openai',
-    ]);
-    expect(parseProviderOrder('desconhecido')).toEqual([
-      'openai',
-      'cerebras',
-      'gemini',
-      'groq',
-    ]);
-  });
-
-  it('não chama provedores sem chave ou modelo', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(providerResponse(JSON.stringify(validOutput)));
-    vi.stubGlobal('fetch', fetchMock);
-    const agent = new OpenAiCompatibleWhatsAppConversationAgent(
-      configService({
-        WHATSAPP_AI_PROVIDER_ORDER: 'openai,cerebras',
-        WHATSAPP_AI_CEREBRAS_API_KEY: 'cerebras-secret-key',
-        WHATSAPP_AI_CEREBRAS_BASE_URL: 'https://cerebras.example/v1',
-        WHATSAPP_AI_CEREBRAS_MODEL: 'cerebras-model',
-      }),
-    );
-
-    const result = await agent.complete(input);
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe(
-      'https://cerebras.example/v1/chat/completions',
-    );
-    expect(result).toMatchObject({ provider: 'cerebras', attempt: 1 });
-  });
-
-  it('retorna erro final genérico sem expor credenciais', async () => {
-    const fetchMock = vi.fn().mockRejectedValue(new Error('falha de rede'));
-    vi.stubGlobal('fetch', fetchMock);
-
-    let thrown: unknown;
-    try {
-      await configuredAgent().complete(input);
-    } catch (error) {
-      thrown = error;
-    }
-
-    expect(thrown).toBeInstanceOf(Error);
-    expect((thrown as Error).message).toBe(
+    await expect(configuredAgent().complete(input)).rejects.toThrow(
       'Não foi possível gerar uma resposta automática no momento.',
     );
-    expect((thrown as Error).message).not.toContain('secret-key');
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('falha com mensagem segura quando a credencial OpenAI está ausente', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const failure = await captureFailure(() =>
+      configuredAgent({ WHATSAPP_AI_OPENAI_API_KEY: '' }).complete(input),
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(String(failure)).not.toContain('API_KEY');
+    expect(failure).toMatchObject({
+      message: 'Não foi possível gerar uma resposta automática no momento.',
+    });
+  });
+
+  it('redige credenciais caso o erro de rede tente repeti-las', async () => {
+    const warn = vi
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(new Error('falha usando sk-secret-openai-value'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const failure = await captureFailure(() =>
+      configuredAgent().complete(input),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(failure)).not.toContain('sk-secret-openai-value');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(
+      'sk-secret-openai-value',
+    );
+    expect(JSON.stringify(warn.mock.calls)).toContain('REDACTED_OPENAI_KEY');
   });
 });

@@ -1,6 +1,7 @@
 import {
   ALL_PERMISSION_CODES,
   ASSIGNABLE_DEPARTMENTS,
+  SERVICE_PERMISSION_CEILING,
   type PermissionCode,
   presentUserDepartment,
   type PresentedUserDepartment,
@@ -53,12 +54,18 @@ export interface AuthenticatedPrincipal extends UserOutput {
 
 export function presentUser(record: UserRecord): UserOutput {
   const { user } = record;
+  const configuredPermissionCodes = filterPermissionCodesForDepartments(
+    user.props.departments,
+    user.props.permissionCodes,
+  );
+  const operationalServicePermissions = new Set<PermissionCode>(
+    SERVICE_PERMISSION_CEILING,
+  );
   const permissionCodes = user.props.isAdministrator
-    ? [...ALL_PERMISSION_CODES]
-    : filterPermissionCodesForDepartments(
-        user.props.departments,
-        user.props.permissionCodes,
-      );
+    ? ALL_PERMISSION_CODES.filter(
+        (permission) => !operationalServicePermissions.has(permission),
+      )
+    : configuredPermissionCodes;
 
   return {
     id: user.props.id,
@@ -85,7 +92,7 @@ export function presentUser(record: UserRecord): UserOutput {
     permissionCodes,
     permissions: resolveEffectivePermissions(
       user.props.departments,
-      permissionCodes,
+      configuredPermissionCodes,
       user.props.isAdministrator,
       user.props.documentAccessMode,
     ),

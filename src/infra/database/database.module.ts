@@ -8,6 +8,8 @@ import {
   UsersRepository,
 } from '../../application/contracts/repositories';
 import { WhatsAppRepository } from '../../application/contracts/whatsapp.repository';
+import { WhatsAppChannelManagementRepository } from '../../application/contracts/whatsapp-channel-management.repository';
+import { ServiceSessionManagementRepository } from '../../application/contracts/service-session-management.repository';
 import { DataExchangeRepository } from '../../application/contracts/data-exchange.repository';
 import { PrismaService } from './prisma/prisma.service';
 import { PrismaRefreshTokensRepository } from './repositories/prisma-refresh-tokens.repository';
@@ -16,6 +18,8 @@ import { PrismaTenantAuditLogsRepository } from './repositories/prisma-tenant-au
 import { PrismaTenantBootstrapRepository } from './repositories/prisma-tenant-bootstrap.repository';
 import { PrismaUsersRepository } from './repositories/prisma-users.repository';
 import { PrismaWhatsAppRepository } from './repositories/prisma-whatsapp.repository';
+import { PrismaWhatsAppChannelManagementRepository } from './repositories/prisma-whatsapp-channel-management.repository';
+import { PrismaServiceSessionManagementRepository } from './repositories/prisma-service-session-management.repository';
 import { PrismaDataExchangeRepository } from './repositories/prisma-data-exchange.repository';
 import { RoutingRepository } from '../../application/contracts/routing.repository';
 import { PrismaRoutingRepository } from './repositories/prisma-routing.repository';
@@ -42,6 +46,14 @@ import { PrismaRoutingRepository } from './repositories/prisma-routing.repositor
       useClass: PrismaTenantAuditLogsRepository,
     },
     { provide: WhatsAppRepository, useClass: PrismaWhatsAppRepository },
+    {
+      provide: WhatsAppChannelManagementRepository,
+      useClass: PrismaWhatsAppChannelManagementRepository,
+    },
+    {
+      provide: ServiceSessionManagementRepository,
+      useClass: PrismaServiceSessionManagementRepository,
+    },
     { provide: DataExchangeRepository, useClass: PrismaDataExchangeRepository },
     { provide: RoutingRepository, useClass: PrismaRoutingRepository },
   ],
@@ -53,6 +65,8 @@ import { PrismaRoutingRepository } from './repositories/prisma-routing.repositor
     PasswordChangeChallengesRepository,
     TenantAuditLogsRepository,
     WhatsAppRepository,
+    WhatsAppChannelManagementRepository,
+    ServiceSessionManagementRepository,
     DataExchangeRepository,
     RoutingRepository,
   ],

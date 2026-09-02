@@ -79,7 +79,7 @@ describe('CalculateRouteUseCase', () => {
       matcherStrategy: 'test',
     });
     const useCase = new CalculateRouteUseCase(
-      { geocode } as GeocodingProvider,
+      { geocode } as unknown as GeocodingProvider,
       { calculateRoute },
       { match: tolls },
       { assess: vi.fn().mockResolvedValue(disabledIntelligence) },
@@ -118,7 +118,7 @@ describe('CalculateRouteUseCase', () => {
   it('não chama geocoding quando recebe coordenadas', async () => {
     const geocode = vi.fn();
     const useCase = new CalculateRouteUseCase(
-      { geocode } as GeocodingProvider,
+      { geocode } as unknown as GeocodingProvider,
       {
         calculateRoute: vi.fn().mockResolvedValue({
           direction: 'outbound',

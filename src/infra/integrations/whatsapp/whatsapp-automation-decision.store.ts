@@ -13,9 +13,6 @@ import {
 import { validateAiProviderOutput } from '../../../domain/whatsapp/whatsapp-automation-flow';
 import type { Prisma } from '../../database/prisma/generated/client';
 import { PrismaService } from '../../database/prisma/prisma.service';
-import { COMMERCIAL_QUOTE_SYSTEM_PROMPT_VERSION } from '../whatsapp-ai/commercial-quote-system-prompt';
-
-const AI_PROVIDERS = new Set(['openai', 'cerebras', 'gemini', 'groq']);
 
 @Injectable()
 export class WhatsAppAutomationDecisionStore {
@@ -47,10 +44,12 @@ export class WhatsAppAutomationDecisionStore {
       create: {
         companyId: event.companyId,
         outboxEventId: event.id,
+        actorAgentId: decision.agentId,
+        agentExecutionId: decision.agentExecutionId,
         inputHash,
         provider: decision.provider,
         model: decision.model,
-        promptVersion: COMMERCIAL_QUOTE_SYSTEM_PROMPT_VERSION,
+        promptVersion: 'platform-agent-runtime',
         aiAttempt: decision.attempt,
         output: decision.output as unknown as Prisma.InputJsonValue,
       },
@@ -65,10 +64,12 @@ export class WhatsAppAutomationDecisionStore {
     model: string;
     aiAttempt: number;
     output: Prisma.JsonValue;
+    actorAgentId: string | null;
+    agentExecutionId: string | null;
   }): WhatsAppConversationAgentResult {
     const validated = validateAiProviderOutput(row.output);
     if (
-      !AI_PROVIDERS.has(row.provider) ||
+      !/^[a-z][a-z0-9._-]{1,19}$/iu.test(row.provider) ||
       !validated.valid ||
       !validated.output
     ) {
@@ -79,10 +80,16 @@ export class WhatsAppAutomationDecisionStore {
       );
     }
     return {
-      provider: row.provider as WhatsAppConversationAgentResult['provider'],
+      provider: row.provider,
       model: row.model,
       attempt: row.aiAttempt,
       output: validated.output,
+      ...(row.actorAgentId && row.agentExecutionId
+        ? {
+            agentId: row.actorAgentId,
+            agentExecutionId: row.agentExecutionId,
+          }
+        : {}),
     };
   }
 }
@@ -94,8 +101,12 @@ function decisionInputHash(input: WhatsAppConversationAgentInput): string {
         sourceEventId: input.sourceEventId,
         companyId: input.companyId,
         conversationId: input.conversationId,
+        serviceSessionId: input.serviceSessionId,
         aiMode: input.aiMode,
         userMessage: input.userMessage,
+        ...(input.mediaInterpretations?.length
+          ? { mediaInterpretations: input.mediaInterpretations }
+          : {}),
         currentConversation: input.currentConversation,
       }),
     )

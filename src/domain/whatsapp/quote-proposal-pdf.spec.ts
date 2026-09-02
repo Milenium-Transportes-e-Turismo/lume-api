@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 
 import { describe, expect, it } from 'vitest';
 
-import { AppError } from '../../core/errors/app-error';
 import {
   type QuoteProposalPdfInput,
   validateQuoteProposalPdf,
@@ -24,7 +23,7 @@ function pdf(
 
 function expectValidationError(input: QuoteProposalPdfInput): void {
   expect(() => validateQuoteProposalPdf(input)).toThrowError(
-    expect.objectContaining<AppError>({ code: 'VALIDATION_ERROR' }),
+    expect.objectContaining({ code: 'VALIDATION_ERROR' }),
   );
 }
 

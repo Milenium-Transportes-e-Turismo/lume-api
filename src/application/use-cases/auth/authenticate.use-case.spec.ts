@@ -109,7 +109,7 @@ describe('authentication use cases', () => {
   it('does not accept CPF as a login identifier', async () => {
     await expect(
       authenticate.execute({
-        identifier: companyFixture.administrator.cpf,
+        identifier: companyFixture.administrator.cpf!,
         password: companyFixture.administrator.password,
         remember: false,
       }),

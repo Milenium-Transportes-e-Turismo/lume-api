@@ -555,7 +555,7 @@ describe('DocumentManagementUseCase.exportXlsx', () => {
       prisma as never,
     ).exportXlsx(principal, 'subject-id');
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(result.content);
+    await workbook.xlsx.load(result.content as never);
     const documents = workbook.getWorksheet('Documentos')!;
     const employee = workbook.getWorksheet('Dados do funcionário')!;
 

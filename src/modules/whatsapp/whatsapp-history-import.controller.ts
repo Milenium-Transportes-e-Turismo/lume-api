@@ -1,3 +1,5 @@
+import { mkdir } from 'node:fs/promises';
+
 import {
   Body,
   Controller,
@@ -28,8 +30,10 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import type { Response } from 'express';
+import { diskStorage } from 'multer';
 
 import type { AuthenticatedPrincipal } from '../../application/presenters/user.presenter';
+import { env } from '../../config/env';
 import { validationError } from '../../core/errors/app-error';
 import { WhatsAppHistoryImportService } from '../../infra/imports/whatsapp-history-import.service';
 import { CurrentUser } from '../../shared/http/decorators/current-user.decorator';
@@ -67,6 +71,22 @@ interface UploadedWhatsAppAndroidMediaChunk {
   size: number;
   buffer: Buffer;
 }
+
+const androidImportDiskStorage = diskStorage({
+  destination: (_request, _file, callback) => {
+    const directory = env.WHATSAPP_IMPORT_UPLOAD_TEMP_ROOT;
+    void mkdir(directory, { recursive: true }).then(
+      () => callback(null, directory),
+      (error: unknown) =>
+        callback(
+          error instanceof Error
+            ? error
+            : new Error('Não foi possível preparar o diretório de upload.'),
+          directory,
+        ),
+    );
+  },
+});
 
 function contentDisposition(fileName: string): string {
   const fallback =
@@ -228,9 +248,7 @@ export class WhatsAppHistoryImportController {
   @UseInterceptors(
     FileFieldsInterceptor([{ name: 'database', maxCount: 1 }], {
       limits: { files: 1, fileSize: 2_147_483_647 },
-      dest:
-        process.env.WHATSAPP_IMPORT_UPLOAD_TEMP_ROOT ??
-        'var/imports/whatsapp/incoming',
+      storage: androidImportDiskStorage,
     }),
   )
   @ApiConsumes('multipart/form-data')
@@ -361,9 +379,7 @@ export class WhatsAppHistoryImportController {
   @UseInterceptors(
     FileInterceptor('archive', {
       limits: { files: 1, fileSize: 512 * 1024 * 1024 },
-      dest:
-        process.env.WHATSAPP_IMPORT_UPLOAD_TEMP_ROOT ??
-        'var/imports/whatsapp/incoming',
+      storage: androidImportDiskStorage,
     }),
   )
   @ApiConsumes('multipart/form-data')

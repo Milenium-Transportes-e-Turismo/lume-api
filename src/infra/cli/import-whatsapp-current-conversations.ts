@@ -4,6 +4,7 @@ import { basename, dirname, resolve } from 'node:path';
 
 import { ConfigService } from '@nestjs/config';
 
+import { loadEnvironment } from '../../config/env';
 import { PrismaService } from '../database/prisma/prisma.service';
 import { WhatsAppImportService } from '../imports/whatsapp-import.service';
 
@@ -161,13 +162,15 @@ export async function runWhatsAppImportCli(
   argv = process.argv.slice(2),
 ): Promise<unknown> {
   const { command, values } = parseWhatsAppImportCliArgs(argv);
-  const prisma = new PrismaService(new ConfigService(process.env));
+  const validatedEnvironment = loadEnvironment();
+  const prisma = new PrismaService(new ConfigService(validatedEnvironment));
   await prisma.$connect();
   try {
-    const importsRoot =
-      process.env.WHATSAPP_IMPORT_ROOT ??
-      resolve(process.cwd(), 'var', 'imports', 'whatsapp');
-    const service = new WhatsAppImportService(prisma, importsRoot);
+    const service = new WhatsAppImportService(
+      prisma,
+      validatedEnvironment.WHATSAPP_IMPORT_ROOT,
+      validatedEnvironment.WHATSAPP_IMPORT_APPLY_CONCURRENCY,
+    );
     const companyId = required(values, 'company-id', 'companyId');
     if (command === 'reconcile') {
       return service.reconcile(

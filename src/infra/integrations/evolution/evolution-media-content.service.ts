@@ -16,6 +16,7 @@ import {
   validationError,
 } from '../../../core/errors/app-error';
 import {
+  MediaProcessingStatus,
   MessageDirection,
   MessageKind,
 } from '../../database/prisma/generated/client';
@@ -79,6 +80,9 @@ interface MediaMessageRow {
   readonly id: string;
   readonly companyId: string;
   readonly conversationId: string;
+  readonly channelId?: string | null;
+  readonly channel?: { readonly instanceName: string } | null;
+  readonly mediaAssetId: string | null;
   readonly providerMessageId: string | null;
   readonly direction: MessageDirection;
   readonly kind: MessageKind;
@@ -96,6 +100,38 @@ interface MediaMessageRow {
     readonly sizeBytes: number;
   } | null;
 }
+
+interface GroupMediaMessageRow {
+  readonly id: string;
+  readonly companyId: string;
+  readonly groupId: string;
+  readonly channelId?: string | null;
+  readonly channel?: { readonly instanceName: string } | null;
+  readonly mediaAssetId: string | null;
+  readonly providerMessageId: string | null;
+  readonly direction: MessageDirection;
+  readonly kind: MessageKind;
+  readonly media: unknown;
+  readonly mediaAsset: {
+    readonly storageKey: string | null;
+    readonly mimeType: string | null;
+    readonly originalName: string | null;
+    readonly sizeBytes: number | null;
+    readonly sha256: string | null;
+    readonly storedAt: Date | null;
+  } | null;
+}
+
+type EvolutionMediaMessage = Pick<
+  MediaMessageRow,
+  | 'id'
+  | 'channelId'
+  | 'channel'
+  | 'providerMessageId'
+  | 'direction'
+  | 'kind'
+  | 'media'
+>;
 
 export interface RetainWhatsAppMediaResult {
   readonly status: 'stored' | 'already-stored' | 'unavailable' | 'too-large';
@@ -281,7 +317,9 @@ export class EvolutionMediaContentService {
       /\/+$/,
       '',
     );
-    this.instanceName = config.get<string>('EVOLUTION_INSTANCE_NAME') ?? '';
+    this.instanceName = (
+      config.get<string>('EVOLUTION_INSTANCE_NAME') ?? ''
+    ).trim();
     this.apiKey = config.get<string>('EVOLUTION_API_KEY') ?? '';
     this.maximumBytes =
       config.get<number>('WHATSAPP_MAX_ATTACHMENT_BYTES') ?? 52_428_800;
@@ -362,6 +400,50 @@ export class EvolutionMediaContentService {
       messageId,
     );
     return this.retainEvolutionMedia(message);
+  }
+
+  async retainWebhookGroupMedia(
+    companyId: string,
+    groupMessageId: string,
+  ): Promise<RetainWhatsAppMediaResult> {
+    const message = await this.findGroupMessage(companyId, groupMessageId);
+    const messageId = message.id;
+    try {
+      const stored = await this.readStoredGroupContent(message);
+      if (stored) {
+        return {
+          status: 'already-stored',
+          messageId,
+          sizeBytes: stored.content.byteLength,
+          mimeType: stored.mimeType,
+        };
+      }
+      if (optionalObject(message.media)?.retentionStatus === 'too-large') {
+        await this.markGroupRetentionStatus(message, 'too-large');
+        return { status: 'too-large', messageId };
+      }
+      const media = await this.fetchEvolutionContent(message);
+      await this.persistGroupContent(message, media);
+      return {
+        status: 'stored',
+        messageId,
+        sizeBytes: media.content.byteLength,
+        mimeType: media.mimeType,
+      };
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'NOT_FOUND') {
+        await this.markGroupRetentionStatus(message, 'unavailable');
+        return { status: 'unavailable', messageId };
+      }
+      if (
+        error instanceof AppError &&
+        error.details?.retentionStatus === 'too-large'
+      ) {
+        await this.markGroupRetentionStatus(message, 'too-large');
+        return { status: 'too-large', messageId };
+      }
+      throw error;
+    }
   }
 
   private async retainEvolutionMedia(
@@ -459,12 +541,13 @@ export class EvolutionMediaContentService {
   }
 
   private async fetchEvolutionContent(
-    message: MediaMessageRow,
+    message: EvolutionMediaMessage,
   ): Promise<WhatsAppMediaContent> {
     if (!message.providerMessageId) {
       throw unavailableMedia();
     }
-    if (!this.baseUrl || !this.instanceName || !this.apiKey) {
+    const instanceName = this.resolveInstanceName(message);
+    if (!this.baseUrl || !instanceName || !this.apiKey) {
       throw externalServiceUnavailable(
         'A mídia não está disponível para recuperação neste momento.',
       );
@@ -473,7 +556,7 @@ export class EvolutionMediaContentService {
     let response: Response;
     try {
       response = await fetch(
-        `${this.baseUrl}/chat/getBase64FromMediaMessage/${encodeURIComponent(this.instanceName)}`,
+        `${this.baseUrl}/chat/getBase64FromMediaMessage/${encodeURIComponent(instanceName)}`,
         {
           method: 'POST',
           headers: {
@@ -544,6 +627,15 @@ export class EvolutionMediaContentService {
     };
   }
 
+  private resolveInstanceName(message: EvolutionMediaMessage): string {
+    const channelInstanceName = message.channel?.instanceName.trim();
+    if (channelInstanceName) return channelInstanceName;
+
+    // Rows without a channel predate the channel-aware route. A known channel
+    // with an unresolved instance fails closed to avoid cross-channel fetches.
+    return message.channelId ? '' : this.instanceName;
+  }
+
   private async persistContent(
     message: MediaMessageRow,
     media: WhatsAppMediaContent,
@@ -558,30 +650,157 @@ export class EvolutionMediaContentService {
     ].join('/');
     await this.storage.write({ storageKey, content: media.content });
 
-    const updated = await this.prisma.whatsAppMessage.updateMany({
+    const storedAt = new Date();
+    const updated = await this.prisma.$transaction(async (transaction) => {
+      const result = await transaction.whatsAppMessage.updateMany({
+        where: {
+          id: message.id,
+          companyId: message.companyId,
+          conversationId: message.conversationId,
+          direction: message.direction,
+        },
+        data: {
+          media: {
+            ...(optionalObject(message.media) ?? {}),
+            mimeType: media.mimeType,
+            size: media.content.byteLength,
+            fileName: media.fileName,
+            retentionStatus: 'stored',
+          },
+          mediaStorageKey: storageKey,
+          mediaMimeType: media.mimeType,
+          mediaSizeBytes: media.content.byteLength,
+          mediaOriginalName: media.fileName,
+          mediaSha256: sha256,
+          mediaStoredAt: storedAt,
+        },
+      });
+      if (message.mediaAssetId) {
+        await transaction.mediaAsset.updateMany({
+          where: {
+            id: message.mediaAssetId,
+            companyId: message.companyId,
+          },
+          data: {
+            status: MediaProcessingStatus.STORED,
+            storageKey,
+            mimeType: media.mimeType,
+            originalName: media.fileName,
+            sizeBytes: media.content.byteLength,
+            sha256,
+            storedAt,
+          },
+        });
+      }
+      return result;
+    });
+    if (updated.count !== 1) throw notFound('Mensagem de mídia');
+  }
+
+  private async readStoredGroupContent(
+    message: GroupMediaMessageRow,
+  ): Promise<WhatsAppMediaContent | null> {
+    const asset = message.mediaAsset;
+    if (
+      !asset?.storageKey ||
+      !asset.mimeType ||
+      !asset.sizeBytes ||
+      !asset.originalName ||
+      !asset.sha256 ||
+      !asset.storedAt
+    ) {
+      return null;
+    }
+    let content: Buffer;
+    try {
+      content = await this.storage.read(asset.storageKey);
+    } catch {
+      return null;
+    }
+    if (
+      content.byteLength !== asset.sizeBytes ||
+      createHash('sha256').update(content).digest('hex') !== asset.sha256 ||
+      !this.allowedMimeTypes.has(asset.mimeType) ||
+      !isMimeCompatible(message.kind, asset.mimeType)
+    ) {
+      return null;
+    }
+    return {
+      content,
+      fileName: asset.originalName,
+      mimeType: asset.mimeType,
+      kind: canonicalKind(message.kind, asset.mimeType),
+    };
+  }
+
+  private async persistGroupContent(
+    message: GroupMediaMessageRow,
+    media: WhatsAppMediaContent,
+  ): Promise<void> {
+    if (!message.mediaAssetId) throw notFound('Asset da mídia do grupo');
+    const sha256 = createHash('sha256').update(media.content).digest('hex');
+    const storageKey = [
+      'v1',
+      message.companyId,
+      message.groupId,
+      message.id,
+      sha256,
+    ].join('/');
+    await this.storage.write({ storageKey, content: media.content });
+    const storedAt = new Date();
+    const updated = await this.prisma.$transaction(async (transaction) => {
+      const result = await transaction.whatsAppGroupMessage.updateMany({
+        where: {
+          id: message.id,
+          companyId: message.companyId,
+          groupId: message.groupId,
+        },
+        data: {
+          media: {
+            ...(optionalObject(message.media) ?? {}),
+            mimeType: media.mimeType,
+            size: media.content.byteLength,
+            fileName: media.fileName,
+            retentionStatus: 'stored',
+          },
+        },
+      });
+      await transaction.mediaAsset.updateMany({
+        where: {
+          id: message.mediaAssetId ?? '',
+          companyId: message.companyId,
+        },
+        data: {
+          storageKey,
+          mimeType: media.mimeType,
+          originalName: media.fileName,
+          sizeBytes: media.content.byteLength,
+          sha256,
+          storedAt,
+        },
+      });
+      return result;
+    });
+    if (updated.count !== 1) throw notFound('Mensagem de mídia do grupo');
+  }
+
+  private async markGroupRetentionStatus(
+    message: GroupMediaMessageRow,
+    retentionStatus: 'stored' | 'unavailable' | 'too-large',
+  ): Promise<void> {
+    await this.prisma.whatsAppGroupMessage.updateMany({
       where: {
         id: message.id,
         companyId: message.companyId,
-        conversationId: message.conversationId,
-        direction: message.direction,
+        groupId: message.groupId,
       },
       data: {
         media: {
           ...(optionalObject(message.media) ?? {}),
-          mimeType: media.mimeType,
-          size: media.content.byteLength,
-          fileName: media.fileName,
-          retentionStatus: 'stored',
+          retentionStatus,
         },
-        mediaStorageKey: storageKey,
-        mediaMimeType: media.mimeType,
-        mediaSizeBytes: media.content.byteLength,
-        mediaOriginalName: media.fileName,
-        mediaSha256: sha256,
-        mediaStoredAt: new Date(),
       },
     });
-    if (updated.count !== 1) throw notFound('Mensagem de mídia');
   }
 
   private async markRetentionStatus(
@@ -602,6 +821,20 @@ export class EvolutionMediaContentService {
         },
       },
     });
+    if (message.mediaAssetId) {
+      await this.prisma.mediaAsset.updateMany({
+        where: {
+          id: message.mediaAssetId,
+          companyId: message.companyId,
+        },
+        data: {
+          status:
+            retentionStatus === 'stored'
+              ? MediaProcessingStatus.STORED
+              : MediaProcessingStatus.FAILED,
+        },
+      });
+    }
   }
 
   private proposalContent(message: MediaMessageRow): WhatsAppMediaContent {
@@ -642,6 +875,7 @@ export class EvolutionMediaContentService {
         },
       },
       include: {
+        channel: { select: { instanceName: true } },
         proposalDocument: {
           select: {
             content: true,
@@ -657,6 +891,32 @@ export class EvolutionMediaContentService {
       (!MEDIA_KINDS.has(message.kind) && !message.mediaStorageKey)
     ) {
       throw notFound('Conteúdo da mídia');
+    }
+    return message;
+  }
+
+  private async findGroupMessage(
+    companyId: string,
+    groupMessageId: string,
+  ): Promise<GroupMediaMessageRow> {
+    const message = await this.prisma.whatsAppGroupMessage.findFirst({
+      where: { id: groupMessageId, companyId },
+      include: {
+        channel: { select: { instanceName: true } },
+        mediaAsset: {
+          select: {
+            storageKey: true,
+            mimeType: true,
+            originalName: true,
+            sizeBytes: true,
+            sha256: true,
+            storedAt: true,
+          },
+        },
+      },
+    });
+    if (!message || !MEDIA_KINDS.has(message.kind)) {
+      throw notFound('Conteúdo da mídia do grupo');
     }
     return message;
   }

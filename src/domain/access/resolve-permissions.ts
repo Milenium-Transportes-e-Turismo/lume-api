@@ -1,6 +1,7 @@
 import {
   ALL_PERMISSION_CODES,
   EMPLOYEE_SELF_SERVICE_PERMISSIONS,
+  SERVICE_PERMISSION_CEILING,
   allowedPermissionsForDepartments,
   type PermissionCode,
   type SupportedUserDepartment,
@@ -24,7 +25,24 @@ export function resolveEffectivePermissions(
   documentAccessMode: 'standard' | 'document-portal' | 'client' = 'standard',
 ): PermissionCode[] {
   if (isAdministrator) {
-    return [...ALL_PERMISSION_CODES];
+    const servicePermissions = new Set<PermissionCode>(
+      SERVICE_PERMISSION_CEILING,
+    );
+    const administrativePermissions = ALL_PERMISSION_CODES.filter(
+      (permission) => !servicePermissions.has(permission),
+    );
+    const explicitlyGrantedServicePermissions =
+      filterPermissionCodesForDepartments(
+        departments,
+        individualPermissions,
+      ).filter((permission) => servicePermissions.has(permission));
+
+    return Array.from(
+      new Set([
+        ...administrativePermissions,
+        ...explicitlyGrantedServicePermissions,
+      ]),
+    ).sort();
   }
 
   if (documentAccessMode === 'document-portal') {

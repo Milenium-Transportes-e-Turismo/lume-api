@@ -11,8 +11,15 @@ const input: WhatsAppConversationAgentInput = {
   correlationId: 'evolution:source-1',
   companyId: '00000000-0000-4000-8000-000000000001',
   conversationId: '00000000-0000-4000-8000-000000000002',
+  serviceSessionId: '00000000-0000-4000-8000-000000000004',
   aiMode: 'eventual-quote',
   userMessage: 'Preciso de um orçamento.',
+  mediaInterpretations: [
+    {
+      interpretationId: '00000000-0000-4000-8000-000000000099',
+      effectiveSource: 'human',
+    },
+  ],
   currentConversation: null,
 };
 
@@ -38,8 +45,10 @@ function persistedDecision() {
           sourceEventId: input.sourceEventId,
           companyId: input.companyId,
           conversationId: input.conversationId,
+          serviceSessionId: input.serviceSessionId,
           aiMode: input.aiMode,
           userMessage: input.userMessage,
+          mediaInterpretations: input.mediaInterpretations,
           currentConversation: input.currentConversation,
         }),
       )
@@ -47,6 +56,8 @@ function persistedDecision() {
     provider: 'openai',
     model: 'test-model',
     aiAttempt: 1,
+    actorAgentId: null,
+    agentExecutionId: null,
     output,
   };
 }

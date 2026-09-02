@@ -9,6 +9,7 @@ import {
   DEFAULT_REGISTRATION_ROLES,
   DEFAULT_REGISTRATION_TAGS,
 } from '../../../domain/registrations/registration';
+import { ensurePlatformAgentCatalog } from '../../agents/platform-agent-persistence';
 import {
   DepartmentCode,
   DocumentAccessMode,
@@ -83,6 +84,7 @@ export class PrismaTenantBootstrapRepository implements TenantBootstrapRepositor
             status: UserAccountStatus.ACTIVE,
           },
         });
+        await ensurePlatformAgentCatalog(transaction, input.company.id);
         await transaction.tenantAuditLog.create({
           data: {
             companyId: input.company.id,

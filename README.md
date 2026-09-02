@@ -20,6 +20,8 @@ instalação, seu próprio PostgreSQL e seus próprios backups.
 - conversas, mensagens, solicitações e transições isoladas por tenant;
 - inbox/outbox confiáveis, concorrência otimista e retenção configurável.
 - cópia durável de mídias recebidas em volume próprio, isolada por tenant.
+- Knowledge Base versionada, com publicação humana, vigência, scopes e originais
+  privados preservados.
 
 O projeto não possui master global, operadores da fornecedora ou cadastro de
 outros tenants. Uma instalação aceita exatamente um tenant.
@@ -53,9 +55,64 @@ bootstrap. Remova `TENANT_ADMIN_PASSWORD` do ambiente depois da criação.
 A API usa `http://localhost:3333/api/v1`. O Swagger local fica em
 `http://localhost:3333/docs`.
 
+### Configuração validada
+
+O schema Zod central em `src/config/env.ts` valida e normaliza o ambiente antes
+de qualquer provider do Nest ser inicializado. O `ConfigModule` continua global
+e entrega as mesmas chaves planas ao `ConfigService`, portanto os serviços e as
+CLIs existentes não precisam conhecer a origem da configuração. `NODE_ENV` usa
+`development` e `PORT` usa `3000` quando não forem informados; o `.env.example`
+define `3333` explicitamente para manter a porta local documentada acima.
+
+O carregamento local por `.env` continua suportado. Em containers, a mesma
+aplicação pode receber as chaves diretamente em `process.env`, injetadas pelo
+orquestrador ou por um secret manager, sem criar arquivo em disco. Variáveis
+desconhecidas são preservadas para consumidores e CLIs legados, enquanto todas
+as chaves conhecidas mantêm coerção, defaults e travas de produção. Uma falha de
+validação interrompe a inicialização antes de abrir a porta HTTP.
+
+Segredos permanecem exclusivamente server-side: não imprima o objeto `env`, não
+o serialize em respostas e não envie chaves ao frontend. Configurações futuras
+de agentes devem resolver uma credencial individual por agente no secret
+manager; uma chave global compartilhada não é uma alternativa segura. Nesta
+entrega, o único adapter registrado é o da OpenAI.
+
+O runtime aceita referências `env://NOME_EXATO_DA_VARIAVEL` e
+`docker-secret://caminho/relativo`. Docker secrets são lidos somente dentro de
+`AGENT_DOCKER_SECRETS_ROOT` (por padrão, `/run/secrets`) e o caminho canônico não
+pode escapar dessa raiz. Referências `secret://` ou `vault://` permanecem
+inválidas até existir um adapter server-side explícito; nunca ocorre fallback
+para a chave de outro agente.
+
+O adapter atualmente registrado usa `POST /v1/responses` da OpenAI, com
+`store=false` e `AGENT_OPENAI_RESPONSES_TIMEOUT_MS` (30 segundos por padrão).
+O gateway não oferece web search, file search, MCP ou outra ferramenta
+embutida: ele aceita somente funções previamente liberadas pela policy, sempre
+com JSON Schema estrito. Modelo e `credentialRef` pertencem ao runtime de cada
+agente e não possuem fallback global. O roteamento ocorre por um registry para
+que adapters futuros possam ser acrescentados sem mudar esses limites.
+
+Function calls são reautorizadas com seus argumentos reais e executadas por
+allow-list interna. Cada transição fica em `AgentToolCall`, sem argumentos, PII
+ou segredos. Um resultado limitado volta como dado não confiável em uma única
+segunda chamada ao mesmo runtime com `tools=[]`; não se usa
+`previous_response_id`. Negação/falha não é apresentada como sucesso e, depois
+de iniciar a fase de tools, não há troca de runtime. O bootstrap idempotente
+deve ser rerodado em tenants existentes para atualizar definitions e vínculos
+do catálogo.
+
+O especialista de Knowledge recebe exclusivamente as funções server-side
+`knowledge_gap_observe` e `knowledge_suggestion_create`. Elas derivam tenant,
+sessão, execução e evidências inbound no servidor; retornam somente resultados
+redigidos. Lacunas são observadas por tópico normalizado e sugestões nascem
+sempre `pending`, exigindo revisão humana. Nenhuma delas publica, aprende da
+conversa ou habilita internet automaticamente.
+
 Para habilitar WhatsApp, preencha os blocos `WHATSAPP_*`, `EVOLUTION_*` e as
-chaves `WHATSAPP_AI_*`
-do ambiente antes de executar o bootstrap idempotente. O contrato completo,
+sete credenciais individuais `LUME_AGENT_*_OPENAI_API_KEY` do ambiente antes
+de executar o bootstrap idempotente. `WHATSAPP_AI_*` permanece apenas como
+compatibilidade de configuração legada e não alimenta o runtime dos agentes.
+O contrato completo,
 matriz de estados, assinaturas e endpoints está em
 [`docs/whatsapp-mvp.md`](docs/whatsapp-mvp.md).
 A consolidação, o proxy seguro de mídia e o checklist operacional estão em
@@ -133,6 +190,34 @@ não confundir administração global com o departamento Gerência.
 Os dados permanecem no PostgreSQL do cliente. O banco deve receber backup,
 monitoramento e política de retenção próprios. Sessões não devem ser exportadas
 em uma migração para outro fornecedor.
+
+### Administração segura de agentes
+
+`GET /api/v1/agents` e `GET /api/v1/agents/:agentId/executions` são consultas
+isoladas pelo tenant. Elas mostram status, modelo, provider e somente o
+versionamento técnico necessário; nunca retornam `credentialIdentifier`,
+`credentialRef` ou API key.
+`POST /api/v1/agents/:agentId/tenant-instructions` cria uma nova versão das
+instruções do tenant com `commandId`, `expectedVersion` e auditoria. A rota não
+altera nem substitui system prompt ou platform prompt.
+
+OpenAI é o único adapter de modelo registrado agora, sem seletor de provider na
+interface. O runtime usa um registry de adapters para manter a extensão futura
+explícita, mas a Tenant API não expõe mutação de provider, modelo, runtime ou
+credencial: o modelo de autorização atual não possui um papel separado de
+administrador da plataforma. Essas mudanças técnicas devem continuar em uma
+superfície de controle própria antes de serem habilitadas.
+
+### Knowledge Base
+
+As rotas `/api/v1/knowledge/*` permitem criar bases, artigos e uploads em draft,
+versionar/publicar sem sobrescrever versões anteriores, arquivar sem delete e
+revisar sugestões/gaps. O tenant vem sempre do JWT; scopes de departamento são
+revalidados no banco. TXT, CSV, XLSX e DOCX possuem extração local limitada.
+PDF textual também é extraído localmente com limites, rede/JavaScript
+desabilitados e provenance por página; PDF somente com imagem exige OCR, que não
+faz parte desta entrega. O contrato e o runbook estão em
+[docs/knowledge-base.md](docs/knowledge-base.md).
 
 ### Orçamentos com horário opcional
 
@@ -235,3 +320,5 @@ WhatsApp atuais pela interface ou por CLI está em
 [whatsapp-conversation-import.md](docs/whatsapp-conversation-import.md). O
 runbook da migração controlada da automação está em
 [whatsapp-automation-migration.md](docs/whatsapp-automation-migration.md).
+O ciclo completo da Knowledge Base está em
+[knowledge-base.md](docs/knowledge-base.md).

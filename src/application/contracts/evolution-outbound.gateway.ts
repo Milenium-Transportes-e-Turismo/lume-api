@@ -3,6 +3,10 @@ export type EvolutionTextPayloadMode =
 
 interface EvolutionOutboundBaseInput {
   readonly recipientPhone: string;
+  /** Channel identity is propagated so a known channel never falls back silently. */
+  readonly sourceChannelId?: string;
+  /** Evolution instance resolved from the persisted source channel. */
+  readonly instanceName?: string;
 }
 
 export interface EvolutionOutboundTextInput extends EvolutionOutboundBaseInput {

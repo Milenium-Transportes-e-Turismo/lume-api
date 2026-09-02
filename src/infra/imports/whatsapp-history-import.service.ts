@@ -826,6 +826,7 @@ export class WhatsAppHistoryImportService
   private readonly androidDatabaseUploadChunkBytes: number;
   private readonly androidMediaUploadChunkBytes: number;
   private readonly androidImportChunkMessages: number;
+  private readonly applyConcurrency: number;
   private readonly instanceId = randomUUID();
   private readonly leaseMs: number;
   private readonly recoveryIntervalMs: number;
@@ -900,6 +901,10 @@ export class WhatsAppHistoryImportService
         1_000,
         finiteConfig(config, 'WHATSAPP_ANDROID_IMPORT_CHUNK_MESSAGES', 25_000),
       ),
+    );
+    this.applyConcurrency = Math.min(
+      8,
+      Math.max(1, finiteConfig(config, 'WHATSAPP_IMPORT_APPLY_CONCURRENCY', 4)),
     );
     this.leaseMs =
       finiteConfig(config, 'WHATSAPP_HISTORY_IMPORT_LEASE_SECONDS', 900) *
@@ -2336,7 +2341,11 @@ export class WhatsAppHistoryImportService
         'modelo-importacao-atendimentos-whatsapp.xlsx',
       );
       await writeFile(workbookPath, generated.content, { mode: 0o600 });
-      const importer = new WhatsAppImportService(this.prisma, this.root);
+      const importer = new WhatsAppImportService(
+        this.prisma,
+        this.root,
+        this.applyConcurrency,
+      );
       const batchName = `historico-whatsapp-${batchId}`;
       const importInput = {
         companyId,
@@ -2905,7 +2914,11 @@ export class WhatsAppHistoryImportService
         'msgstore.db',
       );
       assertInside(this.batchPath(companyId, batchId), databasePath);
-      const importer = new WhatsAppImportService(this.prisma, this.root);
+      const importer = new WhatsAppImportService(
+        this.prisma,
+        this.root,
+        this.applyConcurrency,
+      );
       const newIdsPath = resolve(
         this.batchPath(companyId, batchId),
         'android',

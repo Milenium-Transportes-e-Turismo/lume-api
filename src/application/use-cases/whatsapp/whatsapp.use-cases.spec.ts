@@ -10,6 +10,7 @@ import {
   type CreateOutboundInput,
   type EvolutionResultInput,
   type MessageListQuery,
+  type PersistWebhookMessageResult,
   type PersistWebhookMessageInput,
   type QuoteProposalListQuery,
   type QuoteRequestPatch,
@@ -43,13 +44,77 @@ class RecordingWhatsAppRepository extends WhatsAppRepository {
     this.calls.push('findWebhookChannel');
     return null;
   }
-  async persistWebhookMessage(_input: PersistWebhookMessageInput) {
+  async persistWebhookMessage(
+    _input: PersistWebhookMessageInput,
+  ): Promise<PersistWebhookMessageResult> {
     this.calls.push('persistWebhookMessage');
-    return { operation: 'persistWebhookMessage' };
+    return {
+      accepted: true,
+      duplicate: false,
+      messageId: 'message',
+      conversationId: 'conversation',
+    };
+  }
+  async persistWebhookGroupMessage() {
+    this.calls.push('persistWebhookGroupMessage');
+    return {
+      accepted: true as const,
+      duplicate: false,
+      groupId: '00000000-0000-4000-8000-000000000010',
+      groupMessageId: '00000000-0000-4000-8000-000000000011',
+      conversationId: null,
+      threadId: null,
+      serviceSessionId: null,
+      automationAllowed: false as const,
+      canGenerateReply: false as const,
+      canSendReply: false as const,
+    };
+  }
+  async syncWebhookGroup() {
+    this.calls.push('syncWebhookGroup');
+    return { operation: 'syncWebhookGroup' };
+  }
+  async assertAutomaticReplyAllowed() {
+    this.calls.push('assertAutomaticReplyAllowed');
+    return {
+      allowed: true as const,
+      threadId: '00000000-0000-4000-8000-000000000012',
+      serviceSessionId: '00000000-0000-4000-8000-000000000013',
+      serviceSessionVersion: 1,
+    };
+  }
+  async getPendingContinuityClassification() {
+    this.calls.push('getPendingContinuityClassification');
+    return null;
+  }
+  async applyContinuityClassification() {
+    this.calls.push('applyContinuityClassification');
+    return {
+      serviceSessionId: '00000000-0000-4000-8000-000000000013',
+      version: 2,
+      classification: 'uncertain' as const,
+      idempotent: false,
+    };
+  }
+  async processServiceSessionLifecycle() {
+    this.calls.push('processServiceSessionLifecycle');
+    return { closingStarted: 0, closed: 0, skipped: 0 };
   }
   async transition(_input: TransitionCommand) {
     this.calls.push('transition');
     return { operation: 'transition' };
+  }
+  async ensureConversationForPhone(
+    _companyId: string,
+    _phoneNormalized: string,
+  ) {
+    this.calls.push('ensureConversationForPhone');
+    return {
+      id: 'conversation',
+      version: 1,
+      conversationState: 'bot-active' as const,
+      assignedTo: null,
+    };
   }
   async patchQuoteRequest(
     _companyId: string,
@@ -78,6 +143,10 @@ class RecordingWhatsAppRepository extends WhatsAppRepository {
   async markEvolutionDispatchUnknown() {
     this.calls.push('markEvolutionDispatchUnknown');
     return { operation: 'markEvolutionDispatchUnknown' };
+  }
+  async completeOutboxExecution() {
+    this.calls.push('completeOutboxExecution');
+    return { operation: 'completeOutboxExecution' };
   }
   async reconcileAutomationOutbox(_input: ReconcileAutomationOutboxInput) {
     this.calls.push('reconcileAutomationOutbox');
@@ -199,6 +268,7 @@ describe('casos de uso WhatsApp', () => {
     });
     await new CreateOutboundWhatsAppUseCase(repository).execute({
       ...common,
+      expectedVersion: 1,
       automatic: true,
       kind: 'text',
       text: 'Olá',
@@ -215,6 +285,7 @@ describe('casos de uso WhatsApp', () => {
       messageId: 'message',
       attemptId: 'attempt',
       commandId: 'command',
+      ownerId: 'owner',
     });
     await new RecordEvolutionResultUseCase(repository).execute({
       companyId: 'company',

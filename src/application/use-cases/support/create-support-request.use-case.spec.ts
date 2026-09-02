@@ -4,7 +4,6 @@ import {
   SupportRequestNotifier,
   type SupportRequestNotification,
 } from '../../contracts/notifications';
-import { AppError } from '../../../core/errors/app-error';
 import { CreateSupportRequestUseCase } from './create-support-request.use-case';
 
 class RecordingNotifier extends SupportRequestNotifier {
@@ -72,7 +71,7 @@ describe('CreateSupportRequestUseCase', () => {
       { create: vi.fn() },
     );
 
-    await expect(useCase.execute(input())).rejects.toMatchObject<AppError>({
+    await expect(useCase.execute(input())).rejects.toMatchObject({
       code: 'EMAIL_DELIVERY_UNAVAILABLE',
       details: expect.objectContaining({ fallbackAllowed: true }),
     });
@@ -88,7 +87,7 @@ describe('CreateSupportRequestUseCase', () => {
       { create },
     );
 
-    await expect(useCase.execute(input())).rejects.toMatchObject<AppError>({
+    await expect(useCase.execute(input())).rejects.toMatchObject({
       code: 'SUPPORT_EMAIL_DELIVERY_FAILED',
       details: expect.objectContaining({
         failureCode: 'HTTP_403',
@@ -119,7 +118,7 @@ describe('CreateSupportRequestUseCase', () => {
       ),
       { create: vi.fn().mockRejectedValue(new Error('audit unavailable')) },
     );
-    await expect(failed.execute(input())).rejects.toMatchObject<AppError>({
+    await expect(failed.execute(input())).rejects.toMatchObject({
       code: 'SUPPORT_EMAIL_DELIVERY_FAILED',
       details: expect.objectContaining({
         failureCode: 'HTTP_503',

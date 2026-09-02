@@ -5,7 +5,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { WhatsAppRepository } from '../../../application/contracts/whatsapp.repository';
 import { MILENIUM_INTERNAL_PHONE_ENV_KEYS } from '../../../domain/whatsapp/whatsapp-internal-phones';
-import type { EvolutionMediaContentService } from './evolution-media-content.service';
+import type {
+  EvolutionMediaContentService,
+  RetainWhatsAppMediaResult,
+} from './evolution-media-content.service';
 import type { EvolutionProfilePictureService } from './evolution-profile-picture.service';
 import { EvolutionWebhookService } from './evolution-webhook.service';
 
@@ -33,16 +36,40 @@ function createSubject(configOverrides: Record<string, unknown> = {}) {
       messageId,
       conversationId,
     })),
+    persistWebhookGroupMessage: vi.fn(async () => ({
+      accepted: true as const,
+      duplicate: false,
+      groupId: '00000000-0000-4000-8000-000000000020',
+      groupMessageId: '00000000-0000-4000-8000-000000000021',
+      conversationId: null,
+      threadId: null,
+      serviceSessionId: null,
+      automationAllowed: false as const,
+      canGenerateReply: false as const,
+      canSendReply: false as const,
+    })),
+    syncWebhookGroup: vi.fn(async () => ({
+      accepted: true,
+      duplicate: false,
+      groupId: '00000000-0000-4000-8000-000000000020',
+      aiMode: 'off',
+    })),
   };
   const mediaContent = {
     retainInbound: vi.fn(async () => ({
       status: 'stored' as const,
       messageId,
     })),
-    retainWebhookMedia: vi.fn(async () => ({
-      status: 'stored' as const,
+    retainWebhookMedia: vi.fn(async (): Promise<RetainWhatsAppMediaResult> => ({
+      status: 'stored',
       messageId,
     })),
+    retainWebhookGroupMedia: vi.fn(
+      async (): Promise<RetainWhatsAppMediaResult> => ({
+        status: 'stored',
+        messageId: '00000000-0000-4000-8000-000000000021',
+      }),
+    ),
   };
   const profilePictures = {
     get: vi.fn(async () => 'https://media.example.test/profile.jpg'),
@@ -322,5 +349,135 @@ describe('EvolutionWebhookService outbound history', () => {
       messageId,
     );
     expect(mediaContent.retainInbound).not.toHaveBeenCalled();
+  });
+});
+
+describe('EvolutionWebhookService group synchronization', () => {
+  it('preserva mensagem de grupo em infraestrutura separada mesmo com a flag legada de ignoreGroups', async () => {
+    const { subject, repository, mediaContent, profilePictures } =
+      createSubject();
+    repository.findWebhookChannel.mockResolvedValueOnce({
+      id: channelId,
+      companyId,
+      instanceName: 'lume',
+      webhookSecretHash: createHash('sha256').update(secret).digest('hex'),
+      ignoreGroups: true,
+      ignoreFromMe: false,
+      enabled: true,
+    });
+    const body = {
+      event: 'messages.upsert',
+      instance: 'lume',
+      data: {
+        key: {
+          id: 'provider-group-message',
+          remoteJid: '120363000000000000@g.us',
+          participant: '5534999999999@s.whatsapp.net',
+          fromMe: false,
+        },
+        pushName: 'Participante',
+        subject: 'Grupo operacional',
+        messageTimestamp: Math.floor(now.valueOf() / 1_000),
+        message: { conversation: 'Mensagem interna do grupo' },
+      },
+    };
+
+    await expect(handle(subject, body)).resolves.toMatchObject({
+      accepted: true,
+      conversationId: null,
+      threadId: null,
+      serviceSessionId: null,
+      automationAllowed: false,
+    });
+    expect(repository.persistWebhookGroupMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        groupWhatsappId: '120363000000000000@g.us',
+        groupDisplayName: 'Grupo operacional',
+        participant: expect.objectContaining({
+          whatsappId: '5534999999999@s.whatsapp.net',
+          phoneNormalized: '5534999999999',
+        }),
+      }),
+    );
+    expect(repository.persistWebhookMessage).not.toHaveBeenCalled();
+    expect(mediaContent.retainWebhookMedia).not.toHaveBeenCalled();
+    expect(profilePictures.get).not.toHaveBeenCalled();
+  });
+
+  it('sincroniza participantes mesmo com ignoreGroups legado e mantém a IA fora do fluxo', async () => {
+    const { subject, repository } = createSubject();
+    repository.findWebhookChannel.mockResolvedValueOnce({
+      id: channelId,
+      companyId,
+      instanceName: 'lume',
+      webhookSecretHash: createHash('sha256').update(secret).digest('hex'),
+      ignoreGroups: true,
+      ignoreFromMe: false,
+      enabled: true,
+    });
+    const body = {
+      event: 'group-participants.update',
+      instance: 'lume',
+      data: {
+        id: '120363000000000000@g.us',
+        action: 'add',
+        participants: [
+          {
+            id: '5534999999999@s.whatsapp.net',
+            name: 'Participante',
+            admin: false,
+          },
+        ],
+      },
+    };
+
+    await expect(handle(subject, body)).resolves.toMatchObject({
+      accepted: true,
+      groupSync: true,
+    });
+    expect(repository.syncWebhookGroup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        whatsappId: '120363000000000000@g.us',
+        participants: [
+          expect.objectContaining({
+            whatsappId: '5534999999999@s.whatsapp.net',
+          }),
+        ],
+      }),
+    );
+    expect(repository.persistWebhookMessage).not.toHaveBeenCalled();
+  });
+
+  it('preserva mídia de grupo sem criar conversa, sessão ou automação', async () => {
+    const { subject, repository, mediaContent } = createSubject();
+    repository.findWebhookChannel.mockResolvedValueOnce({
+      id: channelId,
+      companyId,
+      instanceName: 'lume',
+      webhookSecretHash: createHash('sha256').update(secret).digest('hex'),
+      ignoreGroups: false,
+      ignoreFromMe: false,
+      enabled: true,
+    });
+    const body = videoWebhook(2_500_000);
+    body.data.key.remoteJid = '120363000000000000@g.us';
+    Object.assign(body.data.key, {
+      participant: '5534999999999@s.whatsapp.net',
+    });
+
+    await expect(handle(subject, body)).resolves.toMatchObject({
+      accepted: true,
+      mediaRetention: 'stored',
+      conversationId: null,
+      threadId: null,
+      serviceSessionId: null,
+      automationAllowed: false,
+    });
+    expect(mediaContent.retainWebhookGroupMedia).toHaveBeenCalledWith(
+      companyId,
+      '00000000-0000-4000-8000-000000000021',
+    );
+    expect(mediaContent.retainWebhookMedia).not.toHaveBeenCalled();
+    expect(repository.persistWebhookMessage).not.toHaveBeenCalled();
   });
 });

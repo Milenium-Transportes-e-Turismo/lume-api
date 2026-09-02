@@ -3,8 +3,12 @@ import { describe, expect, it } from 'vitest';
 import {
   ALL_PERMISSION_CODES,
   ASSIGNABLE_DEPARTMENTS,
+  CHANNEL_PERMISSION_CEILING,
   DEFAULT_DEPARTMENT_PERMISSIONS,
+  KNOWLEDGE_PERMISSION_CEILING,
   MANAGEMENT_DEPARTMENT_PERMISSIONS,
+  SERVICE_PERMISSION_CEILING,
+  allowedPermissionsForDepartments,
 } from './access.constants';
 import { resolveEffectivePermissions } from './resolve-permissions';
 
@@ -45,12 +49,53 @@ describe('resolveEffectivePermissions', () => {
     expect(permissions).not.toContain('license:view');
   });
 
-  it('grants the full current catalog only to an explicit administrator', () => {
-    expect(resolveEffectivePermissions([], [], true)).toEqual(
-      ALL_PERMISSION_CODES,
+  it('does not grant operational attendance merely because a user is administrator', () => {
+    const administrative = resolveEffectivePermissions([], [], true);
+
+    expect(administrative).toContain('whatsapp-channels:manage');
+    expect(administrative).not.toEqual(
+      expect.arrayContaining([...SERVICE_PERMISSION_CEILING]),
     );
+    expect(
+      resolveEffectivePermissions(
+        ['commercial'],
+        SERVICE_PERMISSION_CEILING,
+        true,
+      ),
+    ).toEqual(expect.arrayContaining([...SERVICE_PERMISSION_CEILING]));
     expect(resolveEffectivePermissions([], ['users:manage'])).not.toContain(
       'users:manage',
+    );
+  });
+
+  it('separates attendance permissions from channel infrastructure', () => {
+    const commercialCeiling = allowedPermissionsForDepartments(['commercial']);
+
+    expect(commercialCeiling).toEqual(
+      expect.arrayContaining([
+        ...SERVICE_PERMISSION_CEILING,
+        ...KNOWLEDGE_PERMISSION_CEILING,
+      ]),
+    );
+    expect(commercialCeiling).not.toEqual(
+      expect.arrayContaining([...CHANNEL_PERMISSION_CEILING]),
+    );
+  });
+
+  it('reserves channel lifecycle permissions for infrastructure authority', () => {
+    const technologyCeiling = allowedPermissionsForDepartments([
+      'information-technology',
+    ]);
+    const clientCeiling = allowedPermissionsForDepartments(['client-company']);
+
+    expect(technologyCeiling).toEqual(
+      expect.arrayContaining([...CHANNEL_PERMISSION_CEILING]),
+    );
+    expect(clientCeiling).not.toEqual(
+      expect.arrayContaining([...SERVICE_PERMISSION_CEILING]),
+    );
+    expect(clientCeiling).not.toEqual(
+      expect.arrayContaining([...KNOWLEDGE_PERMISSION_CEILING]),
     );
   });
 
@@ -58,7 +103,6 @@ describe('resolveEffectivePermissions', () => {
     for (const department of ASSIGNABLE_DEPARTMENTS) {
       if (
         department === 'management' ||
-        department === 'human-resources' ||
         department === 'personnel-department' ||
         department === 'information-technology'
       ) {

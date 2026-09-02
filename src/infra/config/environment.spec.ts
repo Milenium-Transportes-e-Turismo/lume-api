@@ -1,8 +1,9 @@
 import { resolve } from 'node:path';
 
+import { ConfigService } from '@nestjs/config';
 import { describe, expect, it } from 'vitest';
 
-import { validateEnvironment } from './environment';
+import { env, loadEnvironment, validateEnvironment } from '../../config/env';
 
 const validEnvironment = {
   NODE_ENV: 'test',
@@ -18,6 +19,22 @@ const productionEmailEnvironment = {
   RESEND_API_KEY: 're_test_key_with_enough_characters',
   RESEND_FROM_EMAIL: 'no-reply@example.test',
   RESEND_FROM_NAME: 'Lume',
+  KNOWLEDGE_STORAGE_PATH: resolve('var', 'knowledge-test'),
+};
+const validAgentEnvironment = {
+  LUME_AGENT_ORCHESTRATOR_OPENAI_API_KEY:
+    'orchestrator-openai-key-with-enough-length',
+  LUME_AGENT_CUSTOMER_SERVICE_OPENAI_API_KEY:
+    'customer-service-openai-key-with-enough-length',
+  LUME_AGENT_REGISTRATION_OPENAI_API_KEY:
+    'registration-openai-key-with-enough-length',
+  LUME_AGENT_KNOWLEDGE_OPENAI_API_KEY:
+    'knowledge-openai-key-with-enough-length',
+  LUME_AGENT_MEDIA_OPENAI_API_KEY: 'media-openai-key-with-enough-length',
+  LUME_AGENT_CONTINUITY_OPENAI_API_KEY:
+    'continuity-openai-key-with-enough-length',
+  LUME_AGENT_SUPERVISOR_OPENAI_API_KEY:
+    'supervisor-openai-key-with-enough-length',
 };
 const validWhatsAppEnvironment = {
   WHATSAPP_ENABLED: 'true',
@@ -29,7 +46,7 @@ const validWhatsAppEnvironment = {
   EVOLUTION_INSTANCE_NAME: 'lume',
   EVOLUTION_API_KEY: 'evolution-key-with-16-characters',
   EVOLUTION_WEBHOOK_SECRET: 'evolution-secret-with-32-characters',
-  WHATSAPP_AI_OPENAI_API_KEY: 'openai-key-with-at-least-20-characters',
+  ...validAgentEnvironment,
   MILENIUM_DIRECTOR_PHONE: '5534999999900',
   MILENIUM_DEPARTMENT_PURCHASES_PHONE: '5534999999901',
   MILENIUM_DEPARTMENT_CONTROLLING_PHONE: '5534999999902',
@@ -47,7 +64,8 @@ describe('validateEnvironment', () => {
   it('normalizes defaults required by an autonomous tenant', () => {
     expect(validateEnvironment(validEnvironment)).toMatchObject({
       NODE_ENV: 'test',
-      PORT: 3333,
+      PORT: 3000,
+      TENANT_API_PUBLIC_URL: 'http://localhost:3000/api/v1',
       DATABASE_TRANSACTION_MAX_WAIT_MS: 15_000,
       DATABASE_TRANSACTION_TIMEOUT_MS: 60_000,
       JWT_ACCESS_TTL_SECONDS: 900,
@@ -55,6 +73,20 @@ describe('validateEnvironment', () => {
       JWT_REFRESH_REMEMBER_TTL_DAYS: 30,
       HTTP_MAX_JSON_BODY_BYTES: 1_048_576,
       WHATSAPP_PANEL_MAX_ATTACHMENT_BYTES: 104_857_600,
+      WHATSAPP_IMPORT_ROOT: resolve('var', 'imports', 'whatsapp'),
+      WHATSAPP_IMPORT_UPLOAD_TEMP_ROOT: resolve(
+        'var',
+        'imports',
+        'whatsapp',
+        'incoming',
+      ),
+      WHATSAPP_IMPORT_APPLY_CONCURRENCY: 4,
+      WHATSAPP_ANDROID_BACKUP_MAX_DECRYPTED_BYTES: 4_294_967_296,
+      WHATSAPP_HISTORY_IMPORT_MAX_ARCHIVES: 5_000,
+      EVOLUTION_PROFILE_PICTURE_TIMEOUT_MS: 5_000,
+      EVOLUTION_PROFILE_PICTURE_CACHE_TTL_MS: 3_600_000,
+      KNOWLEDGE_STORAGE_DRIVER: 'filesystem',
+      KNOWLEDGE_STORAGE_PATH: resolve('var', 'knowledge'),
       PASSWORD_RESET_MIN_RESPONSE_MS: 750,
       INSTALLATION_ID: validEnvironment.INSTALLATION_ID,
       SWAGGER_ENABLED: true,
@@ -65,6 +97,68 @@ describe('validateEnvironment', () => {
       TOLL_INTELLIGENCE_ENABLED: false,
       TOLL_INTELLIGENCE_OPENAI_MODEL: 'gpt-5.4-mini',
     });
+  });
+
+  it('requires a private absolute knowledge storage path in production', () => {
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        NODE_ENV: 'production',
+        ...productionEmailEnvironment,
+        CORS_ORIGINS: 'https://tenant.example.test',
+        KNOWLEDGE_STORAGE_PATH: '',
+      }),
+    ).toThrow('KNOWLEDGE_STORAGE_PATH');
+
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        KNOWLEDGE_STORAGE_DRIVER: 'object-store',
+      }),
+    ).toThrow('KNOWLEDGE_STORAGE_DRIVER');
+  });
+
+  it('loads typed defaults from an in-memory environment without breaking ConfigService', () => {
+    const parsed = loadEnvironment({
+      ...validEnvironment,
+      NODE_ENV: undefined,
+      WHATSAPP_IMPORT_ROOT: './runtime/imports',
+    });
+    const config = new ConfigService(parsed);
+
+    expect(parsed).toMatchObject({
+      NODE_ENV: 'development',
+      PORT: 3000,
+      WHATSAPP_IMPORT_ROOT: resolve('runtime', 'imports'),
+    });
+    expect(env.NODE_ENV).toBe('development');
+    expect(env.PORT).toBe(3000);
+    expect(config.getOrThrow<number>('PORT')).toBe(3000);
+    expect(config.getOrThrow<string>('WHATSAPP_IMPORT_ROOT')).toBe(
+      resolve('runtime', 'imports'),
+    );
+  });
+
+  it('coerces and rejects centralized import limits before services start', () => {
+    expect(
+      validateEnvironment({
+        ...validEnvironment,
+        WHATSAPP_IMPORT_APPLY_CONCURRENCY: '8',
+        WHATSAPP_HISTORY_IMPORT_MAX_ARCHIVES: '250',
+        EVOLUTION_PROFILE_PICTURE_TIMEOUT_MS: '7000',
+      }),
+    ).toMatchObject({
+      WHATSAPP_IMPORT_APPLY_CONCURRENCY: 8,
+      WHATSAPP_HISTORY_IMPORT_MAX_ARCHIVES: 250,
+      EVOLUTION_PROFILE_PICTURE_TIMEOUT_MS: 7_000,
+    });
+
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        WHATSAPP_ANDROID_MEDIA_ARCHIVE_CONCURRENCY: '0',
+      }),
+    ).toThrow('WHATSAPP_ANDROID_MEDIA_ARCHIVE_CONCURRENCY');
   });
 
   it('requires a dedicated AI key only when toll intelligence is enabled', () => {
@@ -86,6 +180,33 @@ describe('validateEnvironment', () => {
       TOLL_INTELLIGENCE_ENABLED: true,
       TOLL_INTELLIGENCE_OPENAI_API_KEY: 'dedicated-toll-intelligence-test-key',
     });
+  });
+
+  it('keeps every configured platform agent credential independent', () => {
+    expect(
+      validateEnvironment({
+        ...validEnvironment,
+        LUME_AGENT_ORCHESTRATOR_OPENAI_API_KEY:
+          'orchestrator-openai-key-with-enough-length',
+        LUME_AGENT_CUSTOMER_SERVICE_OPENAI_API_KEY:
+          'customer-service-openai-key-with-enough-length',
+      }),
+    ).toMatchObject({
+      LUME_AGENT_ORCHESTRATOR_OPENAI_API_KEY:
+        'orchestrator-openai-key-with-enough-length',
+      LUME_AGENT_CUSTOMER_SERVICE_OPENAI_API_KEY:
+        'customer-service-openai-key-with-enough-length',
+    });
+
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        LUME_AGENT_ORCHESTRATOR_OPENAI_API_KEY:
+          'shared-openai-key-with-enough-length',
+        LUME_AGENT_CUSTOMER_SERVICE_OPENAI_API_KEY:
+          'shared-openai-key-with-enough-length',
+      }),
+    ).toThrow('API key individual');
   });
 
   it('normalizes and validates multiple support copy recipients', () => {
@@ -239,7 +360,7 @@ describe('validateEnvironment', () => {
         ...validEnvironment,
         WHATSAPP_ENABLED: 'true',
       }),
-    ).toThrow('WHATSAPP_AI_PROVIDER_ORDER');
+    ).toThrow('credencial individual');
 
     expect(
       validateEnvironment({
@@ -253,7 +374,7 @@ describe('validateEnvironment', () => {
         EVOLUTION_INSTANCE_NAME: 'lume',
         EVOLUTION_API_KEY: 'evolution-key-with-16-characters',
         EVOLUTION_WEBHOOK_SECRET: 'evolution-secret-with-32-characters',
-        WHATSAPP_AI_OPENAI_API_KEY: 'openai-key-with-at-least-20-characters',
+        ...validAgentEnvironment,
         MILENIUM_DIRECTOR_PHONE: '5534999999900',
         MILENIUM_DEPARTMENT_PURCHASES_PHONE: '5534999999901',
         MILENIUM_DEPARTMENT_CONTROLLING_PHONE: '5534999999902',
@@ -297,7 +418,7 @@ describe('validateEnvironment', () => {
         ...validWhatsAppEnvironment,
       }),
     ).toMatchObject({
-      WHATSAPP_AI_PROVIDER_ORDER: 'openai,cerebras,gemini,groq',
+      WHATSAPP_AI_PROVIDER_ORDER: 'openai',
       WHATSAPP_API_EXECUTION_TIMEOUT_MS: 480_000,
       EVOLUTION_SEND_TEXT_TIMEOUT_MS: 10_000,
       EVOLUTION_SEND_MEDIA_TIMEOUT_MS: 30_000,
@@ -309,23 +430,33 @@ describe('validateEnvironment', () => {
       validateEnvironment({
         ...validEnvironment,
         ...apiProviderEnvironment,
-        WHATSAPP_AI_OPENAI_API_KEY: '',
+        LUME_AGENT_REGISTRATION_OPENAI_API_KEY: '',
       }),
-    ).toThrow('chave de ao menos um provedor');
+    ).toThrow('credencial individual LUME_AGENT_REGISTRATION_OPENAI_API_KEY');
+
+    expect(
+      validateEnvironment({
+        ...validEnvironment,
+        ...apiProviderEnvironment,
+        WHATSAPP_AI_PROVIDER_ORDER: 'openai,future-provider',
+      }),
+    ).toMatchObject({
+      WHATSAPP_AI_PROVIDER_ORDER: 'openai,future-provider',
+    });
 
     expect(() =>
       validateEnvironment({
         ...validEnvironment,
         ...apiProviderEnvironment,
-        MILENIUM_DIRECTOR_PHONE: '',
+        WHATSAPP_AI_PROVIDER_ORDER: 'openai,Provider Inválido',
       }),
-    ).toThrow('Diretoria e os oito departamentos');
+    ).toThrow('identificador de provider inválido');
 
     expect(() =>
       validateEnvironment({
         ...validEnvironment,
         ...apiProviderEnvironment,
-        WHATSAPP_API_EXECUTION_TIMEOUT_MS: '120000',
+        WHATSAPP_API_EXECUTION_TIMEOUT_MS: '89999',
       }),
     ).toThrow('deve ser ao menos');
 
@@ -371,7 +502,7 @@ describe('validateEnvironment', () => {
       EVOLUTION_API_KEY: 'evolution-key-with-16-characters',
       EVOLUTION_WEBHOOK_SECRET: 'evolution-secret-with-32-characters',
       WHATSAPP_MEDIA_STORAGE_PATH: absoluteWhatsappMediaStoragePath,
-      WHATSAPP_AI_OPENAI_API_KEY: 'openai-key-with-at-least-20-characters',
+      ...validAgentEnvironment,
       MILENIUM_DIRECTOR_PHONE: '5534999999900',
       MILENIUM_DEPARTMENT_PURCHASES_PHONE: '5534999999901',
       MILENIUM_DEPARTMENT_CONTROLLING_PHONE: '5534999999902',
@@ -396,6 +527,27 @@ describe('validateEnvironment', () => {
     ).toMatchObject({
       EVOLUTION_BASE_URL: 'https://evolution.example.test',
     });
+  });
+
+  it('valida a URL pública usada para registrar webhooks de novos canais', () => {
+    expect(
+      validateEnvironment({
+        ...validEnvironment,
+        TENANT_API_PUBLIC_URL: 'https://api.example.test/api/v1/',
+      }),
+    ).toMatchObject({
+      TENANT_API_PUBLIC_URL: 'https://api.example.test/api/v1',
+    });
+
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        NODE_ENV: 'production',
+        CORS_ORIGINS: 'https://app.example.test',
+        ...productionEmailEnvironment,
+        TENANT_API_PUBLIC_URL: 'http://api.example.test/api/v1',
+      }),
+    ).toThrow('TENANT_API_PUBLIC_URL deve usar HTTPS');
   });
 
   it('exige armazenamento persistente absoluto para WhatsApp em produção', () => {

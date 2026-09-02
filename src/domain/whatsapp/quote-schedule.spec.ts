@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 
-import { AppError } from '../../core/errors/app-error';
 import {
   assertQuoteScheduleConsistency,
   dateOnlyFromDateTime,
@@ -22,7 +21,7 @@ describe('quote schedule', () => {
 
   it('rejeita datas civis inexistentes', () => {
     expect(() => parseDateOnly('2026-02-31', 'departureDate')).toThrowError(
-      expect.objectContaining<AppError>({ code: 'VALIDATION_ERROR' }),
+      expect.objectContaining({ code: 'VALIDATION_ERROR' }),
     );
   });
 
@@ -68,9 +67,7 @@ describe('quote schedule', () => {
         },
         { requireDepartureDate: true },
       ),
-    ).toThrowError(
-      expect.objectContaining<AppError>({ code: 'VALIDATION_ERROR' }),
-    );
+    ).toThrowError(expect.objectContaining({ code: 'VALIDATION_ERROR' }));
   });
 
   it('rejeita data civil divergente do horário e retorno anterior', () => {
@@ -81,9 +78,7 @@ describe('quote schedule', () => {
         returnDate: null,
         returnAt: null,
       }),
-    ).toThrowError(
-      expect.objectContaining<AppError>({ code: 'VALIDATION_ERROR' }),
-    );
+    ).toThrowError(expect.objectContaining({ code: 'VALIDATION_ERROR' }));
 
     expect(() =>
       assertQuoteScheduleConsistency({
@@ -92,8 +87,6 @@ describe('quote schedule', () => {
         returnDate: parseDateOnly('2026-08-01', 'returnDate'),
         returnAt: null,
       }),
-    ).toThrowError(
-      expect.objectContaining<AppError>({ code: 'VALIDATION_ERROR' }),
-    );
+    ).toThrowError(expect.objectContaining({ code: 'VALIDATION_ERROR' }));
   });
 });

@@ -2,13 +2,74 @@
 
 ## Preparação
 
-1. Copie `.env.production.example` para um gerenciador de segredos.
+1. Use `.env.production.example` como inventário e cadastre cada chave em um
+   gerenciador de segredos. Injete-as diretamente no ambiente do processo; não é
+   necessário montar um arquivo `.env` em texto puro no container.
 2. Configure banco PostGIS, JWT, licença, e-mail, canal WhatsApp, Evolution, os
    diretórios persistentes `WHATSAPP_MEDIA_STORAGE_PATH` e
-   `WHATSAPP_IMPORT_ROOT` e ao menos um provedor de IA.
+   `WHATSAPP_IMPORT_ROOT`, o diretório privado `KNOWLEDGE_STORAGE_PATH` e ao
+   menos um provedor de IA. Se o WhatsApp estiver ativo, cadastre as sete
+   credenciais individuais listadas abaixo.
 3. Use HTTPS para CORS, redefinição de senha e `EVOLUTION_BASE_URL`.
 4. Mantenha `SWAGGER_ENABLED=false` salvo durante diagnóstico controlado.
 5. Execute `npm ci`, `npm run prisma:deploy`, `npm run build` e `npm test`.
+
+O schema Zod de `src/config/env.ts` é a fronteira única de validação tanto para
+valores vindos de `.env` quanto para valores injetados em memória. O
+`ConfigModule` o executa globalmente e falha antes do bootstrap se faltar uma
+chave obrigatória ou se uma trava operacional de produção for violada. Os
+defaults `NODE_ENV=development` e `PORT=3000` existem para desenvolvimento; a
+produção deve declarar ambos explicitamente, como no inventário.
+
+O secret manager deve expor somente referências e valores necessários ao
+processo da API, com rotação e auditoria próprias. Nunca replique o objeto de
+ambiente em logs, respostas HTTP ou artefatos de build. Quando a plataforma de
+agentes for habilitada, cada agente deverá resolver sua própria credencial; não
+compartilhe uma única API key entre agentes. Somente o adapter OpenAI está
+instalado nesta etapa, mas o runtime aceita adapters futuros pelo registry.
+
+Para Docker secrets, monte arquivos individuais sob `/run/secrets` ou defina
+`AGENT_DOCKER_SECRETS_ROOT` com outro diretório absoluto. O `credentialRef` do
+agente usa `docker-secret://nome-do-arquivo` ou um subdiretório relativo seguro.
+Para injeção direta no processo, use `env://NOME_EXATO_DA_VARIAVEL`. O resolver
+não lista chaves, não procura alternativas e não usa a credencial de outro
+agente quando a referência solicitada estiver ausente ou inválida.
+
+O catálogo inicial usa estas referências independentes:
+
+- `LUME_AGENT_ORCHESTRATOR_OPENAI_API_KEY`;
+- `LUME_AGENT_CUSTOMER_SERVICE_OPENAI_API_KEY`;
+- `LUME_AGENT_REGISTRATION_OPENAI_API_KEY`;
+- `LUME_AGENT_KNOWLEDGE_OPENAI_API_KEY`;
+- `LUME_AGENT_MEDIA_OPENAI_API_KEY`;
+- `LUME_AGENT_CONTINUITY_OPENAI_API_KEY`;
+- `LUME_AGENT_SUPERVISOR_OPENAI_API_KEY`.
+
+O bootstrap recusa chaves repetidas entre agentes. Fallback, quando existir,
+pertence ao mesmo agente e precisa apontar para outra configuração/credencial
+dele; nunca utiliza silenciosamente o segredo de outro agente.
+
+O adapter OpenAI atual chama somente o endpoint oficial Responses API,
+com armazenamento desabilitado (`store=false`). Ajuste
+`AGENT_OPENAI_RESPONSES_TIMEOUT_MS` se necessário, entre 1 e 300000 ms. Não há
+base URL, modelo ou chave global configurável: cada runtime fornece modelo e
+referência da própria credencial. A policy pode fornecer apenas function tools
+com JSON Schema estrito; web search, file search, MCP e demais ferramentas
+embutidas não são habilitadas.
+
+O executor de function tools não lê permissões do prompt. Ele revalida
+`AgentExecution`, tenant, sessão e controle AI, reautoriza os argumentos reais,
+usa apenas handlers compilados na allow-list e persiste somente hashes e
+resultados limitados. O segundo passe da Responses API usa o mesmo agente,
+runtime/modelo/credencial, `tools=[]`, `store=false` e nenhum
+`previous_response_id`. Se uma tool falhar ou for negada, a execução falha sem
+simular sucesso e sem mudar para um fallback após possível efeito idempotente.
+
+Depois deste deploy, execute novamente o bootstrap idempotente para cada tenant
+existente. Ele atualiza os schemas de `registration.read`,
+`registration.update` e materializa `registration.draft.start`,
+`registration.draft.patch` e `registration.draft.abandon`; nenhuma migration de
+banco substitui essa etapa operacional.
 
 Para habilitar o Lume Routing Core, configure uma chave HeiGIT exclusiva no
 backend em `HEIGIT_API_KEY` e mantenha
@@ -21,6 +82,20 @@ ser validada no staging. Confirme roteamento e geocodificação com
 
 Nunca grave segredos no repositório. A chave da Evolution, o segredo do webhook,
 JWTs e chaves de IA permanecem apenas no servidor da Tenant API.
+
+As credenciais dos novos agentes são resolvidas individualmente no servidor a
+partir de referências `env://` ou `docker-secret://`. A API administrativa do
+tenant não devolve identificador nem referência de credencial. Confirme em
+homologação que listagens de agentes, execuções, tentativas, chamadas de tools,
+auditoria e logs não contêm API key, `credentialIdentifier` nem `credentialRef`.
+
+OpenAI é o único adapter registrado nesta versão. A configuração técnica é
+somente leitura na Tenant API, mesmo para administradores do tenant, porque não
+há aqui um papel distinto de administrador da plataforma. Não habilite mutação
+de provider, modelo, runtime, system/platform prompt ou credencial por essas
+rotas; a única escrita disponível é a criação versionada das instruções do
+tenant. Um provider futuro deve entrar pelo registry server-side e passar pelas
+mesmas políticas, sem criar seletor até que seja formalmente suportado.
 
 ## Publicação
 
@@ -38,6 +113,13 @@ assistidos. Ele não substitui o backup do banco. Monitore espaço, mantenha a
 retenção de rascunhos configurada e remova somente lotes expirados; nunca use a
 camada gravável efêmera do container para esse diretório.
 
+`KNOWLEDGE_STORAGE_PATH` também é obrigatório e absoluto em produção. Monte-o
+em volume persistente privado, sem servidor de arquivos estáticos, e inclua-o no
+mesmo ponto de restauração do PostgreSQL. A API valida SHA-256/tamanho antes de
+entregar um original autenticado. A extração de PDF roda localmente, sem acesso
+à rede ou execução de JavaScript, e recusa arquivos sem texto extraível; não há
+OCR nesta entrega.
+
 O serviço transitório `storage-init` do Compose prepara os volumes de mídias e
 importações com permissão de escrita para o usuário da API antes da
 inicialização. Mantenha essa dependência ao criar ou restaurar os volumes; sem
@@ -50,8 +132,10 @@ devem permanecer ativas por períodos prolongados.
 
 ## Evolution e WhatsApp
 
-Configure o webhook oficial para
-`POST https://<tenant-api>/api/v1/webhooks/evolution`. A assinatura, tamanho,
+Configure `TENANT_API_PUBLIC_URL=https://<tenant-api>/api/v1`; essa base pública
+é usada ao provisionar cada instância e não deve apontar para endereço interno
+do container. O webhook oficial de cada canal será
+`POST https://<tenant-api>/api/v1/webhooks/evolution/:channelId`. A assinatura, tamanho,
 idade, canal e identificador externo são validados antes da persistência.
 Assine o evento `messages.upsert` também para mensagens `fromMe`: ele mantém no
 painel o histórico enviado pelo WhatsApp App/Web sem disparar IA ou resposta do

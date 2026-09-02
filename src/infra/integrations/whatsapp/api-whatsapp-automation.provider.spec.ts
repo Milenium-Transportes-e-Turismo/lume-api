@@ -1,14 +1,15 @@
 import { ConfigService } from '@nestjs/config';
 import { describe, expect, it, vi } from 'vitest';
 
+import {
+  WhatsAppContinuityClassificationError,
+  type WhatsAppConversationAgentResult,
+} from '../../../application/contracts/whatsapp-conversation-agent';
 import type { WhatsAppRepository } from '../../../application/contracts/whatsapp.repository';
 import { WhatsAppAutomationExecutionError } from '../../../application/contracts/whatsapp-automation.provider';
 import type { HttpEvolutionOutboundGateway } from '../evolution/evolution-outbound.client';
-import type { OpenAiCompatibleWhatsAppConversationAgent } from '../whatsapp-ai/openai-compatible-whatsapp-conversation-agent';
-import {
-  deterministicCommandId,
-  MAIN_MENU,
-} from '../../../domain/whatsapp/whatsapp-automation-flow';
+import type { PlatformWhatsAppConversationAgent } from '../whatsapp-ai/platform-whatsapp-conversation-agent';
+import { deterministicCommandId } from '../../../domain/whatsapp/whatsapp-automation-flow';
 import { UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT } from '../../../domain/whatsapp/whatsapp.constants';
 import { ApiWhatsAppAutomationProvider } from './api-whatsapp-automation.provider';
 import type { WhatsAppAutomationDecisionStore } from './whatsapp-automation-decision.store';
@@ -104,6 +105,13 @@ function createSubject(input?: {
 }) {
   const calls: string[] = [];
   const repository = {
+    getPendingContinuityClassification: vi.fn(async () => null),
+    applyContinuityClassification: vi.fn(async () => ({
+      serviceSessionId: '00000000-0000-4000-8000-000000000010',
+      version: 2,
+      classification: 'uncertain',
+      idempotent: false,
+    })),
     getAutomationBatch: vi.fn(async () => {
       calls.push('batch');
       return {
@@ -122,6 +130,12 @@ function createSubject(input?: {
         },
       };
     }),
+    assertAutomaticReplyAllowed: vi.fn(async () => ({
+      allowed: true,
+      threadId: '00000000-0000-4000-8000-000000000009',
+      serviceSessionId: '00000000-0000-4000-8000-000000000010',
+      serviceSessionVersion: 1,
+    })),
     createOutbound: vi.fn(async (command: { text?: string }) => {
       calls.push('create-outbound');
       return {
@@ -158,9 +172,22 @@ function createSubject(input?: {
     ...input?.repository,
   };
   const agent = {
-    complete: vi.fn(async () => {
-      throw new Error('IA não deveria ser chamada neste cenário.');
-    }),
+    classifyContinuity: vi.fn(),
+    complete: vi.fn(async (): Promise<WhatsAppConversationAgentResult> => ({
+      provider: 'openai',
+      model: 'gpt-5.6-terra',
+      attempt: 1,
+      agentId: '00000000-0000-4000-8000-000000000091',
+      agentExecutionId: '00000000-0000-4000-8000-000000000092',
+      output: {
+        message: 'Olá! Como posso ajudar?',
+        collectionStatus: 'collecting',
+        extractedDataPatch: {},
+        missingFields: [],
+        summaryPresented: false,
+        customerDecision: 'undecided',
+      },
+    })),
   };
   const evolution = {
     send: vi.fn(
@@ -191,7 +218,7 @@ function createSubject(input?: {
   };
   const subject = new ApiWhatsAppAutomationProvider(
     repository as unknown as WhatsAppRepository,
-    agent as unknown as OpenAiCompatibleWhatsAppConversationAgent,
+    agent as unknown as PlatformWhatsAppConversationAgent,
     checkpointStore as unknown as WhatsAppAutomationCheckpointStore,
     decisionStore as unknown as WhatsAppAutomationDecisionStore,
     evolution as unknown as HttpEvolutionOutboundGateway,
@@ -275,18 +302,135 @@ describe('ApiWhatsAppAutomationProvider', () => {
     expect(evolution.send).toHaveBeenCalled();
   });
 
-  it('processa menu, envio e conclusão na ordem durável', async () => {
+  it('classifies and applies continuity before loading any customer-facing batch', async () => {
+    const getPendingContinuityClassification = vi.fn(async () => ({
+      decisionId: '00000000-0000-4000-8000-000000000020',
+      sourceServiceSessionId: '00000000-0000-4000-8000-000000000010',
+      expectedVersion: 8,
+      currentDepartmentId: '00000000-0000-4000-8000-000000000021',
+      previousMessages: [
+        {
+          direction: 'inbound' as const,
+          text: 'Assunto anterior',
+          occurredAt: '2026-08-06T11:30:00.000Z',
+        },
+      ],
+      userMessage: 'Novo pedido',
+      allowedTargetDepartments: [
+        {
+          id: '00000000-0000-4000-8000-000000000021',
+          code: 'commercial',
+          name: 'Comercial',
+        },
+      ],
+    }));
+    const applyContinuityClassification = vi.fn(async (_input: unknown) => ({
+      serviceSessionId: '00000000-0000-4000-8000-000000000022',
+      version: 1,
+      classification: 'new-subject' as const,
+      idempotent: false,
+    }));
+    const { subject, repository, agent } = createSubject({
+      repository: {
+        getPendingContinuityClassification,
+        applyContinuityClassification,
+      },
+    });
+    agent.classifyContinuity.mockResolvedValueOnce({
+      classification: 'new-subject',
+      confidence: 0.91,
+      reason: 'O pedido inicia outro atendimento.',
+      targetDepartmentId: '00000000-0000-4000-8000-000000000021',
+      agentId: '00000000-0000-4000-8000-000000000023',
+      agentExecutionId: '00000000-0000-4000-8000-000000000024',
+    });
+
+    await subject.execute(event());
+
+    expect(agent.classifyContinuity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceEventId: 'evolution:source-1',
+        serviceSessionId: '00000000-0000-4000-8000-000000000010',
+        userMessage: 'Novo pedido',
+      }),
+    );
+    expect(applyContinuityClassification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedVersion: 8,
+        classification: 'new-subject',
+        confidence: 0.91,
+        actorAgentId: '00000000-0000-4000-8000-000000000023',
+        agentExecutionId: '00000000-0000-4000-8000-000000000024',
+      }),
+    );
+    expect(
+      applyContinuityClassification.mock.invocationCallOrder[0],
+    ).toBeLessThan(repository.getAutomationBatch.mock.invocationCallOrder[0]);
+  });
+
+  it('persists UNCERTAIN safely before responding when the classifier fails', async () => {
+    const applyContinuityClassification = vi.fn(async (_input: unknown) => ({
+      serviceSessionId: '00000000-0000-4000-8000-000000000010',
+      version: 9,
+      classification: 'uncertain' as const,
+      idempotent: false,
+    }));
+    const { subject, repository, agent } = createSubject({
+      repository: {
+        getPendingContinuityClassification: vi.fn(async () => ({
+          decisionId: '00000000-0000-4000-8000-000000000020',
+          sourceServiceSessionId: '00000000-0000-4000-8000-000000000010',
+          expectedVersion: 8,
+          currentDepartmentId: '00000000-0000-4000-8000-000000000021',
+          previousMessages: [],
+          userMessage: 'Ainda é sobre aquilo.',
+          allowedTargetDepartments: [],
+        })),
+        applyContinuityClassification,
+      },
+    });
+    agent.classifyContinuity.mockRejectedValueOnce(
+      new WhatsAppContinuityClassificationError(
+        '00000000-0000-4000-8000-000000000023',
+        '00000000-0000-4000-8000-000000000024',
+      ),
+    );
+
+    await subject.execute(event());
+
+    expect(applyContinuityClassification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        classification: 'uncertain',
+        confidence: null,
+        targetDepartmentId: '00000000-0000-4000-8000-000000000021',
+        actorAgentId: '00000000-0000-4000-8000-000000000023',
+        agentExecutionId: '00000000-0000-4000-8000-000000000024',
+      }),
+    );
+    expect(
+      applyContinuityClassification.mock.invocationCallOrder[0],
+    ).toBeLessThan(repository.getAutomationBatch.mock.invocationCallOrder[0]);
+    expect(agent.complete).toHaveBeenCalledOnce();
+  });
+
+  it('processa atendimento natural, atribuição da IA e conclusão na ordem durável', async () => {
     const { subject, repository, evolution, calls } = createSubject();
 
     await subject.execute(event());
 
     expect(repository.createOutbound).toHaveBeenCalledWith(
-      expect.objectContaining({ text: MAIN_MENU, automatic: true }),
+      expect.objectContaining({
+        text: 'Olá! Como posso ajudar?',
+        automatic: true,
+        actorAgentId: '00000000-0000-4000-8000-000000000091',
+        agentExecutionId: '00000000-0000-4000-8000-000000000092',
+      }),
     );
     expect(evolution.send).toHaveBeenCalledWith({
       kind: 'text',
       recipientPhone: '5534999999999',
-      text: MAIN_MENU,
+      sourceChannelId: '00000000-0000-4000-8000-000000000007',
+      text: 'Olá! Como posso ajudar?',
     });
     expect(repository.completeOutboxExecution).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -300,9 +444,136 @@ describe('ApiWhatsAppAutomationProvider', () => {
       'create-outbound',
       'claim',
       'result',
-      'transition:present-main-menu',
       'complete',
     ]);
+  });
+
+  it('persiste a prioridade silenciosa da IA na mesma fronteira do outbound', async () => {
+    const { subject, repository, agent } = createSubject();
+    agent.complete.mockResolvedValueOnce({
+      provider: 'openai',
+      model: 'gpt-5.6-terra',
+      attempt: 1,
+      agentId: '00000000-0000-4000-8000-000000000091',
+      agentExecutionId: '00000000-0000-4000-8000-000000000092',
+      output: {
+        message: 'Vou priorizar sua solicitação.',
+        collectionStatus: 'collecting',
+        extractedDataPatch: {},
+        missingFields: [],
+        summaryPresented: false,
+        customerDecision: 'undecided',
+        priority: 'urgent',
+        priorityReason: 'Veículo parado em operação.',
+      },
+    });
+
+    await subject.execute(event());
+
+    expect(repository.createOutbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionPriority: {
+          priority: 'urgent',
+          reason: 'Veículo parado em operação.',
+        },
+      }),
+    );
+  });
+
+  it('persists the structured natural-service completion for the formal lifecycle', async () => {
+    const { subject, repository, agent } = createSubject();
+    agent.complete.mockResolvedValueOnce({
+      provider: 'openai',
+      model: 'gpt-5.6-terra',
+      attempt: 1,
+      agentId: '00000000-0000-4000-8000-000000000091',
+      agentExecutionId: '00000000-0000-4000-8000-000000000092',
+      output: {
+        message: 'Sua solicitação foi resolvida.',
+        collectionStatus: 'completed',
+        extractedDataPatch: {},
+        missingFields: [],
+        summaryPresented: false,
+        customerDecision: 'undecided',
+      },
+    });
+
+    await subject.execute(event());
+
+    expect(repository.createOutbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationResolved: true,
+        actorAgentId: '00000000-0000-4000-8000-000000000091',
+        agentExecutionId: '00000000-0000-4000-8000-000000000092',
+      }),
+    );
+  });
+
+  it('uses the claimed message channel route as the outbound source of truth', async () => {
+    const actualChannelId = '00000000-0000-4000-8000-000000000077';
+    const { subject, repository, evolution } = createSubject({
+      repository: {
+        claimEvolutionDispatch: vi.fn(async () => ({
+          shouldSend: true,
+          state: 'leased',
+          sourceChannelId: actualChannelId,
+          instanceName: 'tenant-channel-b',
+        })),
+      },
+    });
+
+    await subject.execute(event());
+
+    expect(repository.claimEvolutionDispatch).toHaveBeenCalledOnce();
+    expect(evolution.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceChannelId: actualChannelId,
+        instanceName: 'tenant-channel-b',
+      }),
+    );
+  });
+
+  it('delega o envio do handoff ao outbox transacional e interrompe o envio direto', async () => {
+    const { subject, repository, evolution, agent, calls } = createSubject();
+    agent.complete.mockResolvedValueOnce({
+      provider: 'openai',
+      model: 'gpt-5.6-terra',
+      attempt: 1,
+      agentId: '00000000-0000-4000-8000-000000000091',
+      agentExecutionId: '00000000-0000-4000-8000-000000000092',
+      output: {
+        message: 'Vou encaminhar sua solicitação.',
+        collectionStatus: 'human-handoff',
+        extractedDataPatch: {},
+        missingFields: [],
+        summaryPresented: false,
+        customerDecision: 'human-requested',
+        priority: 'high',
+        priorityReason: 'Cliente pediu atendimento humano.',
+      },
+    });
+
+    await subject.execute(event());
+
+    expect(repository.transition).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'forward',
+        expectedVersion: 1,
+        automaticHumanHandoff: expect.objectContaining({
+          customerMessage: 'Vou encaminhar sua solicitação.',
+          actorAgentId: '00000000-0000-4000-8000-000000000091',
+          agentExecutionId: '00000000-0000-4000-8000-000000000092',
+          sessionPriority: {
+            priority: 'high',
+            reason: 'Cliente pediu atendimento humano.',
+          },
+          occurredAt: expect.any(Date),
+        }),
+      }),
+    );
+    expect(repository.createOutbound).not.toHaveBeenCalled();
+    expect(evolution.send).not.toHaveBeenCalled();
+    expect(calls).toEqual(['batch', 'transition:forward', 'complete']);
   });
 
   it('não responde automaticamente quando a conversa está em atendimento humano', async () => {
@@ -468,8 +739,112 @@ describe('ApiWhatsAppAutomationProvider', () => {
     expect(evolution.send).toHaveBeenCalledWith({
       kind: 'text',
       recipientPhone: '5534999999999',
+      sourceChannelId: '00000000-0000-4000-8000-000000000007',
       text: UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT,
     });
+  });
+
+  it('reagenda resposta automática enquanto a interpretação durável está pendente', async () => {
+    const { subject, repository, evolution, agent } = createSubject({
+      config: {
+        WHATSAPP_ENABLED: true,
+        WHATSAPP_AUTOMATION_ACTIVE_SINCE: '2026-08-06T11:59:00.000Z',
+      },
+      repository: {
+        getAutomationBatch: vi.fn(async () => ({
+          conversation: conversation(),
+          batch: {
+            messages: [
+              {
+                sourceEventId: 'evolution:source-1',
+                messageId: ids.message,
+                occurredAt: '2026-08-06T12:00:00.000Z',
+                kind: 'image',
+                text: null,
+                mediaInterpretationStatus: 'pending',
+                interpretedText: null,
+                interpretationSource: 'none',
+              },
+            ],
+          },
+        })),
+      },
+    });
+
+    await expect(
+      subject.execute(
+        event('whatsapp.inbound.persisted', {
+          message: {
+            providerMessageId: 'provider-image-1',
+            direction: 'inbound',
+            deliveryStatus: 'received',
+            kind: 'image',
+            text: null,
+            media: { mimeType: 'image/jpeg' },
+            occurredAt: '2026-08-06T12:00:00.000Z',
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      outcome: 'retryable-failure',
+      errorCode: 'MEDIA_INTERPRETATION_PENDING',
+    });
+    expect(agent.complete).not.toHaveBeenCalled();
+    expect(repository.createOutbound).not.toHaveBeenCalled();
+    expect(evolution.send).not.toHaveBeenCalled();
+  });
+
+  it('usa o contexto multimodal efetivo na primeira resposta automática', async () => {
+    const interpretedText =
+      'Correção humana: cliente solicita orçamento para 20 passageiros.';
+    const interpretationId = '00000000-0000-4000-8000-000000000099';
+    const { subject, agent } = createSubject({
+      config: {
+        WHATSAPP_ENABLED: true,
+        WHATSAPP_AUTOMATION_ACTIVE_SINCE: '2026-08-06T11:59:00.000Z',
+      },
+      repository: {
+        getAutomationBatch: vi.fn(async () => ({
+          conversation: conversation(),
+          batch: {
+            messages: [
+              {
+                sourceEventId: 'evolution:source-1',
+                messageId: ids.message,
+                occurredAt: '2026-08-06T12:00:00.000Z',
+                kind: 'document',
+                text: null,
+                mediaInterpretationStatus: 'succeeded',
+                mediaInterpretationId: interpretationId,
+                interpretedText,
+                interpretationSource: 'human',
+              },
+            ],
+          },
+        })),
+      },
+    });
+
+    await subject.execute(
+      event('whatsapp.inbound.persisted', {
+        message: {
+          providerMessageId: 'provider-document-1',
+          direction: 'inbound',
+          deliveryStatus: 'received',
+          kind: 'document',
+          text: null,
+          media: { mimeType: 'application/pdf' },
+          occurredAt: '2026-08-06T12:00:00.000Z',
+        },
+      }),
+    );
+
+    expect(agent.complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userMessage: interpretedText,
+        mediaInterpretations: [{ interpretationId, effectiveSource: 'human' }],
+      }),
+    );
   });
 
   it('não repete envio quando a Evolution retorna resultado ambíguo', async () => {

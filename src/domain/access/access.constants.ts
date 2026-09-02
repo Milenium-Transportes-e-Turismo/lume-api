@@ -98,6 +98,9 @@ export const PERMISSION_RESOURCES = [
   'financial',
   'clients',
   'ai-agents',
+  'whatsapp-channels',
+  'service',
+  'knowledge',
   'whatsapp-conversations',
   'manuals',
   'reports',
@@ -127,6 +130,13 @@ export const PERMISSION_ACTIONS = [
   'publish',
   'history',
   'calculate',
+  'respond',
+  'assume',
+  'transfer',
+  'close',
+  'priority',
+  'connect',
+  'disconnect',
 ] as const;
 
 export type PermissionResource = (typeof PERMISSION_RESOURCES)[number];
@@ -155,6 +165,9 @@ export const PERMISSION_ACTIONS_BY_RESOURCE = {
   ],
   clients: ['view', 'create', 'update', 'manage', 'history'],
   'ai-agents': ['view', 'create', 'update', 'delete', 'manage', 'use'],
+  'whatsapp-channels': ['view', 'create', 'manage', 'connect', 'disconnect'],
+  service: ['view', 'respond', 'assume', 'transfer', 'close', 'priority'],
+  knowledge: ['view', 'manage', 'publish'],
   'whatsapp-conversations': ['view', 'manage'],
   manuals: ['view', 'create', 'update', 'delete', 'manage'],
   reports: ['view', 'create', 'update', 'delete', 'manage', 'export'],
@@ -178,6 +191,34 @@ export const PERMISSION_ACTIONS_BY_RESOURCE = {
   'route-planner': ['view', 'calculate'],
   support: ['view', 'create', 'update', 'manage'],
 } as const satisfies Record<PermissionResource, readonly PermissionAction[]>;
+
+/**
+ * Permission ceilings for the rebuilt attendance domain. These permissions are
+ * intentionally independent from infrastructure/channel management. They are
+ * selectable only for users that belong to an internal operating department.
+ */
+export const SERVICE_PERMISSION_CEILING = [
+  'service:view',
+  'service:respond',
+  'service:assume',
+  'service:transfer',
+  'service:close',
+  'service:priority',
+] as const satisfies readonly PermissionCode[];
+
+export const KNOWLEDGE_PERMISSION_CEILING = [
+  'knowledge:view',
+  'knowledge:manage',
+  'knowledge:publish',
+] as const satisfies readonly PermissionCode[];
+
+export const CHANNEL_PERMISSION_CEILING = [
+  'whatsapp-channels:view',
+  'whatsapp-channels:create',
+  'whatsapp-channels:manage',
+  'whatsapp-channels:connect',
+  'whatsapp-channels:disconnect',
+] as const satisfies readonly PermissionCode[];
 
 export type PermissionCode = {
   [
@@ -437,6 +478,21 @@ export function allowedPermissionsForDepartments(
     for (const permission of DEFAULT_DEPARTMENT_PERMISSIONS[department]) {
       allowed.add(permission);
     }
+
+    if (department !== 'client-company') {
+      for (const permission of SERVICE_PERMISSION_CEILING) {
+        allowed.add(permission);
+      }
+      for (const permission of KNOWLEDGE_PERMISSION_CEILING) {
+        allowed.add(permission);
+      }
+    }
+
+    if (department === 'information-technology') {
+      for (const permission of CHANNEL_PERMISSION_CEILING) {
+        allowed.add(permission);
+      }
+    }
   }
 
   return Array.from(allowed).sort();
@@ -458,6 +514,6 @@ export function departmentsAllowingPermission(
   }
 
   return DEPARTMENTS.filter((department) =>
-    DEFAULT_DEPARTMENT_PERMISSIONS[department].includes(permission),
+    allowedPermissionsForDepartments([department]).includes(permission),
   );
 }

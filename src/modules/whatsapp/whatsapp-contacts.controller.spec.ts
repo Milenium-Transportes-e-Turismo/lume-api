@@ -12,7 +12,7 @@ describe('WhatsAppContactsController permissions', () => {
       const handler = Object.getOwnPropertyDescriptor(
         WhatsAppContactsController.prototype,
         method,
-      )?.value as unknown;
+      )?.value as object;
       expect(Reflect.getMetadata(REQUIRED_PERMISSIONS, handler)).toEqual([
         'whatsapp-conversations:manage',
       ]);

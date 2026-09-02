@@ -4,7 +4,10 @@ import { ConfigService } from '@nestjs/config';
 import { HttpEvolutionOutboundGateway } from '../evolution/evolution-outbound.client';
 import type { EvolutionOutboundInput } from '../../../application/contracts/evolution-outbound.gateway';
 import { WhatsAppMediaStorage } from '../../../application/contracts/whatsapp-media.storage';
-import type { WhatsAppConversationAgentInput } from '../../../application/contracts/whatsapp-conversation-agent';
+import {
+  WhatsAppContinuityClassificationError,
+  type WhatsAppConversationAgentInput,
+} from '../../../application/contracts/whatsapp-conversation-agent';
 import {
   type ClaimedWhatsAppAutomationEvent,
   buildWhatsAppAutomationEnvelope,
@@ -13,6 +16,7 @@ import {
 } from '../../../application/contracts/whatsapp-automation.provider';
 import {
   WhatsAppRepository,
+  type CreateOutboundInput,
   type QuoteRequestPatch,
   type TransitionCommand,
 } from '../../../application/contracts/whatsapp.repository';
@@ -33,11 +37,13 @@ import {
 } from '../../../domain/whatsapp/quote-schedule';
 import {
   QUOTE_CONFIRMATION_MESSAGE,
+  aiOutputResolvesConversation,
   buildBufferedText,
   decideAutomationPlan,
   deriveAiActions,
   deterministicCommandId,
   isExplicitPositiveConfirmation,
+  mediaInterpretationsUsedInBufferedText,
   type AiMode,
   type AiProviderOutput,
   type AutomationConversation,
@@ -46,7 +52,7 @@ import {
   type QuoteRequestSnapshot,
   type WhatsAppAutomationEnvelope as DomainAutomationEnvelope,
 } from '../../../domain/whatsapp/whatsapp-automation-flow';
-import { OpenAiCompatibleWhatsAppConversationAgent } from '../whatsapp-ai/openai-compatible-whatsapp-conversation-agent';
+import { PlatformWhatsAppConversationAgent } from '../whatsapp-ai/platform-whatsapp-conversation-agent';
 import { WhatsAppAutomationDecisionStore } from './whatsapp-automation-decision.store';
 import { WhatsAppAutomationCheckpointStore } from './whatsapp-automation-checkpoint.store';
 
@@ -89,6 +95,14 @@ interface DurableBatchResult {
 }
 
 const EVOLUTION_RESULT_PERSISTENCE_ATTEMPTS = 2;
+const MEDIA_INTERPRETATION_STATUSES = [
+  'not-requested',
+  'pending',
+  'succeeded',
+  'failed',
+  'unsupported',
+] as const;
+const MEDIA_INTERPRETATION_SOURCES = ['human', 'machine', 'none'] as const;
 
 @Injectable()
 export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
@@ -103,7 +117,7 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
 
   constructor(
     private readonly repository: WhatsAppRepository,
-    private readonly conversationAgent: OpenAiCompatibleWhatsAppConversationAgent,
+    private readonly conversationAgent: PlatformWhatsAppConversationAgent,
     private readonly checkpointStore: WhatsAppAutomationCheckpointStore,
     private readonly decisionStore: WhatsAppAutomationDecisionStore,
     private readonly evolution: HttpEvolutionOutboundGateway,
@@ -183,16 +197,24 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
       await this.complete(event, 'succeeded', [payload.eventId]);
       return;
     }
+    await this.resolvePendingContinuity(event, payload);
     const checkpoint = await this.checkpointStore.getOrCreate(
       event,
       async () => {
         const batch = await this.getDurableBatch(event, payload);
         const bufferedText = buildBufferedText(batch.messages);
+        const mediaInterpretationAvailable = batch.messages.some(
+          (message) =>
+            message.kind !== 'text' &&
+            message.mediaInterpretationStatus === 'succeeded' &&
+            Boolean(message.interpretedText?.trim()),
+        );
         const plan = decideAutomationPlan({
           envelope: toDomainEnvelope(event, payload),
           conversation: batch.conversation,
           bufferedText,
           pendingQuestion: batch.pendingQuestion,
+          mediaInterpretationAvailable,
         });
         return {
           conversation: batch.conversation,
@@ -250,6 +272,82 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
     );
   }
 
+  private async resolvePendingContinuity(
+    event: ClaimedWhatsAppAutomationEvent,
+    payload: AutomationPayload,
+  ): Promise<void> {
+    const candidate = await this.repository.getPendingContinuityClassification(
+      event.companyId,
+      payload.conversationId,
+      payload.eventId,
+    );
+    if (!candidate) return;
+
+    let classification: Awaited<
+      ReturnType<PlatformWhatsAppConversationAgent['classifyContinuity']>
+    > | null = null;
+    let failedAttribution: {
+      readonly agentId: string;
+      readonly agentExecutionId: string;
+    } | null = null;
+    try {
+      classification = await this.conversationAgent.classifyContinuity({
+        sourceEventId: payload.eventId,
+        companyId: event.companyId,
+        conversationId: payload.conversationId,
+        serviceSessionId: candidate.sourceServiceSessionId,
+        currentDepartmentId: candidate.currentDepartmentId,
+        previousMessages: candidate.previousMessages,
+        userMessage: candidate.userMessage,
+        allowedTargetDepartments: candidate.allowedTargetDepartments,
+      });
+    } catch (error) {
+      if (
+        error instanceof WhatsAppContinuityClassificationError &&
+        error.agentId &&
+        error.agentExecutionId
+      ) {
+        failedAttribution = {
+          agentId: error.agentId,
+          agentExecutionId: error.agentExecutionId,
+        };
+      }
+      this.logger.warn(
+        `Classificador de continuidade indisponível; aplicado UNCERTAIN seguro conversationId=${payload.conversationId}`,
+      );
+    }
+
+    await this.repository.applyContinuityClassification({
+      companyId: event.companyId,
+      conversationId: payload.conversationId,
+      sourceEventId: payload.eventId,
+      decisionId: candidate.decisionId,
+      commandId: deterministicCommandId(
+        payload.eventId,
+        'continuity-classification',
+      ),
+      expectedVersion: candidate.expectedVersion,
+      classification: classification?.classification ?? 'uncertain',
+      confidence: classification?.confidence ?? null,
+      reason:
+        classification?.reason ??
+        'Classificador indisponível; continuidade preservada por fallback seguro.',
+      targetDepartmentId:
+        classification?.targetDepartmentId ?? candidate.currentDepartmentId,
+      ...(classification
+        ? {
+            actorAgentId: classification.agentId,
+            agentExecutionId: classification.agentExecutionId,
+          }
+        : failedAttribution
+          ? {
+              actorAgentId: failedAttribution.agentId,
+              agentExecutionId: failedAttribution.agentExecutionId,
+            }
+          : {}),
+    });
+  }
+
   private async processInteractivePlan(
     event: ClaimedWhatsAppAutomationEvent,
     payload: AutomationPayload,
@@ -272,6 +370,14 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
     let transitionAfterSend = plan.transitionAfterSend;
     let transitionReason = plan.reason;
     let transitionMetadata = plan.transitionMetadata;
+    let agentAttribution: {
+      readonly agentId: string;
+      readonly agentExecutionId: string;
+    } | null = null;
+    let sessionPriority: NonNullable<
+      CreateOutboundInput['sessionPriority']
+    > | null = null;
+    let conversationResolved = false;
 
     if (plan.kind === 'ai') {
       if (!plan.aiMode) {
@@ -281,13 +387,23 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
           'O plano de IA não informou o modo de coleta.',
         );
       }
+      const replyAuthorization =
+        await this.repository.assertAutomaticReplyAllowed(
+          event.companyId,
+          payload.conversationId,
+        );
+      const mediaInterpretations = mediaInterpretationsUsedInBufferedText(
+        batch.messages,
+      );
       const agentInput = {
         sourceEventId: payload.eventId,
         correlationId: event.correlationId,
         companyId: event.companyId,
         conversationId: payload.conversationId,
+        serviceSessionId: replyAuthorization.serviceSessionId,
         aiMode: plan.aiMode,
         userMessage: bufferedText,
+        ...(mediaInterpretations.length > 0 ? { mediaInterpretations } : {}),
         currentConversation: conversation,
       } satisfies WhatsAppConversationAgentInput;
       const aiResult = await this.decisionStore.getOrCreate(
@@ -295,20 +411,37 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
         agentInput,
         () => this.conversationAgent.complete(agentInput),
       );
+      if (aiResult.agentId && aiResult.agentExecutionId) {
+        agentAttribution = {
+          agentId: aiResult.agentId,
+          agentExecutionId: aiResult.agentExecutionId,
+        };
+      }
+      if (aiResult.output.priority && aiResult.output.priorityReason?.trim()) {
+        sessionPriority = {
+          priority: aiResult.output.priority,
+          reason: aiResult.output.priorityReason.trim(),
+        };
+      }
       assertSafeAiDecision(aiResult.output, plan.aiMode, bufferedText);
       const actions = deriveAiActions(aiResult.output, plan.aiMode);
+      conversationResolved = aiOutputResolvesConversation(
+        aiResult.output,
+        plan.aiMode,
+      );
       transitionBeforeSend = actions.transitionBeforeSend;
       transitionAfterSend = actions.transitionAfterSend;
       transitionReason = actions.humanReason ?? plan.reason;
       transitionMetadata =
         actions.transitionAfterSend === 'forward'
           ? {
-              targetDepartment: 'commercial',
+              targetDepartment: conversation.department,
               reason: transitionReason,
               historyAvailableInPanel: true,
             }
           : { reason: transitionReason };
       responseMessage =
+        plan.aiMode !== 'natural-service' &&
         aiResult.output.customerDecision === 'confirmed'
           ? QUOTE_CONFIRMATION_MESSAGE
           : aiResult.output.message;
@@ -325,12 +458,14 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
           },
         );
       }
-      conversation = await this.patchQuoteFromAi(
-        event,
-        conversation,
-        plan.aiMode,
-        aiResult.output,
-      );
+      if (plan.aiMode !== 'natural-service') {
+        conversation = await this.patchQuoteFromAi(
+          event,
+          conversation,
+          plan.aiMode,
+          aiResult.output,
+        );
+      }
       if (
         transitionAfterSend === 'present-quote-summary' ||
         transitionAfterSend === 'confirm-quote'
@@ -347,6 +482,31 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
       );
     }
 
+    if (transitionAfterSend === 'forward') {
+      await this.transition(
+        event,
+        conversation,
+        transitionAfterSend,
+        {
+          ...plan,
+          reason: transitionReason,
+          transitionMetadata,
+        },
+        {
+          customerMessage: responseMessage,
+          occurredAt: new Date(),
+          ...(agentAttribution
+            ? {
+                actorAgentId: agentAttribution.agentId,
+                agentExecutionId: agentAttribution.agentExecutionId,
+              }
+            : {}),
+          ...(sessionPriority && agentAttribution ? { sessionPriority } : {}),
+        },
+      );
+      return;
+    }
+
     const recipientPhone = plan.outboundRecipientPhoneEnv
       ? this.departmentPhones[plan.outboundRecipientPhoneEnv]
       : payload.contact.phone;
@@ -357,6 +517,16 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
         commandId: deterministicCommandId(payload.eventId, 'outbound'),
         expectedVersion: conversation.version,
         automatic: true,
+        ...(agentAttribution
+          ? {
+              actorAgentId: agentAttribution.agentId,
+              agentExecutionId: agentAttribution.agentExecutionId,
+            }
+          : {}),
+        ...(sessionPriority && agentAttribution ? { sessionPriority } : {}),
+        ...(conversationResolved
+          ? { conversationResolved: true as const }
+          : {}),
         ...(plan.outboundPurpose ? { purpose: plan.outboundPurpose } : {}),
         ...(plan.outboundPurpose === 'unsupported-message-kind'
           ? { inReplyToMessageId: payload.messageId }
@@ -368,10 +538,10 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
         text: responseMessage,
       }),
     );
-    await this.deliverPersistedMessage(
-      event,
-      parseOutboundMessage(outbound, recipientPhone),
-    );
+    await this.deliverPersistedMessage(event, {
+      ...parseOutboundMessage(outbound, recipientPhone),
+      sourceChannelId: payload.channelId,
+    });
 
     if (transitionAfterSend) {
       await this.transition(event, conversation, transitionAfterSend, {
@@ -410,6 +580,23 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
         'O lote durável ainda não está disponível.',
       );
     }
+    const automaticMediaInterpretationPending =
+      payload.automationAllowed === true &&
+      payload.canGenerateReply === true &&
+      payload.canSendReply === true &&
+      messages.some(
+        (message) =>
+          message.kind !== 'text' &&
+          (message.mediaInterpretationStatus === 'not-requested' ||
+            message.mediaInterpretationStatus === 'pending'),
+      );
+    if (automaticMediaInterpretationPending) {
+      throw new WhatsAppAutomationExecutionError(
+        'retryable-failure',
+        'MEDIA_INTERPRETATION_PENDING',
+        'A interpretação durável da mídia ainda não foi concluída.',
+      );
+    }
     return { conversation, messages, pendingQuestion };
   }
 
@@ -438,6 +625,7 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
     conversation: AutomationConversation,
     name: TransitionCommand['name'],
     plan: Pick<AutomationPlan, 'reason' | 'transitionMetadata'>,
+    automaticHumanHandoff?: TransitionCommand['automaticHumanHandoff'],
   ): Promise<AutomationConversation> {
     const metadata: Record<string, unknown> = {
       ...(plan.transitionMetadata ?? {}),
@@ -459,6 +647,7 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
       actorType: 'system',
       ...(targetDepartment ? { targetDepartment } : {}),
       metadata,
+      ...(automaticHumanHandoff ? { automaticHumanHandoff } : {}),
     });
     return asAutomationConversation(result);
   }
@@ -566,6 +755,7 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
         ? { dispatchGeneration: payload.dispatchGeneration }
         : {}),
       recipientPhone: payload.contact.phone,
+      sourceChannelId: payload.channelId,
       input: outboundInput,
     });
   }
@@ -595,6 +785,7 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
       attemptId: string;
       dispatchGeneration?: string;
       recipientPhone: string;
+      sourceChannelId?: string;
       input: EvolutionOutboundInput;
     },
   ): Promise<void> {
@@ -639,7 +830,15 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
       );
     }
 
-    const result = await this.evolution.send(outbound.input);
+    const claimedChannelId = stringValue(claim.sourceChannelId);
+    const sourceChannelId = claimedChannelId ?? outbound.sourceChannelId;
+    const instanceName = stringValue(claim.instanceName);
+    const routedInput = {
+      ...outbound.input,
+      ...(sourceChannelId ? { sourceChannelId } : {}),
+      ...(instanceName ? { instanceName } : {}),
+    };
+    const result = await this.evolution.send(routedInput);
     if (result.outcome === 'ambiguous') {
       await this.repository.markEvolutionDispatchUnknown({
         companyId: event.companyId,
@@ -978,12 +1177,46 @@ function asBufferedMessage(value: unknown): BufferedMessage {
   if (Number.isNaN(Date.parse(occurredAt))) {
     throw contractInvalid('occurredAt');
   }
+  const rawMediaStatus = row.mediaInterpretationStatus;
+  if (
+    rawMediaStatus !== undefined &&
+    !MEDIA_INTERPRETATION_STATUSES.includes(rawMediaStatus as never)
+  ) {
+    throw contractInvalid('mediaInterpretationStatus');
+  }
+  const rawInterpretationSource = row.interpretationSource;
+  if (
+    rawInterpretationSource !== undefined &&
+    !MEDIA_INTERPRETATION_SOURCES.includes(rawInterpretationSource as never)
+  ) {
+    throw contractInvalid('interpretationSource');
+  }
+  const rawInterpretationId = row.mediaInterpretationId;
+  const mediaInterpretationId =
+    rawInterpretationId === undefined || rawInterpretationId === null
+      ? null
+      : requiredUuid(rawInterpretationId, 'mediaInterpretationId');
   return {
     sourceEventId: requiredString(row.sourceEventId, 'sourceEventId'),
     messageId: requiredUuid(row.messageId, 'messageId'),
     occurredAt,
     kind,
     text: typeof row.text === 'string' ? row.text : null,
+    ...(rawMediaStatus === undefined
+      ? {}
+      : {
+          mediaInterpretationStatus:
+            rawMediaStatus as BufferedMessage['mediaInterpretationStatus'],
+        }),
+    interpretedText:
+      typeof row.interpretedText === 'string' ? row.interpretedText : null,
+    ...(rawInterpretationSource === undefined
+      ? {}
+      : {
+          interpretationSource:
+            rawInterpretationSource as BufferedMessage['interpretationSource'],
+        }),
+    mediaInterpretationId,
     isFirstContact: row.isFirstContact === true,
   };
 }
@@ -1115,6 +1348,7 @@ function assertSafeAiDecision(
   userMessage: string,
 ): void {
   if (
+    aiMode !== 'natural-service' &&
     output.customerDecision === 'confirmed' &&
     (aiMode !== 'quote-correction-or-confirmation' ||
       !isExplicitPositiveConfirmation(userMessage))

@@ -1168,7 +1168,7 @@ describe('WhatsAppHistoryImportService media retention', () => {
       phoneE164: '5534988888888',
       contactName: 'Cliente',
       companySenderName: 'Milenium',
-      state: 'sent-to-human' as const,
+      state: 'human-queue' as const,
       departmentCode: 'commercial',
       ownerUsername: null,
     };
