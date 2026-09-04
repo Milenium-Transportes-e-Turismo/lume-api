@@ -2,7 +2,10 @@ import { ForbiddenException, type ExecutionContext } from '@nestjs/common';
 import type { Reflector } from '@nestjs/core';
 import { describe, expect, it, vi } from 'vitest';
 
-import type { PermissionCode } from '../../../domain/access/access.constants';
+import {
+  SERVICE_PERMISSION_CEILING,
+  type PermissionCode,
+} from '../../../domain/access/access.constants';
 import { PermissionsGuard } from './permissions.guard';
 
 function setup(required?: PermissionCode[]) {
@@ -92,23 +95,17 @@ describe('PermissionsGuard', () => {
     ).toBe(true);
   });
 
-  it('requires an explicit operational-service grant from an administrator', () => {
-    const { guard } = setup(['service:view']);
+  it('allows an administrator to exercise every operational-service permission', () => {
+    for (const permission of SERVICE_PERMISSION_CEILING) {
+      const { guard } = setup([permission]);
 
-    expect(() =>
-      guard.canActivate(
-        contextWith({ isAdministrator: true, permissions: [] }),
-      ),
-    ).toThrow(ForbiddenException);
-
-    expect(
-      guard.canActivate(
-        contextWith({
-          isAdministrator: true,
-          permissions: ['service:view'],
-        }),
-      ),
-    ).toBe(true);
+      expect(
+        guard.canActivate(
+          contextWith({ isAdministrator: true, permissions: [] }),
+        ),
+        permission,
+      ).toBe(true);
+    }
   });
 
   it('allows tenant-wide authority to exercise a tenant business permission', () => {

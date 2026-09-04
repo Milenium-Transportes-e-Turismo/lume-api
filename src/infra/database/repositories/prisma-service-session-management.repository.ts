@@ -177,6 +177,22 @@ const assignmentStrategyFromPrisma = {
   LEAST_LOAD: 'least-load',
 } as const;
 
+function serviceAssigneeAuthorityWhere(
+  departmentAliases?: readonly string[],
+): Prisma.UserWhereInput {
+  return {
+    OR: [
+      { isAdministrator: true },
+      {
+        ...(departmentAliases
+          ? { departments: { hasSome: [...departmentAliases] } }
+          : {}),
+        permissionCodes: { has: 'service:assume' },
+      },
+    ],
+  };
+}
+
 function pendingActions(value: Prisma.JsonValue): string[] {
   return Array.isArray(value)
     ? value
@@ -710,7 +726,7 @@ async function assertTargets(
         isActive: true,
         status: UserAccountStatus.ACTIVE,
         deletedAt: null,
-        departments: { hasSome: acceptedDepartmentCodes },
+        ...serviceAssigneeAuthorityWhere(acceptedDepartmentCodes),
       },
       select: { id: true },
     });
@@ -950,10 +966,15 @@ export class PrismaServiceSessionManagementRepository extends ServiceSessionMana
           isActive: true,
           status: UserAccountStatus.ACTIVE,
           deletedAt: null,
-          permissionCodes: { has: 'service:assume' },
+          ...serviceAssigneeAuthorityWhere(),
         },
         orderBy: { name: 'asc' },
-        select: { id: true, name: true, departments: true },
+        select: {
+          id: true,
+          name: true,
+          departments: true,
+          isAdministrator: true,
+        },
       }),
     ]);
 
@@ -977,9 +998,11 @@ export class PrismaServiceSessionManagementRepository extends ServiceSessionMana
         })),
         users: users
           .filter((user) =>
-            user.departments.some((userDepartment) =>
-              aliases.has(userDepartment),
-            ),
+            user.isAdministrator
+              ? true
+              : user.departments.some((userDepartment) =>
+                  aliases.has(userDepartment),
+                ),
           )
           .map((user) => ({ id: user.id, name: user.name })),
       };

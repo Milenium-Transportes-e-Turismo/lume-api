@@ -18,8 +18,10 @@ Diretoria e Gerência não são sinônimos. Um integrante de `directorate` somen
 recebe autoridade ampla sobre o negócio do tenant quando também recebe
 individualmente `tenant:manage`. A Gerência continua limitada às capacidades
 estreitas atribuídas para cada processo. O Administrador da Instalação Lume
-possui autoridade total sobre a instalação e é diferente de ambos. Supervisão
-é uma capacidade explícita, e não um cargo, departamento ou perfil rígido.
+possui autoridade total sobre a instalação e é diferente de ambos. Essa
+autoridade projeta automaticamente todo o catálogo efetivo atual, inclusive as
+capacidades `service:*`, sem materializá-las no cadastro. Supervisão é uma
+capacidade explícita, e não um cargo, departamento ou perfil rígido.
 
 ## Consequências
 
@@ -29,6 +31,12 @@ as capacidades descritas. A condução operacional de uma conversa exige
 reconhecida; pertencer a um departamento nunca basta. Catálogo dinâmico de
 departamentos e responsabilidade documental por tipo continuam lacunas mesmo
 depois da publicação dos novos códigos de autoridade.
+
+Contas administradoras continuam persistidas sem departamentos e sem
+`permissionCodes`: o resolvedor e o guard reconhecem `isAdministrator=true`
+como autoridade para todas as capacidades, e a revalidação transacional aceita
+o administrador como responsável por atendimento em qualquer departamento do
+tenant. Isso não insere administradores nas escalas automáticas das filas.
 
 O catálogo administrativo de usuários aplica a mesma proteção das operações
 individuais: somente um Administrador da Instalação visualiza outras contas

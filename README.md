@@ -145,10 +145,12 @@ Cadastros normais e temporários. Isso não concede `clients:manage`, histórico
 ou permissões comerciais.
 `isAdministrator=true` é a autoridade total e separada do Administrador da
 Instalação Lume: somente outro administrador pode concedê-la ou removê-la. A
-Diretoria também é distinta: pertencer a `directorate` não basta; a autoridade
-ampla de negócio exige `tenant:manage` atribuída individualmente. A Gerência
-continua controlada pelas capacidades estreitas de cada processo. Supervisão é
-uma capacidade explícita, não um cargo ou perfil implícito.
+projeção efetiva inclui o catálogo atual completo, inclusive `service:*`, sem
+gravar departamentos ou permissões individuais na conta. Diretoria também é
+distinta: pertencer a `directorate` não basta; a autoridade ampla de negócio
+exige `tenant:manage` atribuída individualmente. A Gerência continua controlada
+pelas capacidades estreitas de cada processo. Supervisão é uma capacidade
+explícita, não um cargo ou perfil implícito.
 
 O bootstrap idempotente sincroniza o catálogo fixo atual: Empresa Cliente e as
 áreas internas RH, Comercial, Compras, Controladoria, Departamento Pessoal,
@@ -317,6 +319,9 @@ concedida apenas para liberar atendimento. O responsável da conversa é uma
 referência corrente, não uma trava exclusiva: outro usuário autorizado pode
 atuar ou assumir, com `expectedVersion` e histórico do ator e da substituição.
 Supervisão segue a mesma regra de capacidade explícita, sem perfil fixo.
+O Administrador da Instalação recebe automaticamente todas as capacidades
+`service:*` e pode assumir um atendimento de qualquer departamento; ele não é
+incluído automaticamente na escala de distribuição das filas.
 
 ### Aceite e confirmação comercial
 

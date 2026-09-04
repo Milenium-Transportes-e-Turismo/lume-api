@@ -125,7 +125,7 @@ describe('ServiceSessionsController', () => {
     );
   });
 
-  it('concede escopo tenant-wide ao administrador com grant operacional', async () => {
+  it('concede escopo tenant-wide ao administrador sem grant operacional', async () => {
     const list = vi.fn().mockResolvedValue({ items: [], total: 0 });
     const controller = new ServiceSessionsController(
       { list } as unknown as QueryServiceSessionsUseCase,
@@ -136,8 +136,8 @@ describe('ServiceSessionsController', () => {
       principal({
         isAdministrator: true,
         departments: [],
-        permissionCodes: ['service:view'],
-        permissions: ['service:view'],
+        permissionCodes: [],
+        permissions: [],
       }),
       new ServiceSessionListQueryDto(),
     );

@@ -4,11 +4,12 @@ import {
   canExercisePermission,
   hasTenantWideAuthority,
 } from '../../domain/access/tenant-authority';
+import { SERVICE_PERMISSION_CEILING } from '../../domain/access/access.constants';
 import { User } from '../../domain/entities/user';
 import { presentUser } from './user.presenter';
 
 describe('presentUser', () => {
-  it('não concede permissões operacionais de atendimento apenas por ser administrador', () => {
+  it('projects every operational-service permission for an administrator', () => {
     const user = User.create({
       companyId: '00000000-0000-4000-8000-000000000010',
       name: 'Administrador',
@@ -26,8 +27,10 @@ describe('presentUser', () => {
     const presented = presentUser({ user, companyIsActive: true });
 
     expect(presented.permissions).toContain('whatsapp-channels:manage');
-    expect(presented.permissions).not.toContain('service:view');
-    expect(presented.permissionCodes).not.toContain('service:respond');
+    expect(presented.permissions).toEqual(
+      expect.arrayContaining([...SERVICE_PERMISSION_CEILING]),
+    );
+    expect(presented.permissionCodes).toEqual([]);
   });
 
   it('keeps administrator grants and departments distinct from effective access', () => {

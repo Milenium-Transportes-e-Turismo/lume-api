@@ -2,7 +2,6 @@ import {
   ALL_PERMISSION_CODES,
   DOCUMENT_PORTAL_PERMISSIONS,
   EMPLOYEE_SELF_SERVICE_PERMISSIONS,
-  SERVICE_PERMISSION_CEILING,
   TENANT_BUSINESS_PERMISSION_CODES,
   TENANT_WIDE_PERMISSION,
   allowedPermissionsForDepartments,
@@ -29,24 +28,7 @@ export function resolveEffectivePermissions(
   documentAccessMode: 'standard' | 'document-portal' | 'client' = 'standard',
 ): PermissionCode[] {
   if (isAdministrator) {
-    const servicePermissions = new Set<PermissionCode>(
-      SERVICE_PERMISSION_CEILING,
-    );
-    const administrativePermissions = ALL_PERMISSION_CODES.filter(
-      (permission) => !servicePermissions.has(permission),
-    );
-    const explicitlyGrantedServicePermissions =
-      filterPermissionCodesForDepartments(
-        departments,
-        individualPermissions,
-      ).filter((permission) => servicePermissions.has(permission));
-
-    return Array.from(
-      new Set([
-        ...administrativePermissions,
-        ...explicitlyGrantedServicePermissions,
-      ]),
-    ).sort();
+    return [...ALL_PERMISSION_CODES].sort();
   }
 
   if (documentAccessMode === 'document-portal') {

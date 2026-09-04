@@ -72,7 +72,7 @@ describe('createLegacyAccessSnapshot', () => {
     expect(legacy.fingerprint).toBe(current.fingerprint);
   });
 
-  it('preserves administrator authority without implicit service grants during compatibility', () => {
+  it('projects the complete current catalog for an administrator', () => {
     const snapshot = createLegacyAccessSnapshot({
       companyId: 'company-1',
       userId: 'admin-1',
@@ -83,19 +83,26 @@ describe('createLegacyAccessSnapshot', () => {
       routingCompanyId: null,
     });
 
-    const servicePermissions = new Set(SERVICE_PERMISSION_CEILING);
-    const expectedCapabilities = ALL_PERMISSION_CODES.filter(
-      (permission) => !servicePermissions.has(permission),
-    ).sort();
-
-    expect(snapshot.capabilities).toEqual(expectedCapabilities);
+    expect(snapshot.capabilities).toEqual([...ALL_PERMISSION_CODES].sort());
+    expect(snapshot.capabilities).toEqual(
+      expect.arrayContaining([...SERVICE_PERMISSION_CEILING]),
+    );
     expect(snapshot.departments.length).toBeGreaterThan(0);
     expect(snapshot.departments).toContain('management');
     expect(snapshot.isAdministrator).toBe(true);
   });
 
-  it('adds only explicitly granted service permissions for an administrator', () => {
-    const snapshot = createLegacyAccessSnapshot({
+  it('does not depend on materialized service grants for an administrator', () => {
+    const withoutMaterializedGrant = createLegacyAccessSnapshot({
+      companyId: 'company-1',
+      userId: 'admin-1',
+      isAdministrator: true,
+      departments: [],
+      permissionCodes: [],
+      documentAccessMode: 'standard',
+      routingCompanyId: null,
+    });
+    const withMaterializedGrant = createLegacyAccessSnapshot({
       companyId: 'company-1',
       userId: 'admin-1',
       isAdministrator: true,
@@ -105,12 +112,11 @@ describe('createLegacyAccessSnapshot', () => {
       routingCompanyId: null,
     });
 
-    expect(
-      snapshot.capabilities.filter((permission) =>
-        SERVICE_PERMISSION_CEILING.includes(
-          permission as (typeof SERVICE_PERMISSION_CEILING)[number],
-        ),
-      ),
-    ).toEqual(['service:view']);
+    expect(withoutMaterializedGrant.capabilities).toEqual(
+      withMaterializedGrant.capabilities,
+    );
+    expect(withoutMaterializedGrant.fingerprint).toBe(
+      withMaterializedGrant.fingerprint,
+    );
   });
 });

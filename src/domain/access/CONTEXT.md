@@ -66,7 +66,8 @@ _Evite_: Diretoria, autoridade ampla por departamento
 
 **Administrador da Instalação Lume**:
 Autoridade total sobre a instalação e seu tenant, separada da Diretoria e da
-Gerência.
+Gerência. Recebe todo o catálogo efetivo atual, inclusive `service:*`, sem
+depender de departamentos ou concessões individuais materializadas.
 _Evite_: Diretoria, Gerência, supervisor
 
 **Supervisão**:

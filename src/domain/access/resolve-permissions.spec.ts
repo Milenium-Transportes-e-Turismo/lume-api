@@ -49,20 +49,13 @@ describe('resolveEffectivePermissions', () => {
     expect(permissions).not.toContain('license:view');
   });
 
-  it('does not grant operational attendance merely because a user is administrator', () => {
+  it('grants the complete current permission catalog to an administrator', () => {
     const administrative = resolveEffectivePermissions([], [], true);
 
-    expect(administrative).toContain('whatsapp-channels:manage');
-    expect(administrative).not.toEqual(
+    expect(administrative).toEqual([...ALL_PERMISSION_CODES].sort());
+    expect(administrative).toEqual(
       expect.arrayContaining([...SERVICE_PERMISSION_CEILING]),
     );
-    expect(
-      resolveEffectivePermissions(
-        ['commercial'],
-        SERVICE_PERMISSION_CEILING,
-        true,
-      ),
-    ).toEqual(expect.arrayContaining([...SERVICE_PERMISSION_CEILING]));
     expect(resolveEffectivePermissions([], ['users:manage'])).not.toContain(
       'users:manage',
     );

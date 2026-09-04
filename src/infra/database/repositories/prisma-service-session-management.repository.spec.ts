@@ -34,6 +34,7 @@ function repositoryHarness() {
     findMany,
     findFirst,
     tenantDepartmentFindMany,
+    userFindMany,
   };
 }
 
@@ -216,6 +217,109 @@ describe('PrismaServiceSessionManagementRepository access scope', () => {
           companyId: 'company-1',
           code: { not: DepartmentCode.CLIENT_COMPANY },
         },
+      }),
+    );
+  });
+
+  it('publica administradores sem concessão materializada como destinos de assignment', async () => {
+    const { repository, tenantDepartmentFindMany, userFindMany } =
+      repositoryHarness();
+    tenantDepartmentFindMany.mockResolvedValue([
+      {
+        id: 'department-commercial',
+        code: DepartmentCode.COMMERCIAL,
+        name: 'Comercial',
+        isDefault: true,
+        serviceQueues: [],
+      },
+    ]);
+    userFindMany.mockResolvedValue([
+      {
+        id: 'administrator-1',
+        name: 'Administrador',
+        departments: [],
+        isAdministrator: true,
+      },
+    ]);
+
+    const targets = await repository.listAssignmentTargets({
+      companyId: 'company-1',
+    });
+
+    expect(userFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [
+            { isAdministrator: true },
+            { permissionCodes: { has: 'service:assume' } },
+          ],
+        }),
+      }),
+    );
+    expect(targets[0]?.users).toEqual([
+      { id: 'administrator-1', name: 'Administrador' },
+    ]);
+  });
+
+  it('revalida a autoridade administrativa ao definir o responsável', async () => {
+    const row = sessionRow();
+    const userFindFirst = vi.fn().mockResolvedValue(null);
+    const transaction = {
+      $executeRaw: vi.fn().mockResolvedValue(0),
+      serviceSessionEvent: { findUnique: vi.fn().mockResolvedValue(null) },
+      serviceSession: { findFirst: vi.fn().mockResolvedValue(row) },
+      tenantDepartment: {
+        findFirst: vi
+          .fn()
+          .mockResolvedValue({ code: DepartmentCode.COMMERCIAL }),
+      },
+      user: { findFirst: userFindFirst },
+    };
+    const prisma = {
+      $transaction: vi.fn(
+        (operation: (client: typeof transaction) => Promise<unknown>) =>
+          operation(transaction),
+      ),
+    };
+    const repository = new PrismaServiceSessionManagementRepository(
+      prisma as unknown as PrismaService,
+    );
+    const before = managedSession();
+    const after = managedSession({
+      responsibleUserId: 'administrator-1',
+      responsibleUserName: 'Administrador',
+      responsible: { id: 'administrator-1', name: 'Administrador' },
+      status: 'open',
+      version: 3,
+    });
+
+    await expect(
+      repository.mutate({
+        companyId: 'company-1',
+        sessionId: 'session-1',
+        actorUserId: 'administrator-1',
+        commandId: 'command-admin-assume',
+        expectedVersion: 2,
+        accessibleDepartments: null,
+        eventName: 'assume',
+        before,
+        after,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+
+    expect(userFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: 'administrator-1',
+          companyId: 'company-1',
+          OR: [
+            { isAdministrator: true },
+            {
+              departments: { hasSome: ['commercial'] },
+              permissionCodes: { has: 'service:assume' },
+            },
+          ],
+        }),
       }),
     );
   });

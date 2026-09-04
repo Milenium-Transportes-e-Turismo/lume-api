@@ -130,6 +130,12 @@ prioridade, modo de controle, canal de origem, deadlines e `availableActions`;
 o navegador não inventa capacidades ausentes. Transferências preservam a mesma
 Thread e o mesmo `sourceChannelId`.
 
+O Administrador da Instalação recebe automaticamente o catálogo `service:*`,
+mesmo com `departments` e `permissionCodes` vazios, e pode assumir ou receber
+um atendimento em qualquer departamento do tenant. Essa autoridade não o
+coloca na distribuição automática de filas; essa distribuição continua
+exigindo vínculo operacional e concessão individual para usuários comuns.
+
 O lifecycle automático é conduzido por estado persistido, nunca por heurística
 do menu legado. Quando a IA já marcou a sessão resolvida e não há ação ou
 entrega pendente, a API pergunta “Precisa de mais alguma coisa?” e entra em

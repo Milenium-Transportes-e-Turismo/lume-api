@@ -6,20 +6,13 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 
-import {
-  SERVICE_PERMISSION_CEILING,
-  type PermissionCode,
-} from '../../../domain/access/access.constants';
+import type { PermissionCode } from '../../../domain/access/access.constants';
 import { canExercisePermission } from '../../../domain/access/tenant-authority';
 import type { AuthenticatedRequest } from '../decorators/current-user.decorator';
 import { REQUIRED_PERMISSIONS } from '../decorators/require-permissions.decorator';
 
 @Injectable()
 export class PermissionsGuard implements CanActivate {
-  private readonly operationalServicePermissions = new Set<PermissionCode>(
-    SERVICE_PERMISSION_CEILING,
-  );
-
   constructor(private readonly reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
@@ -36,12 +29,7 @@ export class PermissionsGuard implements CanActivate {
 
     if (
       !user ||
-      !required.some((permission) =>
-        user.isAdministrator &&
-        this.operationalServicePermissions.has(permission)
-          ? user.permissions.includes(permission)
-          : canExercisePermission(user, permission),
-      )
+      !required.some((permission) => canExercisePermission(user, permission))
     ) {
       throw new ForbiddenException(
         'Você não possui permissão para esta operação.',
