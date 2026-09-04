@@ -349,6 +349,17 @@ const baseEnvSchema = z
       'TOLL_INTELLIGENCE_TIMEOUT_MS',
       90_000,
     ),
+    AGENT_DOCKER_SECRETS_ROOT: optionalStringSchema(
+      'AGENT_DOCKER_SECRETS_ROOT',
+      '/run/secrets',
+    ).superRefine((value, context) => {
+      if (!isAbsolute(value)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'AGENT_DOCKER_SECRETS_ROOT deve ser um caminho absoluto.',
+        });
+      }
+    }),
     AGENT_OPENAI_RESPONSES_TIMEOUT_MS: positiveIntegerSchema(
       'AGENT_OPENAI_RESPONSES_TIMEOUT_MS',
       30_000,

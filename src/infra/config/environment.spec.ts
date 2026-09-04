@@ -96,7 +96,26 @@ describe('validateEnvironment', () => {
       HEIGIT_BASE_URL: 'https://api.heigit.org',
       TOLL_INTELLIGENCE_ENABLED: false,
       TOLL_INTELLIGENCE_OPENAI_MODEL: 'gpt-5.4-mini',
+      AGENT_DOCKER_SECRETS_ROOT: '/run/secrets',
     });
+  });
+
+  it('accepts only an absolute Docker secrets root', () => {
+    const absoluteRoot = resolve('var', 'agent-secrets');
+
+    expect(
+      validateEnvironment({
+        ...validEnvironment,
+        AGENT_DOCKER_SECRETS_ROOT: absoluteRoot,
+      }),
+    ).toMatchObject({ AGENT_DOCKER_SECRETS_ROOT: absoluteRoot });
+
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        AGENT_DOCKER_SECRETS_ROOT: './relative-secrets',
+      }),
+    ).toThrow('AGENT_DOCKER_SECRETS_ROOT deve ser um caminho absoluto.');
   });
 
   it('requires a private absolute knowledge storage path in production', () => {
