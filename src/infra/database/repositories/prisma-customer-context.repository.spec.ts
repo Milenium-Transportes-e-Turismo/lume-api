@@ -155,7 +155,7 @@ describe('PrismaCustomerContextRepository suggestions', () => {
       }),
     );
     const transaction = {
-      $queryRaw: vi.fn(async () => []),
+      $executeRaw: vi.fn(async () => 1),
       tenantAuditLog: {
         findFirst: vi.fn(async () => null),
         create: auditCreate,
@@ -224,7 +224,7 @@ describe('PrismaCustomerContextRepository suggestions', () => {
   it('accepts the in-process runtime only for a RUNNING execution in the exact tenant/session', async () => {
     const executionFind = vi.fn(async () => ({ id: EXECUTION_ID }));
     const transaction = {
-      $queryRaw: vi.fn(async () => []),
+      $executeRaw: vi.fn(async () => 1),
       tenantAuditLog: {
         findFirst: vi.fn(async () => null),
         create: vi.fn(async () => ({ id: 'audit' })),
@@ -274,7 +274,7 @@ describe('PrismaCustomerContextRepository suggestions', () => {
       }),
     );
     const transaction = {
-      $queryRaw: vi.fn(async () => []),
+      $executeRaw: vi.fn(async () => 1),
       tenantAuditLog: {
         findFirst: vi.fn(async () => savedAudit),
         create: vi.fn(
@@ -317,7 +317,7 @@ describe('PrismaCustomerContextRepository suggestions', () => {
     const updateMany = vi.fn(async () => ({ count: 1 }));
     const auditCreate = vi.fn(async () => ({ id: 'audit' }));
     const transaction = {
-      $queryRaw: vi.fn(async () => []),
+      $executeRaw: vi.fn(async () => 1),
       tenantAuditLog: {
         findFirst: vi.fn(async () => null),
         create: auditCreate,
@@ -384,7 +384,7 @@ describe('PrismaCustomerContextRepository suggestions', () => {
     const updateMany = vi.fn();
     let actorExists = true;
     const transaction = {
-      $queryRaw: vi.fn(async () => []),
+      $executeRaw: vi.fn(async () => 1),
       tenantAuditLog: { findFirst: vi.fn(async () => null) },
       user: {
         findFirst: vi.fn(async () => (actorExists ? { id: USER_ID } : null)),

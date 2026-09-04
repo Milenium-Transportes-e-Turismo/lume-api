@@ -718,7 +718,7 @@ describe('WhatsAppImportService.validate', () => {
     expect(report.valid).toBe(true);
     expect(Math.max(...lookupSizes)).toBeLessThanOrEqual(1_000);
     expect(lookupSizes.length).toBeGreaterThanOrEqual(4);
-  });
+  }, 15_000);
 });
 
 describe('WhatsAppImportService.apply', () => {

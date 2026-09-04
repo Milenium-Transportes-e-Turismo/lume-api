@@ -333,7 +333,7 @@ describe('PrismaAgentExecutionRepository', () => {
 
   it('persists exact safe snapshots and redacts attempted secret echoes', async () => {
     const transaction = {
-      $queryRaw: vi.fn().mockResolvedValue([]),
+      $executeRaw: vi.fn().mockResolvedValue(1),
       agentExecution: {
         findFirst: vi
           .fn()
@@ -494,7 +494,7 @@ describe('PrismaAgentExecutionRepository', () => {
 
   it('persiste provenance machine/human tenant-scoped e preserva replay idempotente', async () => {
     const transaction = {
-      $queryRaw: vi.fn().mockResolvedValue([]),
+      $executeRaw: vi.fn().mockResolvedValue(1),
       mediaInterpretation: {
         findMany: vi.fn().mockResolvedValue([
           {
@@ -598,7 +598,7 @@ describe('PrismaAgentExecutionRepository', () => {
 
   it('recusa interpretação de outro tenant antes de criar a execução', async () => {
     const transaction = {
-      $queryRaw: vi.fn().mockResolvedValue([]),
+      $executeRaw: vi.fn().mockResolvedValue(1),
       mediaInterpretation: { findMany: vi.fn().mockResolvedValue([]) },
       agentExecution: {
         findFirst: vi.fn(),

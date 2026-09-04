@@ -78,7 +78,7 @@ export class PrismaDataExchangeRepository extends DataExchangeRepository {
   ): Promise<StoredDataExchangeArtifact> {
     try {
       return await this.prisma.$transaction(async (transaction) => {
-        await transaction.$queryRaw`
+        await transaction.$executeRaw`
           SELECT pg_advisory_xact_lock(
             hashtext(${`${input.companyId}:data-exchange:${input.commandId}`})
           )
@@ -135,7 +135,7 @@ export class PrismaDataExchangeRepository extends DataExchangeRepository {
           }
         }
 
-        await transaction.$queryRaw`
+        await transaction.$executeRaw`
           SELECT pg_advisory_xact_lock(
             hashtext(${`${input.companyId}:data-exchange:quota`})
           )

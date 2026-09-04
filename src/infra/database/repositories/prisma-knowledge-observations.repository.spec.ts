@@ -70,7 +70,7 @@ describe('PrismaKnowledgeRepository agent suggestions', () => {
     const suggestionWrites: Array<{ data: Record<string, unknown> }> = [];
     const auditWrites: AuditWrite[] = [];
     const transaction = {
-      $queryRaw: vi.fn(async () => []),
+      $executeRaw: vi.fn(async () => 1),
       ...provenance(),
       tenantAuditLog: {
         findFirst: vi.fn(
@@ -177,7 +177,7 @@ describe('PrismaKnowledgeRepository agent suggestions', () => {
     const auditWrites: AuditWrite[] = [];
     const source = provenance();
     const transaction = {
-      $queryRaw: vi.fn(async () => []),
+      $executeRaw: vi.fn(async () => 1),
       ...source,
       tenantAuditLog: {
         findFirst: vi.fn(async () => null),
@@ -246,7 +246,7 @@ describe('PrismaKnowledgeRepository agent suggestions', () => {
   it('denies cross-tenant provenance before evidence or suggestion writes', async () => {
     const source = provenance();
     const transaction = {
-      $queryRaw: vi.fn(async () => []),
+      $executeRaw: vi.fn(async () => 1),
       ...source,
       serviceIdentity: { findFirst: vi.fn(async () => null) },
       tenantAuditLog: { findFirst: vi.fn() },
@@ -286,7 +286,7 @@ describe('PrismaKnowledgeRepository recurring gaps', () => {
     const audits = new Map<string, Record<string, unknown>>();
     const gapUpdates: Array<{ data: Record<string, unknown> }> = [];
     const transaction = {
-      $queryRaw: vi.fn(async () => []),
+      $executeRaw: vi.fn(async () => 1),
       ...provenance(),
       tenantAuditLog: {
         findFirst: vi.fn(

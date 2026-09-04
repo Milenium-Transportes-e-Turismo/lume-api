@@ -19,7 +19,7 @@ const departmentId = '00000000-0000-4000-8000-000000000007';
 
 function transactionBase() {
   return {
-    $queryRaw: vi.fn().mockResolvedValue([]),
+    $executeRaw: vi.fn().mockResolvedValue(1),
     tenantAuditLog: {
       findFirst: vi.fn().mockResolvedValue(null),
       create: vi.fn().mockResolvedValue({}),

@@ -44,6 +44,7 @@ import {
   RoutingRouteType,
   WhatsAppImportBatchStatus,
 } from '../src/infra/database/prisma/generated/client';
+import { ProductionBootstrapService } from '../src/infra/bootstrap/production-bootstrap.service';
 import { WhatsAppImportService } from '../src/infra/imports/whatsapp-import.service';
 import {
   CONVERSATION_HEADERS,
@@ -240,6 +241,7 @@ function configureEnvironment(mediaStoragePath: string): string {
     TENANT_ADMIN_NAME: 'Admin E2E',
     TENANT_ADMIN_USERNAME: 'admin.e2e',
     TENANT_ADMIN_EMAIL: 'admin.e2e@example.test',
+    TENANT_ADMIN_CPF: '11144477735',
     TENANT_ADMIN_PASSWORD: 'SenhaForte@2026',
     WHATSAPP_ENABLED: 'true',
     WHATSAPP_CHANNEL_ID: channelId,
@@ -585,6 +587,40 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     if (mediaStoragePath) {
       await rm(mediaStoragePath, { recursive: true, force: true });
     }
+  });
+
+  it('reutiliza o administrador pelo CPF quando usuário e e-mail configurados mudam', async () => {
+    const administrator = await prisma.user.findUniqueOrThrow({
+      where: { cpfNormalized: '11144477735' },
+      select: { id: true },
+    });
+    await prisma.user.update({
+      where: { id: administrator.id },
+      data: {
+        username: 'administrador.legado.e2e',
+        usernameNormalized: 'administrador.legado.e2e',
+        email: 'administrador.legado.e2e@example.test',
+        emailNormalized: 'administrador.legado.e2e@example.test',
+      },
+    });
+
+    const result = await app.get(ProductionBootstrapService).execute();
+
+    expect(result.administratorId).toBe(administrator.id);
+    await expect(
+      prisma.user.findUniqueOrThrow({
+        where: { id: administrator.id },
+        select: {
+          usernameNormalized: true,
+          emailNormalized: true,
+          cpfNormalized: true,
+        },
+      }),
+    ).resolves.toEqual({
+      usernameNormalized: 'admin.e2e',
+      emailNormalized: 'admin.e2e@example.test',
+      cpfNormalized: '11144477735',
+    });
   });
 
   it('aceita corpos JSON normais e rejeita payloads acima de 1 MB', async () => {

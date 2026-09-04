@@ -60,7 +60,7 @@ describe('PrismaConversationRegistrationRepository identity', () => {
   it('treats a shared phone as ambiguous without leaking candidate data', async () => {
     const createParticipant = vi.fn(async () => ({ id: 'participant' }));
     const transaction = {
-      $queryRaw: vi.fn(async () => [{ pg_advisory_xact_lock: null }]),
+      $executeRaw: vi.fn(async () => 1),
       serviceSession: { findFirst: vi.fn(async () => session()) },
       registrationPhone: {
         findMany: vi.fn(async () => [
@@ -137,7 +137,7 @@ describe('PrismaConversationRegistrationRepository draft safety', () => {
     let auditMetadata: unknown = null;
     const serviceCaseCreate = vi.fn(async () => ({ id: DRAFT_ID }));
     const transaction = {
-      $queryRaw: vi.fn(async () => [{ pg_advisory_xact_lock: null }]),
+      $executeRaw: vi.fn(async () => 1),
       tenantAuditLog: {
         findFirst: vi.fn(async () =>
           auditMetadata ? { metadata: auditMetadata } : null,
@@ -187,7 +187,7 @@ describe('PrismaConversationRegistrationRepository draft safety', () => {
       },
     );
     const transaction = {
-      $queryRaw: vi.fn(async () => [{ pg_advisory_xact_lock: null }]),
+      $executeRaw: vi.fn(async () => 1),
       tenantAuditLog: {
         findFirst: vi.fn(
           async ({ where }: { where: { metadata: { equals: string } } }) => {
@@ -325,7 +325,7 @@ describe('PrismaConversationRegistrationRepository draft safety', () => {
     let terminalMetadata: unknown;
     const routingCreate = vi.fn();
     const transaction = {
-      $queryRaw: vi.fn(async () => [{ pg_advisory_xact_lock: null }]),
+      $executeRaw: vi.fn(async () => 1),
       tenantAuditLog: {
         findFirst: vi.fn(async () => null),
         create: vi.fn(async () => ({ id: 'audit' })),
@@ -397,7 +397,7 @@ describe('PrismaConversationRegistrationRepository draft safety', () => {
     const relationshipUpsert = vi.fn(async () => ({ id: 'relationship-1' }));
     const participantCreate = vi.fn(async () => ({ id: 'participant-1' }));
     const transaction = {
-      $queryRaw: vi.fn(async () => [{ pg_advisory_xact_lock: null }]),
+      $executeRaw: vi.fn(async () => 1),
       tenantAuditLog: {
         findFirst: vi.fn(async () => null),
         create: vi.fn(async () => ({ id: 'audit' })),
@@ -537,7 +537,7 @@ describe('PrismaConversationRegistrationRepository human data review', () => {
     const historyCreate = vi.fn(async () => ({ id: 'history' }));
     const auditCreate = vi.fn(async () => ({ id: 'audit' }));
     const transaction = {
-      $queryRaw: vi.fn(async () => [{ pg_advisory_xact_lock: null }]),
+      $executeRaw: vi.fn(async () => 1),
       tenantAuditLog: {
         findFirst: vi.fn(async () => null),
         create: auditCreate,
@@ -621,7 +621,7 @@ describe('PrismaConversationRegistrationRepository human data review', () => {
   it('requires a human rejection reason and leaves the Registration untouched', async () => {
     const routingUpdate = vi.fn();
     const transaction = {
-      $queryRaw: vi.fn(async () => [{ pg_advisory_xact_lock: null }]),
+      $executeRaw: vi.fn(async () => 1),
       tenantAuditLog: { findFirst: vi.fn(async () => null) },
       user: { findFirst: vi.fn(async () => ({ id: 'user' })) },
       registrationDataReview: { findFirst: vi.fn() },

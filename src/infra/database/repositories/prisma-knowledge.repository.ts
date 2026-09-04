@@ -265,7 +265,7 @@ export class PrismaKnowledgeRepository extends KnowledgeRepository {
     ) => Promise<Prisma.InputJsonObject>,
   ): Promise<Prisma.InputJsonObject> {
     return this.prisma.$transaction(async (transaction) => {
-      await transaction.$queryRaw`
+      await transaction.$executeRaw`
         SELECT pg_advisory_xact_lock(
           hashtext(${`${input.companyId}:knowledge:${input.commandId}`})
         )
@@ -455,7 +455,7 @@ export class PrismaKnowledgeRepository extends KnowledgeRepository {
     ) => Promise<{ readonly targetId: string; readonly result: TResult }>,
   ): Promise<TResult & { readonly idempotent: boolean }> {
     return this.prisma.$transaction(async (transaction) => {
-      await transaction.$queryRaw`
+      await transaction.$executeRaw`
         SELECT pg_advisory_xact_lock(
           hashtext(${`${input.companyId}:knowledge-agent:${input.commandId}`})
         )
@@ -1441,7 +1441,7 @@ export class PrismaKnowledgeRepository extends KnowledgeRepository {
         }),
       },
       async (transaction, provenance) => {
-        await transaction.$queryRaw`
+        await transaction.$executeRaw`
           SELECT pg_advisory_xact_lock(
             hashtext(${`${input.companyId}:knowledge-gap:${input.topicNormalized}`})
           )

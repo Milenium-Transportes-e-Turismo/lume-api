@@ -352,7 +352,7 @@ export class PrismaConversationRegistrationRepository extends ConversationRegist
     transaction: TransactionClient,
     key: string,
   ): Promise<void> {
-    await transaction.$queryRaw`
+    await transaction.$executeRaw`
       SELECT pg_advisory_xact_lock(hashtext(${key}))
     `;
   }

@@ -207,6 +207,13 @@ na mesma Thread/sourceChannel sem relação semântica inventada com a anterior.
 
 O backfill reutiliza UUIDs para manter rastreabilidade:
 
+Em bancos que já possuem transições, as migrations
+`20260829000050_prepare_whatsapp_transition_backfill` e
+`20260829000150_restore_whatsapp_transition_append_only` suspendem o trigger
+legado somente durante o preenchimento controlado de `thread_id` e
+`service_session_id`. A proteção append-only é restaurada imediatamente depois
+e continua bloqueando qualquer mutação operacional do histórico.
+
 | Legado                           | Fundação                     |
 | -------------------------------- | ---------------------------- |
 | `WhatsAppConversation.id`        | `WhatsAppThread.id`          |

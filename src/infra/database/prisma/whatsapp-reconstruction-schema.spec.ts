@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
@@ -21,8 +21,60 @@ const platformCatalogMigration = readFileSync(
   ),
   'utf8',
 );
+const transitionBackfillPreparationMigrationName =
+  '20260829000050_prepare_whatsapp_transition_backfill';
+const transitionGuardRestorationMigrationName =
+  '20260829000150_restore_whatsapp_transition_append_only';
+const transitionBackfillPreparationMigrationPath = resolve(
+  process.cwd(),
+  'prisma/migrations',
+  transitionBackfillPreparationMigrationName,
+  'migration.sql',
+);
+const transitionGuardRestorationMigrationPath = resolve(
+  process.cwd(),
+  'prisma/migrations',
+  transitionGuardRestorationMigrationName,
+  'migration.sql',
+);
 
 describe('WhatsApp reconstruction schema foundation', () => {
+  it('brackets the legacy transition backfill with the append-only guard', () => {
+    expect(existsSync(transitionBackfillPreparationMigrationPath)).toBe(true);
+    expect(existsSync(transitionGuardRestorationMigrationPath)).toBe(true);
+    expect(
+      [
+        transitionBackfillPreparationMigrationName,
+        '20260829000100_whatsapp_reconstruction_foundation',
+        transitionGuardRestorationMigrationName,
+      ].sort(),
+    ).toEqual([
+      transitionBackfillPreparationMigrationName,
+      '20260829000100_whatsapp_reconstruction_foundation',
+      transitionGuardRestorationMigrationName,
+    ]);
+
+    const preparationMigration = readFileSync(
+      transitionBackfillPreparationMigrationPath,
+      'utf8',
+    );
+    const restorationMigration = readFileSync(
+      transitionGuardRestorationMigrationPath,
+      'utf8',
+    );
+
+    expect(preparationMigration).toContain(
+      'DROP TRIGGER IF EXISTS "whatsapp_transitions_append_only"',
+    );
+    expect(preparationMigration).toContain("column_name = 'thread_id'");
+    expect(restorationMigration).toContain(
+      'CREATE TRIGGER "whatsapp_transitions_append_only"',
+    );
+    expect(restorationMigration).toContain(
+      'EXECUTE FUNCTION "reject_whatsapp_transition_mutation"()',
+    );
+  });
+
   it('keeps the migration additive and projects legacy identifiers', () => {
     expect(migration).not.toMatch(/\b(?:DROP|TRUNCATE)\s+(?:TABLE|TYPE)\b/i);
     expect(migration).not.toMatch(/DELETE\s+FROM\s+"whatsapp_/i);

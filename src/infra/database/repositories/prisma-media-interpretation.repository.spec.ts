@@ -84,6 +84,53 @@ function repositoryWithTransaction<T>(transaction: T) {
 }
 
 describe('PrismaMediaInterpretationRepository', () => {
+  it('adquire o advisory lock sem desserializar o retorno void do PostgreSQL', async () => {
+    const executeRaw = vi.fn(async () => 1);
+    const transaction = {
+      $executeRaw: executeRaw,
+      mediaAsset: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: mediaAssetId,
+          messages: [{ id: messageId }],
+          groupMessages: [],
+          interpretation: row(),
+        }),
+      },
+    };
+    const { repository } = repositoryWithTransaction(transaction);
+
+    const result = await repository.claim({
+      companyId,
+      mediaAssetId,
+      messageId,
+      serviceSessionId: '00000000-0000-4000-8000-000000000010',
+      commandId: 'media-interpretation:test',
+      requestMode: 'automatic',
+      requestedByUserId: null,
+      agentId: '00000000-0000-4000-8000-000000000011',
+      agentType: 'specialist',
+      runtime: {
+        runtimeId: '00000000-0000-4000-8000-000000000012',
+        runtimeConfigVersion: 1,
+        provider: 'openai',
+        model: 'gpt-5-mini',
+        credentialIdentifier: 'media-specialist-v1',
+        temperature: null,
+        maxOutputTokens: null,
+      },
+      platformPromptVersionId: '00000000-0000-4000-8000-000000000013',
+      tenantPromptVersionId: null,
+      promptSnapshot: {},
+      startedAt: completedAt,
+    });
+
+    expect(executeRaw).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      claimed: false,
+      interpretation: { interpretationId },
+    });
+  });
+
   it('faz dual-write do status e dos chunks sem remover o JSON compatível', async () => {
     const transaction = {
       mediaAsset: {

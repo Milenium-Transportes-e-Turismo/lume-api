@@ -520,7 +520,7 @@ export class PrismaMediaInterpretationRepository extends MediaInterpretationRepo
     input: ClaimMediaInterpretationInput,
   ): Promise<ClaimMediaInterpretationResult> {
     return this.prisma.$transaction(async (transaction) => {
-      await transaction.$queryRaw`
+      await transaction.$executeRaw`
         SELECT pg_advisory_xact_lock(
           hashtext(${`${input.companyId}:media-interpretation:${input.mediaAssetId}`})
         )
@@ -648,7 +648,7 @@ export class PrismaMediaInterpretationRepository extends MediaInterpretationRepo
     readonly occurredAt: Date;
   }): Promise<MediaInterpretationView> {
     return this.prisma.$transaction(async (transaction) => {
-      await transaction.$queryRaw`
+      await transaction.$executeRaw`
         SELECT pg_advisory_xact_lock(
           hashtext(${`${input.companyId}:media-interpretation:${input.mediaAssetId}`})
         )
@@ -1028,7 +1028,7 @@ export class PrismaMediaInterpretationRepository extends MediaInterpretationRepo
           'Somente uma interpretação concluída pode receber correção.',
         );
       }
-      await transaction.$queryRaw`
+      await transaction.$executeRaw`
         SELECT pg_advisory_xact_lock(
           hashtext(${`${input.companyId}:media-correction:${interpretation.id}`})
         )

@@ -613,7 +613,7 @@ export class PrismaAgentExecutionRepository
     input: CreateAgentExecutionPersistenceInput,
   ): Promise<{ readonly executionId: string; readonly created: boolean }> {
     return this.prisma.$transaction(async (transaction) => {
-      await transaction.$queryRaw`
+      await transaction.$executeRaw`
         SELECT pg_advisory_xact_lock(
           hashtext(${`${input.companyId}:agent-execution:${input.commandId}`})
         )

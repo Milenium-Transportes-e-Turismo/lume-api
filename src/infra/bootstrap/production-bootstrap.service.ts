@@ -69,6 +69,44 @@ const tenantDepartments = ASSIGNABLE_DEPARTMENTS.map((publicCode) => ({
   isDefault: publicCode === 'commercial',
 }));
 
+type BootstrapAdministratorMatch = {
+  readonly id: string;
+  readonly companyId: string;
+  readonly passwordHash: string;
+};
+
+function bootstrapAdministratorWhere(input: {
+  readonly usernameNormalized: string;
+  readonly emailNormalized: string;
+  readonly cpfNormalized: string | null;
+}): Prisma.UserWhereInput {
+  return {
+    OR: [
+      { usernameNormalized: input.usernameNormalized },
+      { emailNormalized: input.emailNormalized },
+      ...(input.cpfNormalized ? [{ cpfNormalized: input.cpfNormalized }] : []),
+    ],
+  };
+}
+
+export function selectBootstrapAdministrator(
+  matches: readonly BootstrapAdministratorMatch[],
+  licensedTenantId: string,
+): BootstrapAdministratorMatch | null {
+  if (matches.length > 1) {
+    throw conflict(
+      'TENANT_ADMIN_USERNAME, TENANT_ADMIN_EMAIL e TENANT_ADMIN_CPF correspondem a usuários diferentes.',
+    );
+  }
+  const match = matches[0];
+  if (match && match.companyId !== licensedTenantId) {
+    throw conflict(
+      'Um identificador do administrador inicial pertence a outro tenant.',
+    );
+  }
+  return match ?? null;
+}
+
 @Injectable()
 export class ProductionBootstrapService {
   constructor(
@@ -104,10 +142,18 @@ export class ProductionBootstrapService {
     const usernameNormalized = normalizeUsername(username);
     const email = this.config.getOrThrow<string>('TENANT_ADMIN_EMAIL');
     const emailNormalized = normalizeEmail(email);
-    const existingAdministrator = await this.prisma.user.findFirst({
-      where: { companyId: licensedTenantId, usernameNormalized },
-      select: { id: true, passwordHash: true },
+    const administratorWhere = bootstrapAdministratorWhere({
+      usernameNormalized,
+      emailNormalized,
+      cpfNormalized,
     });
+    const existingAdministrator = selectBootstrapAdministrator(
+      await this.prisma.user.findMany({
+        where: administratorWhere,
+        select: { id: true, companyId: true, passwordHash: true },
+      }),
+      licensedTenantId,
+    );
     const adminPassword =
       this.config.get<string>('TENANT_ADMIN_PASSWORD')?.trim() ?? '';
     if (!existingAdministrator && adminPassword.length < 12) {
@@ -136,10 +182,15 @@ export class ProductionBootstrapService {
         },
       });
 
-      let administrator = await transaction.user.findFirst({
-        where: { companyId: licensedTenantId, usernameNormalized },
-      });
-      if (!administrator) {
+      const transactionAdministrator = selectBootstrapAdministrator(
+        await transaction.user.findMany({
+          where: administratorWhere,
+          select: { id: true, companyId: true, passwordHash: true },
+        }),
+        licensedTenantId,
+      );
+      let administrator;
+      if (!transactionAdministrator) {
         if (!passwordHash) {
           throw validationError(
             'TENANT_ADMIN_PASSWORD é obrigatório para criar o administrador.',
@@ -176,16 +227,19 @@ export class ProductionBootstrapService {
         administrator = await transaction.user.update({
           where: {
             id_companyId: {
-              id: administrator.id,
+              id: transactionAdministrator.id,
               companyId: licensedTenantId,
             },
           },
           data: {
             name: this.config.getOrThrow<string>('TENANT_ADMIN_NAME').trim(),
+            username: username.trim(),
+            usernameNormalized,
             email: email.trim(),
             emailNormalized,
             cpfNormalized,
             isActive: true,
+            deletedAt: null,
             status: UserAccountStatus.ACTIVE,
             suspendedUntil: null,
             suspensionReason: null,
