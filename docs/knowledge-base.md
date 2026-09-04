@@ -69,6 +69,10 @@ Todas as rotas abaixo exigem JWT e derivam o tenant exclusivamente do usuário:
 - listagem/revisão em `/api/v1/knowledge/suggestions` e
   `/api/v1/knowledge/gaps`.
 
+Os identificadores publicados por `GET /api/v1/knowledge/departments` são UUIDs
+RFC 4122. Uma restrição no banco impede que seeds ou integrações persistam os
+valores de 128 bits não RFC que o tipo `uuid` do PostgreSQL também aceitaria.
+
 `knowledge:view` lê metadados, versões, originais, sugestões e gaps;
 `knowledge:manage` cria/edita/arquiva e revisa; `knowledge:publish` é obrigatório
 para publicar. Cada mutação usa `commandId` para replay idempotente e registra
