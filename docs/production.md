@@ -120,8 +120,8 @@ entregar um original autenticado. A extração de PDF roda localmente, sem acess
 à rede ou execução de JavaScript, e recusa arquivos sem texto extraível; não há
 OCR nesta entrega.
 
-O serviço transitório `storage-init` do Compose prepara os volumes de mídias e
-importações com permissão de escrita para o usuário da API antes da
+O serviço transitório `storage-init` do Compose prepara os volumes de mídias,
+importações e Knowledge com permissão de escrita para o usuário da API antes da
 inicialização. Mantenha essa dependência ao criar ou restaurar os volumes; sem
 ela, o primeiro lote pode falhar antes mesmo de receber o arquivo ZIP.
 

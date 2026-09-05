@@ -1,10 +1,24 @@
-import { describe, expect, it } from 'vitest';
+import { ConfigService } from '@nestjs/config';
+import { describe, expect, it, vi } from 'vitest';
 
-import { FakePasswordHasher } from '../../../test/fakes/in-memory';
 import {
+  FakeOfflineLicenseVerifier,
+  FakePasswordHasher,
+} from '../../../test/fakes/in-memory';
+import { ensurePlatformAgentCatalog } from '../agents/platform-agent-persistence';
+import {
+  ProductionBootstrapService,
   selectBootstrapAdministrator,
   stillUsesBootstrapPassword,
 } from './production-bootstrap.service';
+
+vi.mock('../agents/platform-agent-persistence', () => ({
+  ensurePlatformAgentCatalog: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('./document-catalog.seed', () => ({
+  seedInitialDocumentCatalog: vi.fn().mockResolvedValue(undefined),
+}));
 
 const tenantId = '00000000-0000-4000-8000-000000000001';
 const administrator = {
@@ -76,5 +90,67 @@ describe('production bootstrap administrator identity', () => {
         tenantId,
       ),
     ).toThrow(/pertence a outro tenant/);
+  });
+});
+
+describe('production bootstrap catalog synchronization', () => {
+  it('synchronizes the platform agent catalog after the company exists', async () => {
+    const transaction = {
+      company: {
+        upsert: vi.fn().mockResolvedValue({ id: tenantId }),
+      },
+      user: {
+        findMany: vi.fn().mockResolvedValue([administrator]),
+        update: vi.fn().mockResolvedValue(administrator),
+      },
+      tenantDepartment: {
+        upsert: vi.fn().mockImplementation(({ create }) =>
+          Promise.resolve({
+            id: `department-${String(create.code).toLowerCase()}`,
+          }),
+        ),
+      },
+      tenantAuditLog: {
+        create: vi.fn().mockResolvedValue({ id: 'audit-id' }),
+      },
+    };
+    const prisma = {
+      company: {
+        findFirst: vi.fn().mockResolvedValue({ id: tenantId }),
+      },
+      user: {
+        findMany: vi.fn().mockResolvedValue([administrator]),
+      },
+      $transaction: vi.fn(
+        async (callback: (client: typeof transaction) => unknown) =>
+          callback(transaction),
+      ),
+    };
+    const config = new ConfigService({
+      TENANT_LEGAL_NAME: 'Empresa Exemplo Ltda.',
+      TENANT_TRADE_NAME: 'Empresa Exemplo',
+      TENANT_TAX_ID: '04.252.011/0001-10',
+      TENANT_ADMIN_NAME: 'Ana Souza',
+      TENANT_ADMIN_USERNAME: 'ana.souza',
+      TENANT_ADMIN_EMAIL: 'ana@empresa.test',
+      TENANT_ADMIN_CPF: '529.982.247-25',
+      WHATSAPP_ENABLED: false,
+    });
+
+    await new ProductionBootstrapService(
+      prisma as never,
+      new FakePasswordHasher(),
+      new FakeOfflineLicenseVerifier(tenantId),
+      config,
+    ).execute();
+
+    expect(transaction.company.upsert).toHaveBeenCalledOnce();
+    expect(ensurePlatformAgentCatalog).toHaveBeenCalledWith(
+      transaction,
+      tenantId,
+    );
+    expect(transaction.company.upsert.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(ensurePlatformAgentCatalog).mock.invocationCallOrder[0],
+    );
   });
 });

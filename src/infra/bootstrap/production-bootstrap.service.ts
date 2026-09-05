@@ -22,6 +22,7 @@ import {
   normalizeUsername,
   normalizeWhatsAppPhone,
 } from '../../shared/utils/normalization';
+import { ensurePlatformAgentCatalog } from '../agents/platform-agent-persistence';
 import {
   DepartmentCode,
   DocumentAccessMode,
@@ -181,6 +182,7 @@ export class ProductionBootstrapService {
           tradeName: company.props.tradeName,
         },
       });
+      await ensurePlatformAgentCatalog(transaction, licensedTenantId);
 
       const transactionAdministrator = selectBootstrapAdministrator(
         await transaction.user.findMany({

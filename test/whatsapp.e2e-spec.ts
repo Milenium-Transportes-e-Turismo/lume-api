@@ -33,6 +33,7 @@ import {
   dateOnlyFromDateTime,
   parseBusinessDateTime,
 } from '../src/domain/commercial/quote-schedule';
+import { PLATFORM_AGENT_CATALOG } from '../src/domain/agents/platform-agent-catalog';
 import { UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT } from '../src/domain/whatsapp/whatsapp.constants';
 import {
   DeliveryStatus,
@@ -587,6 +588,33 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     if (mediaStoragePath) {
       await rm(mediaStoragePath, { recursive: true, force: true });
     }
+  });
+
+  it('materializa o catálogo de agentes de forma idempotente em banco novo', async () => {
+    await app.get(ProductionBootstrapService).execute();
+
+    const [agents, runtimes] = await Promise.all([
+      prisma.lumeAgent.findMany({
+        where: { companyId: tenantId },
+        select: { code: true },
+        orderBy: { code: 'asc' },
+      }),
+      prisma.agentRuntimeConfigVersion.findMany({
+        where: { companyId: tenantId },
+        select: { agentId: true, credentialRef: true },
+      }),
+    ]);
+
+    expect(agents.map((agent) => agent.code)).toEqual(
+      PLATFORM_AGENT_CATALOG.map((agent) => agent.code).sort(),
+    );
+    expect(runtimes).toHaveLength(PLATFORM_AGENT_CATALOG.length);
+    expect(new Set(runtimes.map((runtime) => runtime.agentId)).size).toBe(
+      PLATFORM_AGENT_CATALOG.length,
+    );
+    expect(new Set(runtimes.map((runtime) => runtime.credentialRef)).size).toBe(
+      PLATFORM_AGENT_CATALOG.length,
+    );
   });
 
   it('reutiliza o administrador pelo CPF quando usuário e e-mail configurados mudam', async () => {

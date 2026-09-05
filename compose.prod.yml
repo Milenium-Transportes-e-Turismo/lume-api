@@ -35,16 +35,21 @@ services:
       context: .
       target: production
     user: '0:0'
+    environment:
+      KNOWLEDGE_STORAGE_PATH: ${KNOWLEDGE_STORAGE_PATH:-/app/var/knowledge}
     command:
       [
         'sh',
         '-ec',
-        'mkdir -p /app/var/whatsapp-media /app/var/imports/whatsapp && chown -R node:node /app/var/whatsapp-media /app/var/imports/whatsapp',
+        'mkdir -p /app/var/whatsapp-media /app/var/imports/whatsapp "$$KNOWLEDGE_STORAGE_PATH" && chown -R node:node /app/var/whatsapp-media /app/var/imports/whatsapp "$$KNOWLEDGE_STORAGE_PATH"',
       ]
     restart: 'no'
     volumes:
       - lume_tenant_whatsapp_media:/app/var/whatsapp-media
       - lume_tenant_whatsapp_imports:/app/var/imports/whatsapp
+      - type: volume
+        source: lume_tenant_knowledge
+        target: ${KNOWLEDGE_STORAGE_PATH:-/app/var/knowledge}
 
   api:
     build:
@@ -107,6 +112,8 @@ services:
       WHATSAPP_ALLOWED_MIME_TYPES: ${WHATSAPP_ALLOWED_MIME_TYPES:-image/jpeg,image/png,image/webp,image/gif,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,text/csv,text/vcard,text/x-vcard,application/octet-stream,audio/ogg,audio/mpeg,audio/mp4,audio/aac,audio/wav,video/mp4,video/webm,video/quicktime}
       WHATSAPP_MEDIA_STORAGE_DRIVER: filesystem
       WHATSAPP_MEDIA_STORAGE_PATH: /app/var/whatsapp-media
+      KNOWLEDGE_STORAGE_DRIVER: filesystem
+      KNOWLEDGE_STORAGE_PATH: ${KNOWLEDGE_STORAGE_PATH:-/app/var/knowledge}
       WHATSAPP_IMPORT_ROOT: /app/var/imports/whatsapp
       WHATSAPP_IMPORT_UPLOAD_TEMP_ROOT: /app/var/imports/whatsapp/incoming
       WHATSAPP_ANDROID_BACKUP_MAX_DECRYPTED_BYTES: ${WHATSAPP_ANDROID_BACKUP_MAX_DECRYPTED_BYTES:-4294967296}
@@ -187,6 +194,9 @@ services:
     volumes:
       - lume_tenant_whatsapp_media:/app/var/whatsapp-media
       - lume_tenant_whatsapp_imports:/app/var/imports/whatsapp
+      - type: volume
+        source: lume_tenant_knowledge
+        target: ${KNOWLEDGE_STORAGE_PATH:-/app/var/knowledge}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -210,3 +220,4 @@ volumes:
   lume_tenant_postgres_data:
   lume_tenant_whatsapp_media:
   lume_tenant_whatsapp_imports:
+  lume_tenant_knowledge:
