@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -106,6 +107,16 @@ export class WhatsAppChannelsController {
       allowedAutomaticTargetDepartmentIds:
         body.allowedAutomaticTargetDepartmentIds,
     });
+  }
+
+  @Get(':channelId/pairing')
+  @Header('Cache-Control', 'private, no-store')
+  @RequireAnyPermission('whatsapp-channels:connect')
+  pairing(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Param('channelId', new ParseUUIDPipe()) channelId: string,
+  ) {
+    return this.manageChannel.pairing(current.companyId, channelId);
   }
 
   @Post(':channelId/actions/request-qr')

@@ -25,6 +25,15 @@ export class ApiUsageController {
     return this.usage.operations(current, query);
   }
 
+  @Get('activity')
+  @RequireAnyPermission('settings:view')
+  activity(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Query() query: ListApiUsageQueryDto,
+  ) {
+    return this.usage.operations(current, query, true);
+  }
+
   @Get('summary')
   @RequireAnyPermission('settings:view')
   summary(

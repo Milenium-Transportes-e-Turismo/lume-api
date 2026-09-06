@@ -115,56 +115,78 @@ describe('CalculateRouteUseCase', () => {
     expect(result.tenant.companyId).toBe('tenant-a');
   });
 
-  it('não chama geocoding quando recebe coordenadas', async () => {
-    const geocode = vi.fn();
-    const useCase = new CalculateRouteUseCase(
-      { geocode } as unknown as GeocodingProvider,
-      {
-        calculateRoute: vi.fn().mockResolvedValue({
-          direction: 'outbound',
-          distanceKm: 100,
-          durationMinutes: 60,
-          geometry,
-          encodedPolylines: [],
-          segments: [],
-          engine: 'valhalla',
-          engineVersion: null,
-          mapDataVersion: null,
+  it.each([true, false])(
+    'preserva coordenadas e resolve o nome quando necessário (nome enviado: %s)',
+    async (named) => {
+      const geocode = vi.fn();
+      const reverseGeocode = vi.fn(
+        async (coordinates: { lat: number; lng: number }) => ({
+          coordinates,
+          label: coordinates.lat === -18.91 ? 'Uberlândia' : 'Belo Horizonte',
+          address: 'Endereço identificado',
+          source: 'pelias' as const,
         }),
-      },
-      {
-        match: vi.fn().mockResolvedValue({
-          count: 0,
-          total: 0,
-          complete: false,
-          dataStatus: 'unavailable',
-          dataVersion: null,
-          items: [],
-          matcherStrategy: 'test',
-        }),
-      },
-      { assess: vi.fn().mockResolvedValue(disabledIntelligence) },
-      new FuelCostService(),
-      new CostEngineService(),
-    );
+      );
+      const useCase = new CalculateRouteUseCase(
+        { geocode, reverseGeocode },
+        {
+          calculateRoute: vi.fn().mockResolvedValue({
+            direction: 'outbound',
+            distanceKm: 100,
+            durationMinutes: 60,
+            geometry,
+            encodedPolylines: [],
+            segments: [],
+            engine: 'valhalla',
+            engineVersion: null,
+            mapDataVersion: null,
+          }),
+        },
+        {
+          match: vi.fn().mockResolvedValue({
+            count: 0,
+            total: 0,
+            complete: false,
+            dataStatus: 'unavailable',
+            dataVersion: null,
+            items: [],
+            matcherStrategy: 'test',
+          }),
+        },
+        { assess: vi.fn().mockResolvedValue(disabledIntelligence) },
+        new FuelCostService(),
+        new CostEngineService(),
+      );
 
-    await useCase.execute(principal, {
-      origin: { lat: -18.91, lng: -48.27 },
-      destination: { lat: -19.92, lng: -43.94 },
-      waypoints: [],
-      roundTrip: false,
-      vehicle: {
-        type: 'bus',
-        axles: 3,
-        fuelType: 'diesel',
-        consumptionKmPerLiter: 3.1,
-      },
-      fuelPricePerLiter: 6.2,
-      travelDate: '2026-08-18',
-    });
+      const result = await useCase.execute(principal, {
+        origin: {
+          lat: -18.91,
+          lng: -48.27,
+          ...(named ? { address: 'Uberlândia' } : {}),
+        },
+        destination: {
+          lat: -19.92,
+          lng: -43.94,
+          ...(named ? { address: 'Belo Horizonte' } : {}),
+        },
+        waypoints: [],
+        roundTrip: false,
+        vehicle: {
+          type: 'bus',
+          axles: 3,
+          fuelType: 'diesel',
+          consumptionKmPerLiter: 3.1,
+        },
+        fuelPricePerLiter: 6.2,
+        travelDate: '2026-08-18',
+      });
 
-    expect(geocode).not.toHaveBeenCalled();
-  });
+      expect(geocode).not.toHaveBeenCalled();
+      expect(reverseGeocode).toHaveBeenCalledTimes(named ? 0 : 2);
+      expect(result.locations.origin.label).toBe('Uberlândia');
+      expect(result.locations.destination.label).toBe('Belo Horizonte');
+    },
+  );
 
   it('mantém a estimativa da IA separada do total verificado', async () => {
     const assess = vi.fn().mockResolvedValue({
@@ -219,8 +241,8 @@ describe('CalculateRouteUseCase', () => {
     );
 
     const result = await useCase.execute(principal, {
-      origin: { lat: -18.91, lng: -48.27 },
-      destination: { lat: -19.92, lng: -43.94 },
+      origin: { lat: -18.91, lng: -48.27, address: 'Uberlândia' },
+      destination: { lat: -19.92, lng: -43.94, address: 'Belo Horizonte' },
       waypoints: [],
       roundTrip: false,
       vehicle: {

@@ -740,6 +740,61 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       operations.body.data as { id: string; events: unknown[] }[]
     ).find((operation) => operation.id === payload.commandId);
     expect(grouped?.events).toHaveLength(2);
+    const metricActor = await prisma.routingCompany.findUniqueOrThrow({
+      where: { id: created.body.id as string },
+    });
+    const metric = await prisma.apiRequestMetric.create({
+      data: {
+        companyId: tenantId,
+        userId: metricActor.createdByUserId,
+        method: 'GET',
+        route: '/registrations',
+        statusCode: 404,
+        durationMs: 12,
+      },
+    });
+    const activity = await request(app.getHttpServer())
+      .get('/api/v1/administration/usage/activity?pageSize=100')
+      .set('authorization', auth)
+      .expect(200);
+    expect(activity.body.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: 'operation', id: payload.commandId }),
+        expect.objectContaining({
+          kind: 'request',
+          request: expect.objectContaining({ statusCode: expect.any(Number) }),
+        }),
+      ]),
+    );
+    const dates = (activity.body.data as { createdAt: string }[]).map(
+      (item: { createdAt: string }) => Date.parse(item.createdAt),
+    );
+    expect(dates).toEqual([...dates].sort((a: number, b: number) => b - a));
+    const failedActivity = await request(app.getHttpServer())
+      .get('/api/v1/administration/usage/activity?status=client-error')
+      .set('authorization', auth)
+      .expect(200);
+    expect(failedActivity.body.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'request:' + metric.id,
+          kind: 'request',
+        }),
+      ]),
+    );
+    expect(
+      (
+        failedActivity.body.data as {
+          kind: string;
+          request: { statusCode: number };
+        }[]
+      ).every(
+        (item: { kind: string; request: { statusCode: number } }) =>
+          item.kind === 'request' &&
+          item.request.statusCode >= 400 &&
+          item.request.statusCode < 500,
+      ),
+    ).toBe(true);
   });
 
   it('materializa o catálogo de agentes de forma idempotente em banco novo', async () => {

@@ -314,3 +314,13 @@ O módulo não substitui os documentos de proposta do WhatsApp, que possuem cicl
 e regras comerciais próprios. Ele é uma fundação reutilizável para futuras
 views de importação/exportação. Cache e navegador não armazenam o estado
 autoritativo desses artefatos. Consulte [data-exchange.md](data-exchange.md).
+
+## Busca de locais, pareamento e atividade administrativa — setembro de 2026
+
+GET /routing/locations aceita CEP brasileiro com oito dígitos, com ou sem hífen. A API consulta ViaCEP sem enviar a chave HeiGIT, resolve o endereço no Pelias e devolve sugestão nomeada. GET /routing/locations/reverse valida latitude/longitude e devolve o nome do local mantendo o ponto escolhido. O cálculo preserva rótulos enviados com coordenadas e resolve nomes de coordenadas sem rótulo. Falhas externas não produzem locais fictícios.
+
+GET /whatsapp/channels/:channelId/pairing exige whatsapp-channels:connect, aplica o companyId autenticado, rejeita canais cancelados/desativados e devolve estado do provedor, QR atual e falha segura. A consulta não modifica versão nem gera eventos de auditoria. A confirmação final usa synchronize-connection, com commandId e expectedVersion.
+
+GET /administration/usage/activity exige administrador e settings:view. Une operações de auditoria agrupadas pelo comando e métricas de requisição em ordem cronológica, com uma única paginação e isolamento pelo tenant. Filtros de resultado HTTP se aplicam somente às requisições. Não deduzimos associação entre comandos e requisições por proximidade de horário.
+
+Estas alterações não exigem migration nem novas variáveis de ambiente. O uso de ViaCEP requer saída HTTPS da API. A geração/renovação de QR não prova que o telefone conseguiu parear; essa etapa exige validação no aplicativo WhatsApp.

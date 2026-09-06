@@ -228,6 +228,45 @@ export class ManageWhatsAppChannelUseCase {
     return result.channel;
   }
 
+  async pairing(companyId: string, channelId: string) {
+    const channel = await this.required(companyId, channelId);
+    if (
+      channel.organizationalStatus === 'cancelled' ||
+      channel.organizationalStatus === 'disabled'
+    ) {
+      throw validationError('Este canal não está disponível para conexão.');
+    }
+    try {
+      const state = await this.evolution.getConnectionState(
+        channel.evolutionInstanceName,
+      );
+      if (state === 'connected') {
+        return {
+          channel,
+          connectionStatus: state,
+          qrCode: null,
+          providerIssue: null,
+        };
+      }
+      const provider = await this.evolution.connect(
+        channel.evolutionInstanceName,
+      );
+      return {
+        channel,
+        connectionStatus: provider.connectionState,
+        qrCode: provider.qrCode,
+        providerIssue: null,
+      };
+    } catch (error) {
+      return {
+        channel,
+        connectionStatus: 'error' as const,
+        qrCode: null,
+        providerIssue: providerIssue(error),
+      };
+    }
+  }
+
   requestQr(input: VersionedChannelCommand) {
     return this.connect(input, 'qr-requested', false);
   }

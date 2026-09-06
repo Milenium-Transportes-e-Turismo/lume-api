@@ -66,7 +66,9 @@ export class ApiUsageService {
       page: number;
       pageSize: number;
       userId?: string;
+      status?: 'success' | 'client-error' | 'server-error';
     },
+    includeActivity = false,
   ) {
     assertAdministrator(principal);
     const period = resolvePeriod(query.from, query.to);
@@ -105,6 +107,10 @@ export class ApiUsageService {
  before_snapshot, after_snapshot, created_at, 'whatsapp_channel_events' FROM whatsapp_channel_events
  UNION ALL
  SELECT id::text, company_id, actor_user_id, name, 'service-session', service_session_id::text, command_id, before_snapshot, after_snapshot, created_at, 'service_session_events' FROM service_session_events
+ UNION ALL
+ SELECT id::text, company_id, user_id, method || ' ' || route, 'api-request', id::text, 'request:' || id::text,
+ NULL::jsonb, jsonb_build_object('statusCode',status_code,'requestBytes',request_bytes,'responseBytes',response_bytes,'durationMs',duration_ms),
+ created_at, 'api_request_metrics' FROM api_request_metrics WHERE $7::boolean
 ), grouped AS (
  SELECT e.operation_id, e.actor_user_id AS actor_id, MAX(e.created_at) AS occurred_at,
  jsonb_agg(jsonb_build_object('id',e.id,'action',e.action,'targetType',e.target_type,'targetId',e.target_id,'targetName',COALESCE(r.individual_name,r.legal_name,u.name,c.name),'before',e.before_data,'after',e.after_data,'source',e.source) ORDER BY e.created_at, e.id) AS events
@@ -113,6 +119,10 @@ export class ApiUsageService {
  LEFT JOIN users u ON u.company_id=e.company_id AND u.id::text=e.target_id AND e.target_type='user'
  LEFT JOIN whatsapp_channels c ON c.company_id=e.company_id AND c.id::text=e.target_id AND e.target_type='whatsapp-channel'
  WHERE e.company_id=$1::uuid AND e.created_at >= $2 AND e.created_at <= $3 AND ($4::uuid IS NULL OR e.actor_user_id=$4::uuid)
+ AND ($8::text IS NULL OR (e.target_type='api-request' AND
+ (($8='success' AND (e.after_data->>'statusCode')::int < 400)
+ OR ($8='client-error' AND (e.after_data->>'statusCode')::int BETWEEN 400 AND 499)
+ OR ($8='server-error' AND (e.after_data->>'statusCode')::int >= 500))))
  GROUP BY e.operation_id, e.actor_user_id
 )
 SELECT g.*, CASE WHEN actor.deleted_at IS NULL THEN actor.name ELSE 'Usuário excluído' END AS actor_name, COUNT(*) OVER() AS total
@@ -124,27 +134,56 @@ ORDER BY g.occurred_at DESC,g.operation_id LIMIT $5 OFFSET $6`,
       query.userId ?? null,
       query.pageSize,
       (query.page - 1) * query.pageSize,
+      includeActivity,
+      includeActivity ? (query.status ?? null) : null,
     );
     return {
       data: rows.map((row) => {
         const first = row.events[0];
-        const label = auditOperationLabel(first.action, first.targetType);
+        const request =
+          first.targetType === 'api-request'
+            ? (first.after as {
+                statusCode: number;
+                requestBytes: number;
+                responseBytes: number;
+                durationMs: number;
+              })
+            : null;
+        const label = request
+          ? {
+              module: 'Atividade de usuário',
+              action: humanizeApiAction(
+                first.action.split(' ')[0],
+                first.action.slice(first.action.indexOf(' ') + 1),
+              ),
+            }
+          : auditOperationLabel(first.action, first.targetType);
         return {
           id: row.operation_id,
           actor: row.actor_name ?? 'Sistema',
           actorId: row.actor_id,
           createdAt: row.occurred_at.toISOString(),
           ...label,
-          result: 'Registrada',
+          kind: request ? ('request' as const) : ('operation' as const),
+          request,
+          result: request
+            ? request.statusCode >= 500
+              ? 'Falha no serviço'
+              : request.statusCode >= 400
+                ? 'Solicitação não concluída'
+                : 'Concluída'
+            : 'Registrada',
           target: first.targetName ?? label.module,
           targetId: first.targetId,
-          changes: [
-            ...new Set(
-              row.events.flatMap((event) =>
-                auditChangedFields(event.before, event.after),
-              ),
-            ),
-          ],
+          changes: request
+            ? []
+            : [
+                ...new Set(
+                  row.events.flatMap((event) =>
+                    auditChangedFields(event.before, event.after),
+                  ),
+                ),
+              ],
           events: row.events.map((event) => ({
             id: event.id,
             code: event.action,

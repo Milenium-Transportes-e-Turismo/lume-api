@@ -319,3 +319,51 @@ describe('ManageWhatsAppChannelUseCase', () => {
     expect(channels.mutate).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('pairing status', () => {
+  it('reads the tenant-scoped provider state without mutating channel versions', async () => {
+    const channels = repository();
+    const provider = evolution();
+    const result = await new ManageWhatsAppChannelUseCase(
+      channels,
+      provider,
+    ).pairing('company-1', 'channel-1');
+    expect(channels.get).toHaveBeenCalledWith('company-1', 'channel-1');
+    expect(result).toMatchObject({
+      connectionStatus: 'connected',
+      qrCode: null,
+    });
+    expect(provider.connect).not.toHaveBeenCalled();
+    expect(channels.mutate).not.toHaveBeenCalled();
+  });
+  it('does not expose a QR after provider failure', async () => {
+    const channels = repository();
+    const provider = evolution();
+    provider.getConnectionState.mockRejectedValue(
+      new EvolutionInstanceManagementError('timeout'),
+    );
+    const result = await new ManageWhatsAppChannelUseCase(
+      channels,
+      provider,
+    ).pairing('company-1', 'channel-1');
+    expect(result).toMatchObject({
+      connectionStatus: 'error',
+      qrCode: null,
+      providerIssue: { reason: 'timeout' },
+    });
+  });
+  it('rejects disabled channels before contacting the provider', async () => {
+    const channels = repository();
+    channels.get.mockResolvedValue(
+      channel({ organizationalStatus: 'disabled' }),
+    );
+    const provider = evolution();
+    await expect(
+      new ManageWhatsAppChannelUseCase(channels, provider).pairing(
+        'company-1',
+        'channel-1',
+      ),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+    expect(provider.getConnectionState).not.toHaveBeenCalled();
+  });
+});

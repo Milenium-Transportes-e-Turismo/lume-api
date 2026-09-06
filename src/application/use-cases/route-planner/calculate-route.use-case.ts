@@ -251,14 +251,14 @@ export class CalculateRouteUseCase {
           'Latitude e longitude devem ser informadas juntas e dentro dos limites válidos.',
         );
       }
-      return {
-        coordinates: { lat: input.lat as number, lng: input.lng as number },
-        label:
-          input.address?.trim() ||
-          `${(input.lat as number).toFixed(6)}, ${(input.lng as number).toFixed(6)}`,
-        address: input.address?.trim() || null,
-        source: 'coordinates',
+      const coordinates = {
+        lat: input.lat as number,
+        lng: input.lng as number,
       };
+      const address = input.address?.trim();
+      if (address)
+        return { coordinates, label: address, address, source: 'coordinates' };
+      return this.geocoding.reverseGeocode(coordinates);
     }
     const address = input.address?.trim();
     if (!address || address.length < 3 || address.length > 300) {

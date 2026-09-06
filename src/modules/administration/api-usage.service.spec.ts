@@ -94,3 +94,12 @@ describe('ApiUsageService', () => {
     ]);
   });
 });
+
+it('rejects non-administrators before reading the combined activity feed', async () => {
+  const query = vi.fn();
+  const service = new ApiUsageService({ $queryRawUnsafe: query } as never);
+  await expect(
+    service.operations(principal(false), { page: 1, pageSize: 25 }, true),
+  ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  expect(query).not.toHaveBeenCalled();
+});

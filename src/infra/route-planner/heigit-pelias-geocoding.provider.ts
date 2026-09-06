@@ -56,6 +56,19 @@ export class HeigitPeliasGeocodingProvider
   }
 
   async geocode(address: string): Promise<ResolvedRouteLocation> {
+    if (/^\d{5}-?\d{3}$/.test(address.trim())) {
+      const result = (
+        await this.searchPostalCode(address.replace(/\D/g, ''))
+      )[0];
+      if (!result)
+        throw new AppError('GEOCODING_NOT_FOUND', 'CEP não encontrado.');
+      return {
+        coordinates: { lat: result.lat, lng: result.lng },
+        label: result.label,
+        address: result.label,
+        source: 'pelias',
+      };
+    }
     const query = new URLSearchParams({
       text: address,
       'boundary.country': 'BR',
@@ -69,6 +82,9 @@ export class HeigitPeliasGeocodingProvider
   async searchLocations(
     text: string,
   ): Promise<readonly RouteLocationSuggestion[]> {
+    if (/^\d{5}-?\d{3}$/.test(text.trim()))
+      return this.searchPostalCode(text.replace(/\D/g, ''));
+    if (/^[\d-]+$/.test(text.trim())) return [];
     const query = new URLSearchParams({
       text,
       'boundary.country': 'BR',
@@ -123,6 +139,60 @@ export class HeigitPeliasGeocodingProvider
     return items;
   }
 
+  async reverseLocation(
+    lat: number,
+    lng: number,
+  ): Promise<RouteLocationSuggestion> {
+    const location = await this.reverseGeocode({ lat, lng });
+    return { id: 'point:' + lat + ',' + lng, label: location.label, lat, lng };
+  }
+
+  private async searchPostalCode(
+    cep: string,
+  ): Promise<readonly RouteLocationSuggestion[]> {
+    let data: Record<string, unknown>;
+    try {
+      const response = await this.fetcher(
+        'https://viacep.com.br/ws/' + cep + '/json/',
+        {
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(this.timeoutMs),
+        },
+      );
+      if (!response.ok) throw new Error('Postal service unavailable');
+      data = (await response.json()) as Record<string, unknown>;
+      if (!data || typeof data !== 'object')
+        throw new Error('Invalid postal response');
+    } catch {
+      throw new AppError(
+        'ROUTING_UNAVAILABLE',
+        'Não foi possível consultar o CEP. Tente novamente.',
+      );
+    }
+    if (data.erro === true || data.erro === 'true') return [];
+    if (typeof data.localidade !== 'string' || typeof data.uf !== 'string') {
+      throw new AppError(
+        'ROUTING_UNAVAILABLE',
+        'A consulta de CEP retornou um endereço inválido.',
+      );
+    }
+    const address = [data.logradouro, data.bairro, data.localidade, data.uf]
+      .filter(
+        (part): part is string =>
+          typeof part === 'string' && part.trim().length > 0,
+      )
+      .join(', ');
+    const location = await this.geocode(address + ', Brasil');
+    return [
+      {
+        id: 'cep:' + cep,
+        label: address + ' · CEP ' + cep.slice(0, 5) + '-' + cep.slice(5),
+        lat: location.coordinates.lat,
+        lng: location.coordinates.lng,
+      },
+    ];
+  }
+
   async reverseGeocode(
     coordinates: Coordinates,
   ): Promise<ResolvedRouteLocation> {
@@ -142,12 +212,16 @@ export class HeigitPeliasGeocodingProvider
     expectedCoordinates?: Coordinates,
   ): ResolvedRouteLocation {
     const rawCoordinates = feature?.geometry?.coordinates;
-    const lng = Number(rawCoordinates?.[0]);
-    const lat = Number(rawCoordinates?.[1]);
+    const lng = rawCoordinates?.[0];
+    const lat = rawCoordinates?.[1];
     if (
       feature?.geometry?.type !== 'Point' ||
+      typeof lat !== 'number' ||
+      typeof lng !== 'number' ||
       !Number.isFinite(lat) ||
-      !Number.isFinite(lng)
+      !Number.isFinite(lng) ||
+      Math.abs(lat) > 90 ||
+      Math.abs(lng) > 180
     ) {
       throw new AppError(
         'GEOCODING_NOT_FOUND',
@@ -157,10 +231,14 @@ export class HeigitPeliasGeocodingProvider
       );
     }
     const label =
-      feature.properties?.label ??
-      feature.properties?.name ??
-      fallbackAddress ??
-      `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+      feature.properties?.label?.trim() ||
+      feature.properties?.name?.trim() ||
+      fallbackAddress?.trim();
+    if (!label)
+      throw new AppError(
+        'GEOCODING_NOT_FOUND',
+        'Não foi possível identificar o nome desse local. Pesquise um endereço ou selecione outro ponto.',
+      );
     return {
       coordinates: expectedCoordinates ?? { lat, lng },
       label,
