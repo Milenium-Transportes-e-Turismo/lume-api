@@ -590,6 +590,158 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     }
   });
 
+  it('mantém endereço e perfil documental no Cadastro e solicita documentos sem conta de acesso', async () => {
+    const address = {
+      street: 'Rua Teste',
+      number: '21',
+      complement: 'Sala 2',
+      district: 'Centro',
+      postalCode: '38400000',
+      city: 'Uberlândia',
+      state: 'MG',
+    };
+    const profile = {
+      jobTitle: 'Geral',
+      maritalStatus: 'single',
+      militaryDocumentStatus: 'not-applicable',
+      dependents: [
+        {
+          name: 'Dependente Teste',
+          birthDate: '2018-01-10',
+          relationship: 'filha',
+        },
+      ],
+    };
+    const payload = {
+      commandId: randomUUID(),
+      type: 'pf',
+      firstName: 'Pessoa',
+      lastName: 'Documental Teste',
+      isTemporary: true,
+      temporaryReason: 'Validação isolada da revisão.',
+      roleCodes: ['client'],
+      phones: [
+        {
+          number: '5511971234567',
+          type: 'mobile',
+          isPrimary: true,
+          hasWhatsApp: true,
+        },
+      ],
+      address,
+      documentProfile: profile,
+      serviceInstructions: 'Confirmar local de embarque.',
+    };
+    const auth = 'Bearer ' + accessToken;
+    const created = await request(app.getHttpServer())
+      .post('/api/v1/registrations')
+      .set('authorization', auth)
+      .send(payload);
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    expect(created.body).toMatchObject({
+      address,
+      documentProfile: profile,
+      serviceInstructions: payload.serviceInstructions,
+    });
+    const replay = await request(app.getHttpServer())
+      .post('/api/v1/registrations')
+      .set('authorization', auth)
+      .send(payload)
+      .expect(201);
+    expect(replay.body.id).toBe(created.body.id);
+    const updated = await request(app.getHttpServer())
+      .patch('/api/v1/registrations/' + created.body.id)
+      .set('authorization', auth)
+      .send({
+        ...payload,
+        commandId: randomUUID(),
+        expectedVersion: created.body.version,
+        address: { ...address, number: '22' },
+      })
+      .expect(200);
+    expect(updated.body.address.number).toBe('22');
+    const checklists = await request(app.getHttpServer())
+      .get('/api/v1/document-management/checklists')
+      .set('authorization', auth)
+      .expect(200);
+    const checklist = (
+      checklists.body.data as { id: string; context: string }[]
+    ).find((item) => item.context === 'admission')!;
+    expect(checklist).toBeTruthy();
+    const docPayload = {
+      commandId: randomUUID(),
+      subjectRegistrationId: created.body.id,
+      checklistId: checklist.id,
+      context: 'admission',
+    };
+    const document = await request(app.getHttpServer())
+      .post('/api/v1/document-management/requests')
+      .set('authorization', auth)
+      .send(docPayload)
+      .expect(201);
+    expect(document.body.request.subject).toMatchObject({
+      registrationId: created.body.id,
+      userId: null,
+    });
+    const persisted = await prisma.documentRequest.findUniqueOrThrow({
+      where: { id: document.body.request.id },
+    });
+    expect(persisted.subjectUserId).toBeNull();
+    expect(persisted.subjectRegistrationId).toBe(created.body.id);
+    await request(app.getHttpServer())
+      .get('/api/v1/document-management/requests/' + persisted.id)
+      .set('authorization', auth)
+      .expect(200);
+    await request(app.getHttpServer())
+      .get(
+        '/api/v1/document-management/registrations/' +
+          created.body.id +
+          '/export.xlsx',
+      )
+      .set('authorization', auth)
+      .expect(200)
+      .expect('Content-Type', /spreadsheetml/);
+    await request(app.getHttpServer())
+      .get(
+        '/api/v1/document-management/registrations/' +
+          created.body.id +
+          '/files.zip',
+      )
+      .set('authorization', auth)
+      .expect(200)
+      .expect('Content-Type', /application\/zip/);
+    await prisma.tenantAuditLog.create({
+      data: {
+        companyId: tenantId,
+        actorUserId: (
+          await prisma.routingCompany.findUniqueOrThrow({
+            where: { id: created.body.id as string },
+          })
+        ).createdByUserId,
+        action: 'REGISTRATION_CREATED',
+        targetType: 'registration',
+        targetId: created.body.id as string,
+        metadata: { commandId: payload.commandId },
+      },
+    });
+    const operations = await request(app.getHttpServer())
+      .get('/api/v1/administration/usage/operations')
+      .set('authorization', auth)
+      .expect(200);
+    expect(operations.body.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          targetId: created.body.id,
+          module: 'Cadastro',
+        }),
+      ]),
+    );
+    const grouped = (
+      operations.body.data as { id: string; events: unknown[] }[]
+    ).find((operation) => operation.id === payload.commandId);
+    expect(grouped?.events).toHaveLength(2);
+  });
+
   it('materializa o catálogo de agentes de forma idempotente em banco novo', async () => {
     await app.get(ProductionBootstrapService).execute();
 

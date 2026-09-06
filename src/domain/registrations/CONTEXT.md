@@ -19,7 +19,7 @@ _Evite_: Cliente, fornecedor, conta
 
 **Papel**:
 Forma como uma pessoa ou empresa participa do negócio, como cliente,
-fornecedor, funcionário, motorista ou passageiro; papéis podem coexistir.
+fornecedor, funcionário, prestador de serviço ou passageiro; papéis podem coexistir.
 _Evite_: Tipo exclusivo, perfil de acesso
 
 **Contato**:
@@ -46,3 +46,17 @@ _Evite_: Fusão automática, exclusão de duplicidade
 Registro que acrescenta dados próprios de um contexto a um cadastro principal,
 como acesso, passageiro ou contato de canal.
 _Evite_: Segunda identidade
+
+**Marcador Motorista**:
+Característica operacional da pessoa, compatível com seus papéis explícitos. O papel legado permanece no histórico; novos cadastros usam o marcador.
+
+## Perfil, endereço e documentos
+
+O endereço cadastral reutiliza RoutingFixedPoint, com código ADR por pessoa e histórico
+no agregado. RoutingCompany.documentProfile é a fonte canônica do perfil documental PF.
+Campos legados em User são preservados; o backfill exige vínculo explícito e perfis
+sem divergência. DocumentRequest.subjectRegistrationId identifica o titular sem exigir
+conta. subjectUserId permanece nos fluxos legados e não recebe IDs de Cadastro.
+A aprovação da conciliação cria o grafo oficial e promove o candidato na mesma transação.
+serviceInstructions exige identidade confirmada e entra como contexto subordinado.
+Não modifica ferramentas, escopo nem instruções da plataforma.

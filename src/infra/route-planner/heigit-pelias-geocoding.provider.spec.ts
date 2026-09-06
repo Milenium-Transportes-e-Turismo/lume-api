@@ -48,3 +48,68 @@ describe('HeigitPeliasGeocodingProvider', () => {
     });
   });
 });
+
+describe('location autocomplete', () => {
+  it('uses Brazilian autocomplete and keeps distinct valid points only', async () => {
+    const feature = {
+      properties: { gid: 'place:1', label: 'Uberlândia, MG, Brasil' },
+      geometry: { type: 'Point', coordinates: [-48.27, -18.91] },
+    };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          features: [
+            feature,
+            feature,
+            {
+              ...feature,
+              geometry: { type: 'Point', coordinates: [200, 100] },
+            },
+            { geometry: { type: 'Point', coordinates: [null, null] } },
+          ],
+        }),
+      ),
+    );
+    const results = await new HeigitPeliasGeocodingProvider(
+      config(),
+      fetcher,
+    ).searchLocations('Uberlan');
+    expect(results).toEqual([
+      {
+        id: 'place:1',
+        label: 'Uberlândia, MG, Brasil',
+        lat: -18.91,
+        lng: -48.27,
+      },
+    ]);
+    const rawUrl = fetcher.mock.calls[0]?.[0];
+    if (typeof rawUrl !== 'string') throw new Error('Expected URL string');
+    const url = new URL(rawUrl);
+    expect(url.pathname).toBe('/pelias/v1/autocomplete');
+    expect(url.searchParams.get('boundary.country')).toBe('BR');
+    expect(url.searchParams.get('size')).toBe('6');
+  });
+  it('distinguishes no matches from malformed provider data', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ features: [] })))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ unexpected: true })),
+      );
+    const provider = new HeigitPeliasGeocodingProvider(config(), fetcher);
+    await expect(provider.searchLocations('xyzxyz')).resolves.toEqual([]);
+    await expect(provider.searchLocations('Uberlan')).rejects.toMatchObject({
+      code: 'ROUTING_UNAVAILABLE',
+    });
+  });
+  it('reports provider unavailability without inventing suggestions', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('{}', { status: 503 }));
+    await expect(
+      new HeigitPeliasGeocodingProvider(config(), fetcher).searchLocations(
+        'Uberlan',
+      ),
+    ).rejects.toMatchObject({ code: 'ROUTING_UNAVAILABLE' });
+  });
+});

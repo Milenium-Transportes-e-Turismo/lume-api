@@ -665,4 +665,55 @@ describe('RegistrationReconciliationService', () => {
       ]),
     );
   });
+  it('approves and creates the official registration in the same transaction', async () => {
+    const before = candidate('IN_REVIEW');
+    const after = candidate('PROMOTED');
+    const transaction = {
+      registrationReviewDecision: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        create: vi.fn(),
+      },
+      registrationCandidate: {
+        findUnique: vi.fn().mockResolvedValue(before),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        update: vi.fn(),
+        findUniqueOrThrow: vi.fn().mockResolvedValue(after),
+      },
+    };
+    const prisma = {
+      $transaction: vi.fn(
+        async (operation: (tx: typeof transaction) => Promise<unknown>) =>
+          operation(transaction),
+      ),
+    } as unknown as PrismaService;
+    const createPromotionGraph = vi.fn().mockResolvedValue({
+      primaryRegistrationId: after.promotedRegistrationId,
+    });
+    const service = new RegistrationReconciliationService(
+      prisma,
+      {} as RegistrationReconciliationWorkbookService,
+      { createPromotionGraph } as unknown as RegistrationsService,
+    );
+    const result = await service.review(current, before.id, {
+      action: 'approve',
+      commandId: '77777777-7777-4777-8777-777777777777',
+      expectedVersion: before.version,
+      confirmedPayload: before.confirmedPayload as never,
+    });
+    expect(result.status).toBe('promoted');
+    expect(createPromotionGraph).toHaveBeenCalledWith(
+      transaction,
+      current,
+      before.confirmedPayload,
+      expect.objectContaining({ candidateId: before.id }),
+    );
+    expect(transaction.registrationCandidate.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'PROMOTED',
+          promotedRegistrationId: after.promotedRegistrationId,
+        }),
+      }),
+    );
+  });
 });

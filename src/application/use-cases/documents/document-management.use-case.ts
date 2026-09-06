@@ -144,7 +144,14 @@ const sidesFromPrisma: Readonly<
   PAGE: 'page',
 };
 
+const registrationSubjectSelect = {
+  id: true,
+  legalName: true,
+  individualName: true,
+  individualEmail: true,
+} as const;
 const requestDetailInclude = {
+  subjectRegistration: { select: registrationSubjectSelect },
   subject: {
     select: { id: true, name: true, email: true, documentAccessMode: true },
   },
@@ -189,6 +196,32 @@ function jsonRecord(value: unknown): Readonly<Record<string, unknown>> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Readonly<Record<string, unknown>>)
     : {};
+}
+
+function canonicalDocumentProfile<
+  T extends {
+    jobTitle: string | null;
+    maritalStatus: string | null;
+    militaryDocumentStatus: string;
+    dependents: Prisma.JsonValue;
+    personRegistration?: { documentProfile: Prisma.JsonValue } | null;
+  },
+>(subject: T): T {
+  const profile = jsonRecord(subject.personRegistration?.documentProfile);
+  if (!Object.keys(profile).length) return subject;
+  return {
+    ...subject,
+    jobTitle: typeof profile.jobTitle === 'string' ? profile.jobTitle : null,
+    maritalStatus:
+      typeof profile.maritalStatus === 'string' ? profile.maritalStatus : null,
+    militaryDocumentStatus:
+      typeof profile.militaryDocumentStatus === 'string'
+        ? profile.militaryDocumentStatus
+        : 'pending-confirmation',
+    dependents: (Array.isArray(profile.dependents)
+      ? profile.dependents
+      : []) as Prisma.JsonValue,
+  };
 }
 
 function spreadsheetValue(value: unknown): string {
@@ -410,11 +443,17 @@ function presentRequest(row: RequestDetailRow) {
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     subject: {
-      id: row.subject.id,
-      name: row.subject.name,
-      email: row.subject.email,
+      id: row.subjectRegistration?.id ?? row.subject!.id,
+      registrationId: row.subjectRegistration?.id ?? null,
+      userId: row.subject?.id ?? null,
+      name:
+        row.subjectRegistration?.individualName ??
+        row.subjectRegistration?.legalName ??
+        row.subject!.name,
+      email:
+        row.subjectRegistration?.individualEmail ?? row.subject?.email ?? '',
       documentAccessMode:
-        row.subject.documentAccessMode === 'DOCUMENT_PORTAL'
+        row.subject?.documentAccessMode === 'DOCUMENT_PORTAL'
           ? 'document-portal'
           : 'standard',
     },
@@ -949,30 +988,53 @@ export class DocumentManagementUseCase {
     principal: AuthenticatedPrincipal,
     input: {
       commandId: string;
-      subjectUserId: string;
+      subjectUserId?: string;
+      subjectRegistrationId?: string;
       checklistId: string;
       context: DocumentRequestContext;
       deadline?: string;
       notes?: string;
     },
   ): Promise<string> {
-    const [subject, checklist] = await Promise.all([
-      transaction.user.findUnique({
-        where: {
-          id_companyId: {
-            id: input.subjectUserId,
+    if (Boolean(input.subjectUserId) === Boolean(input.subjectRegistrationId))
+      throw validationError(
+        'Informe uma pessoa do Cadastro ou um titular legado.',
+      );
+    const registration = input.subjectRegistrationId
+      ? await transaction.routingCompany.findFirst({
+          where: {
+            id: input.subjectRegistrationId,
             companyId: principal.companyId,
+            clientType: 'PF',
+            status: 'ACTIVE',
           },
-        },
-        select: {
-          id: true,
-          isActive: true,
-          jobTitle: true,
-          maritalStatus: true,
-          militaryDocumentStatus: true,
-          dependents: true,
-        },
-      }),
+          select: { id: true, documentProfile: true },
+        })
+      : null;
+    if (input.subjectRegistrationId && !registration)
+      throw notFound('Pessoa do Cadastro ativa');
+    const [legacySubject, checklist] = await Promise.all([
+      input.subjectUserId
+        ? transaction.user.findUnique({
+            where: {
+              id_companyId: {
+                id: input.subjectUserId,
+                companyId: principal.companyId,
+              },
+            },
+            select: {
+              id: true,
+              isActive: true,
+              jobTitle: true,
+              maritalStatus: true,
+              militaryDocumentStatus: true,
+              dependents: true,
+              personRegistration: {
+                select: { id: true, documentProfile: true },
+              },
+            },
+          })
+        : Promise.resolve(null),
       transaction.documentChecklistTemplate.findUnique({
         where: {
           id_companyId: {
@@ -989,7 +1051,29 @@ export class DocumentManagementUseCase {
         },
       }),
     ]);
-    if (!subject?.isActive) throw notFound('Usuário titular ativo');
+    if (!registration && !legacySubject?.isActive)
+      throw notFound('Usuário titular ativo');
+    const canonical = registration ?? legacySubject?.personRegistration;
+    const profile = canonical?.documentProfile as {
+      jobTitle?: string | null;
+      maritalStatus?: string | null;
+      militaryDocumentStatus?: string;
+      dependents?: unknown;
+    } | null;
+    const subject = profile
+      ? {
+          jobTitle: profile.jobTitle ?? null,
+          maritalStatus: profile.maritalStatus ?? null,
+          militaryDocumentStatus:
+            profile.militaryDocumentStatus ?? 'pending-confirmation',
+          dependents: profile.dependents ?? [],
+        }
+      : (legacySubject ?? {
+          jobTitle: null,
+          maritalStatus: null,
+          militaryDocumentStatus: 'pending-confirmation',
+          dependents: [],
+        });
     if (!checklist?.active) throw notFound('Checklist ativo');
     if (checklist.context !== requestContextToPrisma[input.context]) {
       throw validationError(
@@ -1017,7 +1101,8 @@ export class DocumentManagementUseCase {
     const request = await transaction.documentRequest.create({
       data: {
         companyId: principal.companyId,
-        subjectUserId: input.subjectUserId,
+        subjectUserId: input.subjectUserId ?? null,
+        subjectRegistrationId: canonical?.id ?? null,
         createdByUserId: principal.id,
         checklistId: checklist.id,
         context: checklist.context,
@@ -1112,7 +1197,8 @@ export class DocumentManagementUseCase {
         targetType: 'document-request',
         targetId: request.id,
         metadata: {
-          subjectUserId: input.subjectUserId,
+          subjectUserId: input.subjectUserId ?? null,
+          subjectRegistrationId: canonical?.id ?? null,
           context: input.context,
           checklistId: checklist.id,
           checklistVersion: checklist.version,
@@ -1126,7 +1212,8 @@ export class DocumentManagementUseCase {
     principal: AuthenticatedPrincipal,
     input: {
       commandId: string;
-      subjectUserId: string;
+      subjectUserId?: string;
+      subjectRegistrationId?: string;
       checklistId: string;
       context: DocumentRequestContext;
       deadline?: string;
@@ -1186,6 +1273,7 @@ export class DocumentManagementUseCase {
             maritalStatus: true,
             militaryDocumentStatus: true,
             dependents: true,
+            personRegistration: { select: { documentProfile: true } },
           },
         }),
         transaction.documentType.findMany({
@@ -1235,7 +1323,9 @@ export class DocumentManagementUseCase {
       }> = [];
 
       for (const subjectUserId of input.subjectUserIds) {
-        const subject = subjectsById.get(subjectUserId)!;
+        const subject = canonicalDocumentProfile(
+          subjectsById.get(subjectUserId)!,
+        );
         const commandId = deterministicCommandId(
           input.commandId,
           subjectUserId,
@@ -1722,6 +1812,7 @@ export class DocumentManagementUseCase {
                 maritalStatus: true,
                 militaryDocumentStatus: true,
                 dependents: true,
+                personRegistration: { select: { documentProfile: true } },
               },
             }),
             transaction.documentChecklistTemplate.findFirst({
@@ -1860,14 +1951,16 @@ export class DocumentManagementUseCase {
             );
           }
 
-          const dependents = Array.isArray(subject.dependents)
-            ? (subject.dependents as unknown as UserDependent[])
+          const documentProfile = canonicalDocumentProfile(subject);
+          const dependents = Array.isArray(documentProfile.dependents)
+            ? (documentProfile.dependents as unknown as UserDependent[])
             : [];
           const ruleContext = employeeDocumentRuleContext({
-            jobTitle: subject.jobTitle,
-            maritalStatus: subject.maritalStatus as MaritalStatus | null,
+            jobTitle: documentProfile.jobTitle,
+            maritalStatus:
+              documentProfile.maritalStatus as MaritalStatus | null,
             militaryDocumentStatus:
-              subject.militaryDocumentStatus as MilitaryDocumentStatus,
+              documentProfile.militaryDocumentStatus as MilitaryDocumentStatus,
             dependents,
           });
           const applicable = checklist.items.filter((item) =>
@@ -2086,7 +2179,10 @@ export class DocumentManagementUseCase {
         principal.permissions.includes('documents:manage'));
     const where: Prisma.DocumentRequestWhereInput = {
       companyId: principal.companyId,
-      subject: { deletedAt: null },
+      OR: [
+        { subjectRegistrationId: { not: null } },
+        { subject: { deletedAt: null } },
+      ],
       ...(!canManage ? { subjectUserId: principal.id } : {}),
       ...(query.subjectUserId && canManage
         ? { subjectUserId: query.subjectUserId }
@@ -2101,6 +2197,7 @@ export class DocumentManagementUseCase {
         where,
         include: {
           subject: { select: { id: true, name: true, email: true } },
+          subjectRegistration: { select: registrationSubjectSelect },
           checklist: {
             select: { id: true, code: true, name: true, version: true },
           },
@@ -2121,7 +2218,17 @@ export class DocumentManagementUseCase {
         status: requestStatusFromPrisma[row.status],
         deadline: row.deadline?.toISOString() ?? null,
         version: row.version,
-        subject: row.subject,
+        subject: row.subjectRegistration
+          ? {
+              id: row.subjectRegistration.id,
+              name:
+                row.subjectRegistration.individualName ??
+                row.subjectRegistration.legalName,
+              email: row.subjectRegistration.individualEmail ?? '',
+              registrationId: row.subjectRegistration.id,
+              userId: row.subject?.id ?? null,
+            }
+          : row.subject,
         checklist: row.checklist,
         progress: {
           total: row.items.length,
@@ -2174,7 +2281,7 @@ export class DocumentManagementUseCase {
         where: {
           id_companyId: { id: requestId, companyId: principal.companyId },
         },
-        select: { id: true, subjectUserId: true },
+        select: { id: true, subjectUserId: true, subjectRegistrationId: true },
       }),
       this.prisma.documentType.findUnique({
         where: {
@@ -2205,7 +2312,7 @@ export class DocumentManagementUseCase {
       await this.lockEmployeeDocumentRequirementInvariant(
         transaction,
         principal.companyId,
-        request.subjectUserId,
+        request.subjectRegistrationId ?? request.subjectUserId!,
         documentType.id,
       );
       const concurrentDuplicate =
@@ -3122,7 +3229,8 @@ export class DocumentManagementUseCase {
       await this.lockEmployeeDocumentRequirementInvariant(
         transaction,
         principal.companyId,
-        submission.requestItem.request.subjectUserId,
+        submission.requestItem.request.subjectRegistrationId ??
+          submission.requestItem.request.subjectUserId!,
         submission.requestItem.documentTypeId,
       );
       const findDuplicatedRequirements = () =>
@@ -3143,7 +3251,14 @@ export class DocumentManagementUseCase {
               ],
             },
             request: {
-              subjectUserId: submission.requestItem.request.subjectUserId,
+              ...(submission.requestItem.request.subjectRegistrationId
+                ? {
+                    subjectRegistrationId:
+                      submission.requestItem.request.subjectRegistrationId,
+                  }
+                : {
+                    subjectUserId: submission.requestItem.request.subjectUserId,
+                  }),
               status: { not: PrismaDocumentRequestStatus.CANCELLED },
             },
           },
@@ -3610,7 +3725,12 @@ export class DocumentManagementUseCase {
         documentType: {
           select: { code: true, name: true, renewalLeadDays: true },
         },
-        request: { include: { subject: { select: { id: true, name: true } } } },
+        request: {
+          include: {
+            subject: { select: { id: true, name: true } },
+            subjectRegistration: { select: registrationSubjectSelect },
+          },
+        },
       },
       orderBy: { validUntil: 'asc' },
     });
@@ -3618,7 +3738,14 @@ export class DocumentManagementUseCase {
       data: rows.map((row) => ({
         requestItemId: row.id,
         requestId: row.requestId,
-        subject: row.request.subject,
+        subject: row.request.subjectRegistration
+          ? {
+              id: row.request.subjectRegistration.id,
+              name:
+                row.request.subjectRegistration.individualName ??
+                row.request.subjectRegistration.legalName,
+            }
+          : row.request.subject,
         documentType: row.documentType,
         validUntil: row.validUntil?.toISOString() ?? null,
       })),
@@ -3666,6 +3793,7 @@ export class DocumentManagementUseCase {
         data: {
           companyId: principal.companyId,
           subjectUserId: source.request.subjectUserId,
+          subjectRegistrationId: source.request.subjectRegistrationId,
           createdByUserId: principal.id,
           checklistId: source.request.checklistId,
           context: PrismaDocumentRequestContext.DOCUMENT_RENEWAL,
@@ -3707,7 +3835,46 @@ export class DocumentManagementUseCase {
     };
   }
 
-  async exportXlsx(principal: AuthenticatedPrincipal, subjectUserId?: string) {
+  private async registrationExportSubject(companyId: string, id: string) {
+    const person = await this.prisma.routingCompany.findFirst({
+      where: { companyId, id, clientType: 'PF' },
+      select: {
+        id: true,
+        individualName: true,
+        legalName: true,
+        individualEmail: true,
+        cpf: true,
+        documentProfile: true,
+      },
+    });
+    if (!person) throw notFound('Pessoa do Cadastro');
+    const profile = jsonRecord(person.documentProfile);
+    return {
+      id: person.id,
+      name: person.individualName ?? person.legalName,
+      email: person.individualEmail ?? '',
+      cpfNormalized: person.cpf,
+      jobTitle: typeof profile.jobTitle === 'string' ? profile.jobTitle : null,
+      maritalStatus:
+        typeof profile.maritalStatus === 'string'
+          ? profile.maritalStatus
+          : null,
+      militaryDocumentStatus:
+        typeof profile.militaryDocumentStatus === 'string'
+          ? profile.militaryDocumentStatus
+          : 'pending-confirmation',
+      dependents: (Array.isArray(profile.dependents)
+        ? profile.dependents
+        : []) as Prisma.JsonValue,
+      deletedAt: null,
+    };
+  }
+
+  async exportXlsx(
+    principal: AuthenticatedPrincipal,
+    subjectUserId?: string,
+    subjectKind: 'user' | 'registration' = 'user',
+  ) {
     assertManage(principal);
     if (
       !principal.isAdministrator &&
@@ -3719,29 +3886,43 @@ export class DocumentManagementUseCase {
     }
     if (!subjectUserId) {
       throw validationError(
-        'A exportação documental deve ser realizada individualmente por funcionário.',
+        'A exportação documental deve ser realizada individualmente por pessoa.',
       );
     }
-    const subject = await this.prisma.user.findUnique({
-      where: {
-        id_companyId: { id: subjectUserId, companyId: principal.companyId },
-      },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        cpfNormalized: true,
-        jobTitle: true,
-        maritalStatus: true,
-        militaryDocumentStatus: true,
-        dependents: true,
-      },
-    });
+    const subject =
+      subjectKind === 'registration'
+        ? await this.registrationExportSubject(
+            principal.companyId,
+            subjectUserId,
+          )
+        : await this.prisma.user.findUnique({
+            where: {
+              id_companyId: {
+                id: subjectUserId,
+                companyId: principal.companyId,
+              },
+            },
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              cpfNormalized: true,
+              jobTitle: true,
+              maritalStatus: true,
+              militaryDocumentStatus: true,
+              dependents: true,
+            },
+          });
     if (!subject) throw notFound('Usuário titular');
     const submissions = await this.prisma.documentSubmission.findMany({
       where: {
         companyId: principal.companyId,
-        requestItem: { request: { subjectUserId } },
+        requestItem: {
+          request:
+            subjectKind === 'registration'
+              ? { subjectRegistrationId: subjectUserId }
+              : { subjectUserId },
+        },
       },
       include: {
         validation: true,
@@ -3759,6 +3940,7 @@ export class DocumentManagementUseCase {
             request: {
               include: {
                 subject: { select: { id: true, name: true, email: true } },
+                subjectRegistration: { select: registrationSubjectSelect },
               },
             },
             documentType: { select: { code: true, name: true } },
@@ -3768,7 +3950,13 @@ export class DocumentManagementUseCase {
       orderBy: { submittedAt: 'desc' },
     });
     const items = await this.prisma.documentRequestItem.findMany({
-      where: { companyId: principal.companyId, request: { subjectUserId } },
+      where: {
+        companyId: principal.companyId,
+        request:
+          subjectKind === 'registration'
+            ? { subjectRegistrationId: subjectUserId }
+            : { subjectUserId },
+      },
       include: {
         documentType: { select: { code: true, name: true } },
         submissions: { orderBy: { version: 'desc' }, take: 1 },
@@ -3776,7 +3964,7 @@ export class DocumentManagementUseCase {
       orderBy: [{ request: { createdAt: 'desc' } }, { position: 'asc' }],
     });
     const workbook = new ExcelJS.Workbook();
-    const employee = workbook.addWorksheet('Dados do funcionário');
+    const employee = workbook.addWorksheet('Dados da pessoa');
     employee.columns = [
       { header: 'Campo', key: 'field', width: 36 },
       { header: 'Valor validado', key: 'value', width: 60 },
@@ -3787,7 +3975,7 @@ export class DocumentManagementUseCase {
       { field: 'E-mail', value: subject.email, source: 'Cadastro' },
       { field: 'CPF', value: subject.cpfNormalized ?? '', source: 'Cadastro' },
       {
-        field: 'Classificação do usuário',
+        field: 'Função profissional',
         value: subject.jobTitle ?? '',
         source: 'Cadastro',
       },
@@ -3912,6 +4100,7 @@ export class DocumentManagementUseCase {
   async exportUserFiles(
     principal: AuthenticatedPrincipal,
     subjectUserId: string,
+    subjectKind: 'user' | 'registration' = 'user',
   ) {
     assertManage(principal);
     if (
@@ -3922,18 +4111,34 @@ export class DocumentManagementUseCase {
         'Esta operação exige permissão de exportação documental.',
       );
     }
-    const subject = await this.prisma.user.findUnique({
-      where: {
-        id_companyId: { id: subjectUserId, companyId: principal.companyId },
-      },
-      select: { id: true, name: true, email: true, deletedAt: true },
-    });
+    const subject =
+      subjectKind === 'registration'
+        ? await this.registrationExportSubject(
+            principal.companyId,
+            subjectUserId,
+          )
+        : await this.prisma.user.findUnique({
+            where: {
+              id_companyId: {
+                id: subjectUserId,
+                companyId: principal.companyId,
+              },
+            },
+            select: { id: true, name: true, email: true, deletedAt: true },
+          });
     if (!subject || subject.deletedAt) throw notFound('Usuário titular');
     const files = await this.prisma.documentFile.findMany({
       where: {
         companyId: principal.companyId,
         deletedAt: null,
-        submission: { requestItem: { request: { subjectUserId } } },
+        submission: {
+          requestItem: {
+            request:
+              subjectKind === 'registration'
+                ? { subjectRegistrationId: subjectUserId }
+                : { subjectUserId },
+          },
+        },
       },
       include: {
         submission: {
@@ -4004,7 +4209,10 @@ export class DocumentManagementUseCase {
     const row = await this.prisma.documentRequest.findUnique({
       where: {
         id_companyId: { id: requestId, companyId: principal.companyId },
-        subject: { deletedAt: null },
+        OR: [
+          { subjectRegistrationId: { not: null } },
+          { subject: { deletedAt: null } },
+        ],
       },
       include: requestDetailInclude,
     });
@@ -4015,7 +4223,7 @@ export class DocumentManagementUseCase {
 
   private assertOwnOrManage(
     principal: AuthenticatedPrincipal,
-    subjectUserId: string,
+    subjectUserId: string | null,
   ): void {
     if (principal.id === subjectUserId) return;
     assertManage(principal);

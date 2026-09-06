@@ -69,6 +69,10 @@ export interface MutateWhatsAppChannelResult {
 }
 
 export abstract class WhatsAppChannelManagementRepository {
+  abstract listDepartments(
+    companyId: string,
+  ): Promise<readonly { id: string; name: string }[]>;
+
   abstract getTenantTechnicalName(companyId: string): Promise<string>;
 
   abstract list(companyId: string): Promise<readonly ManagedWhatsAppChannel[]>;

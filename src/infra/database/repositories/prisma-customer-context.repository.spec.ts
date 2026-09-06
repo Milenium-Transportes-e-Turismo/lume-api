@@ -49,6 +49,7 @@ describe('PrismaCustomerContextRepository context isolation', () => {
       },
     ]);
     const transaction = {
+      routingCompany: { findFirst: vi.fn(async () => null) },
       serviceSession: {
         findFirst: vi.fn(async () => anchor()),
         findMany: vi.fn(async () => [
@@ -121,6 +122,7 @@ describe('PrismaCustomerContextRepository context isolation', () => {
   it('denies a cross-tenant session before reading any customer profile', async () => {
     const profileFind = vi.fn();
     const transaction = {
+      routingCompany: { findFirst: vi.fn(async () => null) },
       serviceSession: { findFirst: vi.fn(async () => null) },
       customerProfileSuggestion: { findMany: profileFind },
     };

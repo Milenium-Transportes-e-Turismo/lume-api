@@ -62,6 +62,11 @@ export interface CustomerPendingContext {
 }
 
 export interface CustomerContextSummary {
+  readonly registrationInstructions?: {
+    readonly registrationId: string;
+    readonly version: number;
+    readonly content: string;
+  } | null;
   readonly serviceSessionId: string;
   readonly whatsappContactId: string;
   readonly identity: ConfirmedCustomerIdentityContext | null;

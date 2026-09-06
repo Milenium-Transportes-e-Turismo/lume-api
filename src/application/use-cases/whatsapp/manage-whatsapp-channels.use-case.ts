@@ -38,7 +38,7 @@ function webhookUrl(publicApiBaseUrl: string, channelId: string): string {
     if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error();
   } catch {
     throw validationError(
-      'A URL pública da API precisa estar configurada para criar canais.',
+      'Configuração administrativa ausente ou inválida: TENANT_API_PUBLIC_URL.',
     );
   }
   return `${base}/webhooks/evolution/${encodeURIComponent(channelId)}`;
@@ -48,10 +48,8 @@ function providerIssue(error: unknown): ProviderIssue {
   if (error instanceof EvolutionInstanceManagementError) {
     return { reason: error.reason, message: error.message };
   }
-  return {
-    reason: 'provider-unavailable',
-    message: 'A Evolution está temporariamente indisponível.',
-  };
+  // Persistence, authorization and version conflicts are not provider outages.
+  throw error;
 }
 
 function connectionStatus(
@@ -70,6 +68,10 @@ function mutationCommand(commandId: string, step: string): string {
 
 export class QueryWhatsAppChannelsUseCase {
   constructor(private readonly channels: WhatsAppChannelManagementRepository) {}
+
+  listDepartments(companyId: string) {
+    return this.channels.listDepartments(companyId);
+  }
 
   list(companyId: string) {
     return this.channels.list(companyId);
@@ -99,6 +101,7 @@ export class CreateWhatsAppChannelUseCase {
     readonly routingMode: ChannelRoutingMode;
     readonly allowedAutomaticTargetDepartmentIds: readonly string[];
   }): Promise<WhatsAppChannelOperationResult> {
+    webhookUrl(this.publicApiBaseUrl, 'configuration-check');
     const tenantName = await this.channels.getTenantTechnicalName(
       input.companyId,
     );
@@ -153,7 +156,9 @@ export class CreateWhatsAppChannelUseCase {
         patch: {
           organizationalStatus: synchronized.organizationalStatus,
           connectionStatus: synchronized.connectionStatus,
-          evolutionInstanceId: provider.instanceId,
+          ...(provider.instanceId
+            ? { evolutionInstanceId: provider.instanceId }
+            : {}),
         },
         metadata: { provider: 'evolution' },
       });
@@ -403,7 +408,9 @@ export class ManageWhatsAppChannelUseCase {
         patch: {
           organizationalStatus: providerSnapshot.organizationalStatus,
           connectionStatus: providerSnapshot.connectionStatus,
-          evolutionInstanceId: provider.instanceId,
+          ...(provider.instanceId
+            ? { evolutionInstanceId: provider.instanceId }
+            : {}),
         },
       });
       return {

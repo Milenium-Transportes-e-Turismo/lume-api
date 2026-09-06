@@ -54,7 +54,9 @@ type LegacyDocumentAssociationPreview =
   | {
       readonly decision: 'confirmed';
       readonly personRegistrationId: string;
-      readonly rule: 'persisted-user-person-association';
+      readonly rule:
+        | 'persisted-user-person-association'
+        | 'persisted-registration-document-subject';
     }
   | {
       readonly decision: 'conflict';
@@ -125,6 +127,7 @@ export class LegacyDocumentSubjectPreviewService {
               select: {
                 id: true,
                 context: true,
+                subjectRegistration: { select: { id: true, cpf: true } },
                 subject: {
                   select: {
                     id: true,
@@ -151,7 +154,44 @@ export class LegacyDocumentSubjectPreviewService {
     });
     if (!submission) throw notFound('Envio documental');
 
+    const registration = submission.requestItem.request.subjectRegistration;
+    if (registration) {
+      const signals = subjectAmbiguitySignals(
+        jsonRecord(submission.requestItem.configSnapshot),
+      );
+      const documentCpf = confirmedCpf(submission.confirmedData);
+      return {
+        persisted: false,
+        submissionId: submission.id,
+        requestItemId: submission.requestItemId,
+        requestId: submission.requestItem.requestId,
+        existingContextualRegistrationId: null,
+        existingContextualLinkMeaning: null,
+        associationPreview: {
+          decision: 'confirmed',
+          personRegistrationId: registration.id,
+          rule: 'persisted-registration-document-subject',
+        },
+        classificationPreview: classifyLegacyDocumentSubject({
+          documentTypeCode: submission.requestItem.documentType.code,
+          requestContext:
+            contextFromPrisma[submission.requestItem.request.context],
+          personAssociation: {
+            status: 'confirmed',
+            personRegistrationId: registration.id,
+            personCpf: registration.cpf,
+          },
+          documentCpf,
+          ...signals,
+        }),
+        evidence: {
+          documentCpfSource: documentCpf ? 'confirmed-data' : null,
+          ...signals,
+        },
+      };
+    }
     const subject = submission.requestItem.request.subject;
+    if (!subject) throw notFound('Titular documental');
     const persistedPerson =
       subject.personRegistrationId &&
       subject.companyId === current.companyId &&

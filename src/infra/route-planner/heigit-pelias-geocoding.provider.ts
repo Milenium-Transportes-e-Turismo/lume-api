@@ -2,6 +2,10 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { GeocodingProvider } from '../../application/contracts/geocoding.provider';
+import type {
+  RouteLocationSearchProvider,
+  RouteLocationSuggestion,
+} from '../../application/contracts/route-location-search.provider';
 import { AppError } from '../../core/errors/app-error';
 import type {
   Coordinates,
@@ -18,6 +22,7 @@ interface PeliasFeature {
     readonly coordinates?: readonly [number, number];
   };
   readonly properties?: {
+    readonly gid?: string;
     readonly label?: string;
     readonly name?: string;
   };
@@ -28,7 +33,10 @@ interface PeliasResponse {
 }
 
 @Injectable()
-export class HeigitPeliasGeocodingProvider extends GeocodingProvider {
+export class HeigitPeliasGeocodingProvider
+  extends GeocodingProvider
+  implements RouteLocationSearchProvider
+{
   private readonly logger = new Logger(HeigitPeliasGeocodingProvider.name);
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -56,6 +64,63 @@ export class HeigitPeliasGeocodingProvider extends GeocodingProvider {
     });
     const value = await this.request(`/pelias/v1/search?${query}`, 'search');
     return this.resolveFeature(value.features?.[0], address);
+  }
+
+  async searchLocations(
+    text: string,
+  ): Promise<readonly RouteLocationSuggestion[]> {
+    const query = new URLSearchParams({
+      text,
+      'boundary.country': 'BR',
+      size: '6',
+      lang: 'pt',
+    });
+    const value = await this.request(
+      '/pelias/v1/autocomplete?' + query.toString(),
+      'autocomplete',
+    );
+    if (!Array.isArray(value.features)) {
+      throw new AppError(
+        'ROUTING_UNAVAILABLE',
+        'O serviço de busca retornou uma resposta inválida.',
+      );
+    }
+    const items: RouteLocationSuggestion[] = [];
+    const seen = new Set<string>();
+    const features: readonly PeliasFeature[] = value.features;
+    for (const feature of features) {
+      if (!feature) continue;
+      const coordinates = feature.geometry?.coordinates;
+      const lng = coordinates?.[0];
+      const lat = coordinates?.[1];
+      const label = feature.properties?.label ?? feature.properties?.name;
+      if (
+        feature.geometry?.type !== 'Point' ||
+        typeof lat !== 'number' ||
+        typeof lng !== 'number' ||
+        !Number.isFinite(lat) ||
+        !Number.isFinite(lng) ||
+        Math.abs(lat) > 90 ||
+        Math.abs(lng) > 180 ||
+        typeof label !== 'string' ||
+        !label.trim()
+      )
+        continue;
+      const key = lat + ',' + lng + ':' + label;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push({
+        id:
+          typeof feature.properties?.gid === 'string'
+            ? feature.properties.gid
+            : key,
+        label,
+        lat,
+        lng,
+      });
+      if (items.length === 6) break;
+    }
+    return items;
   }
 
   async reverseGeocode(
@@ -106,7 +171,7 @@ export class HeigitPeliasGeocodingProvider extends GeocodingProvider {
 
   private async request(
     path: string,
-    operation: 'search' | 'reverse',
+    operation: 'search' | 'reverse' | 'autocomplete',
   ): Promise<PeliasResponse> {
     const startedAt = Date.now();
     this.logger.log({ event: 'geocoding.request', operation });

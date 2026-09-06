@@ -951,6 +951,24 @@ export class RegistrationReconciliationService {
             'O candidato foi alterado por outro usuário. Recarregue os dados.',
           );
         }
+        if (input.action === 'approve') {
+          const created = await this.registrations.createPromotionGraph(
+            transaction,
+            current,
+            input.confirmedPayload!,
+            { commandId: input.commandId, candidateId },
+          );
+          await transaction.registrationCandidate.update({
+            where: {
+              id_companyId: { id: candidateId, companyId: current.companyId },
+            },
+            data: {
+              status: 'PROMOTED',
+              promotedRegistrationId: created.primaryRegistrationId,
+              promotedAt: new Date(),
+            },
+          });
+        }
         const after = await transaction.registrationCandidate.findUniqueOrThrow(
           {
             where: {

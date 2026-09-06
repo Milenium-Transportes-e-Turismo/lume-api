@@ -442,6 +442,23 @@ export class PrismaCustomerContextRepository extends CustomerContextRepository {
         ...input,
         whatsappContactId: anchor.whatsappContactId,
       });
+      const registration = identity
+        ? await transaction.routingCompany.findFirst({
+            where: {
+              id: identity.registrationId,
+              companyId: input.companyId,
+              status: 'ACTIVE',
+            },
+            select: { id: true, version: true, serviceInstructions: true },
+          })
+        : null;
+      const registrationInstructions = registration?.serviceInstructions
+        ? {
+            registrationId: registration.id,
+            version: registration.version,
+            content: registration.serviceInstructions,
+          }
+        : null;
       const [relatedCompanies, approvedProfile, serviceRows, quoteRows, cases] =
         await Promise.all([
           this.relatedCompanies(
@@ -479,6 +496,7 @@ export class PrismaCustomerContextRepository extends CustomerContextRepository {
         serviceSessionId: input.serviceSessionId,
         whatsappContactId: anchor.whatsappContactId,
         identity,
+        registrationInstructions,
         relatedCompanies,
         approvedProfile,
         recentServices: serviceRows.map(serviceOutput),

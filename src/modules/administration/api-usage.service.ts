@@ -4,6 +4,10 @@ import type { AuthenticatedPrincipal } from '../../application/presenters/user.p
 import { forbidden, validationError } from '../../core/errors/app-error';
 import { Prisma } from '../../infra/database/prisma/generated/client';
 import { PrismaService } from '../../infra/database/prisma/prisma.service';
+import {
+  auditChangedFields,
+  auditOperationLabel,
+} from './audit-operation-labels';
 import { humanizeApiAction } from './api-usage-labels';
 
 interface UsagePeriod {
@@ -53,6 +57,111 @@ function statusFilter(status?: 'success' | 'client-error' | 'server-error') {
 @Injectable()
 export class ApiUsageService {
   constructor(private readonly prisma: PrismaService) {}
+
+  async operations(
+    principal: AuthenticatedPrincipal,
+    query: {
+      from?: string;
+      to?: string;
+      page: number;
+      pageSize: number;
+      userId?: string;
+    },
+  ) {
+    assertAdministrator(principal);
+    const period = resolvePeriod(query.from, query.to);
+    // Explicit command correlation only. Repeated requests without a command remain distinct.
+    const rows = await this.prisma.$queryRawUnsafe<
+      Array<{
+        operation_id: string;
+        actor_id: string | null;
+        actor_name: string | null;
+        occurred_at: Date;
+        events: {
+          id: string;
+          action: string;
+          targetType: string;
+          targetId: string;
+          targetName: string | null;
+          before: unknown;
+          after: unknown;
+          source: string;
+        }[];
+        total: bigint;
+      }>
+    >(
+      `WITH events AS (
+ SELECT id::text, company_id, actor_user_id, action, target_type, target_id,
+ COALESCE(NULLIF(metadata->>'operationId',''),NULLIF(metadata->>'commandId',''), NULLIF(metadata->>'requestId',''), id::text) AS operation_id,
+ metadata->'before' AS before_data, metadata->'after' AS after_data, created_at, 'tenant_audit_logs' AS source
+ FROM tenant_audit_logs
+ UNION ALL
+ SELECT id::text, company_id, actor_user_id, action, 'registration', routing_company_id::text, command_id::text, before_snapshot, after_snapshot, created_at, 'routing_company_history' FROM routing_company_history
+ UNION ALL
+ SELECT id::text, company_id, actor_user_id, action, 'user', user_id::text, command_id::text, before_snapshot, result_snapshot, occurred_at, 'user_update_history' FROM user_update_history
+ UNION ALL
+ SELECT id::text, company_id, actor_user_id, name, 'whatsapp-channel', channel_id::text,
+ COALESCE(NULLIF(metadata->>'operationId',''), regexp_replace(command_id, ':(started|provider-ready|provider-failed)$', '')),
+ before_snapshot, after_snapshot, created_at, 'whatsapp_channel_events' FROM whatsapp_channel_events
+ UNION ALL
+ SELECT id::text, company_id, actor_user_id, name, 'service-session', service_session_id::text, command_id, before_snapshot, after_snapshot, created_at, 'service_session_events' FROM service_session_events
+), grouped AS (
+ SELECT e.operation_id, e.actor_user_id AS actor_id, MAX(e.created_at) AS occurred_at,
+ jsonb_agg(jsonb_build_object('id',e.id,'action',e.action,'targetType',e.target_type,'targetId',e.target_id,'targetName',COALESCE(r.individual_name,r.legal_name,u.name,c.name),'before',e.before_data,'after',e.after_data,'source',e.source) ORDER BY e.created_at, e.id) AS events
+ FROM events e
+ LEFT JOIN routing_companies r ON r.company_id=e.company_id AND r.id::text=e.target_id AND e.target_type IN ('registration','routing-company')
+ LEFT JOIN users u ON u.company_id=e.company_id AND u.id::text=e.target_id AND e.target_type='user'
+ LEFT JOIN whatsapp_channels c ON c.company_id=e.company_id AND c.id::text=e.target_id AND e.target_type='whatsapp-channel'
+ WHERE e.company_id=$1::uuid AND e.created_at >= $2 AND e.created_at <= $3 AND ($4::uuid IS NULL OR e.actor_user_id=$4::uuid)
+ GROUP BY e.operation_id, e.actor_user_id
+)
+SELECT g.*, CASE WHEN actor.deleted_at IS NULL THEN actor.name ELSE 'Usuário excluído' END AS actor_name, COUNT(*) OVER() AS total
+FROM grouped g LEFT JOIN users actor ON actor.id=g.actor_id AND actor.company_id=$1::uuid
+ORDER BY g.occurred_at DESC,g.operation_id LIMIT $5 OFFSET $6`,
+      principal.companyId,
+      period.from,
+      period.to,
+      query.userId ?? null,
+      query.pageSize,
+      (query.page - 1) * query.pageSize,
+    );
+    return {
+      data: rows.map((row) => {
+        const first = row.events[0];
+        const label = auditOperationLabel(first.action, first.targetType);
+        return {
+          id: row.operation_id,
+          actor: row.actor_name ?? 'Sistema',
+          actorId: row.actor_id,
+          createdAt: row.occurred_at.toISOString(),
+          ...label,
+          result: 'Registrada',
+          target: first.targetName ?? label.module,
+          targetId: first.targetId,
+          changes: [
+            ...new Set(
+              row.events.flatMap((event) =>
+                auditChangedFields(event.before, event.after),
+              ),
+            ),
+          ],
+          events: row.events.map((event) => ({
+            id: event.id,
+            code: event.action,
+            source: event.source,
+            targetType: event.targetType,
+            targetId: event.targetId,
+          })),
+        };
+      }),
+      meta: {
+        page: query.page,
+        pageSize: query.pageSize,
+        total: Number(rows[0]?.total ?? 0),
+        totalPages: Math.ceil(Number(rows[0]?.total ?? 0) / query.pageSize),
+      },
+    };
+  }
 
   async summary(
     principal: AuthenticatedPrincipal,

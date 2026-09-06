@@ -45,6 +45,16 @@ export class WhatsAppChannelsController {
     return this.queryChannels.list(current.companyId);
   }
 
+  @Get('departments')
+  @RequireAnyPermission(
+    'whatsapp-channels:view',
+    'whatsapp-channels:create',
+    'whatsapp-channels:manage',
+  )
+  departments(@CurrentUser() current: AuthenticatedPrincipal) {
+    return this.queryChannels.listDepartments(current.companyId);
+  }
+
   @Get(':channelId')
   @RequireAnyPermission('whatsapp-channels:view')
   get(

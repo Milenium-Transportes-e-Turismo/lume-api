@@ -447,4 +447,50 @@ export class DocumentManagementController {
     );
     return new StreamableFile(file.content);
   }
+  @Get('registrations/:subjectUserId/export.xlsx')
+  @RequireAnyPermission('documents:export')
+  @Header('Cache-Control', 'private, no-store')
+  async exportRegistrationXlsx(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Param('subjectUserId', new ParseUUIDPipe({ version: '4' }))
+    subjectUserId: string,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const file = await this.documents.exportXlsx(
+      current,
+      subjectUserId,
+      'registration',
+    );
+    response.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    response.setHeader(
+      'Content-Disposition',
+      contentDisposition(file.fileName, 'attachment'),
+    );
+    return new StreamableFile(file.content);
+  }
+
+  @Get('registrations/:subjectUserId/files.zip')
+  @RequireAnyPermission('documents:export')
+  @Header('Cache-Control', 'private, no-store')
+  async exportRegistrationFiles(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Param('subjectUserId', new ParseUUIDPipe({ version: '4' }))
+    subjectUserId: string,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const file = await this.documents.exportUserFiles(
+      current,
+      subjectUserId,
+      'registration',
+    );
+    response.setHeader('Content-Type', 'application/zip');
+    response.setHeader(
+      'Content-Disposition',
+      contentDisposition(file.fileName, 'attachment'),
+    );
+    return new StreamableFile(file.content);
+  }
 }

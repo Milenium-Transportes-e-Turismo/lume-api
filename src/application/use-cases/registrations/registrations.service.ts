@@ -35,7 +35,28 @@ import { PrismaService } from '../../../infra/database/prisma/prisma.service';
 import { rethrowKnownPrismaConflict } from '../../../infra/database/prisma/prisma-errors';
 import type { AuthenticatedPrincipal } from '../../presenters/user.presenter';
 
+function registrationAddressCreate(
+  normalized: NormalizedRegistrationInput,
+  id: string,
+  actorUserId: string,
+) {
+  return normalized.address
+    ? {
+        create: {
+          ...normalized.address,
+          code: 'ADR-' + id.replaceAll('-', '').slice(0, 20),
+          name: 'Endereço cadastral',
+          createdByUserId: actorUserId,
+        },
+      }
+    : undefined;
+}
+
 const registrationInclude = {
+  fixedPoints: {
+    where: { code: { startsWith: 'ADR-' }, status: 'ACTIVE' },
+    orderBy: { createdAt: 'asc' },
+  },
   temporaryResponsible: { select: { id: true, name: true } },
   roleAssignments: { include: { role: true } },
   tagAssignments: { include: { tag: true } },
@@ -145,6 +166,19 @@ function presentRegistration(row: RegistrationRow) {
     tradeName: row.tradeName,
     cpf: row.cpf,
     cnpj: row.cnpj,
+    documentProfile: row.documentProfile ?? null,
+    serviceInstructions: row.serviceInstructions ?? null,
+    address: row.fixedPoints?.[0]
+      ? {
+          street: row.fixedPoints[0].street,
+          number: row.fixedPoints[0].number,
+          complement: row.fixedPoints[0].complement,
+          district: row.fixedPoints[0].district,
+          postalCode: row.fixedPoints[0].postalCode,
+          city: row.fixedPoints[0].city,
+          state: row.fixedPoints[0].state,
+        }
+      : null,
     avicExternalId: row.avicExternalId,
     isTemporary: row.isTemporary,
     temporaryReason: row.temporaryReason,
@@ -153,6 +187,7 @@ function presentRegistration(row: RegistrationRow) {
     regularizationRequirements: row.regularizationRequirements,
     temporaryResponsible: row.temporaryResponsible,
     roles: row.roleAssignments
+      .filter(({ role }) => role.code !== 'driver')
       .map(({ role }) => ({
         id: role.id,
         code: role.code,
@@ -410,8 +445,16 @@ export class RegistrationsService {
       })),
       skipDuplicates: true,
     });
+    const existingTags = await transaction.registrationTag.findMany({
+      where: { companyId },
+    });
+    const names = new Set(
+      existingTags.map((tag) => tag.name.trim().toLocaleLowerCase('pt-BR')),
+    );
     await transaction.registrationTag.createMany({
-      data: DEFAULT_REGISTRATION_TAGS.map((tag) => ({
+      data: DEFAULT_REGISTRATION_TAGS.filter(
+        (tag) => !names.has(tag.name.toLocaleLowerCase('pt-BR')),
+      ).map((tag) => ({
         companyId,
         ...tag,
       })),
@@ -461,6 +504,19 @@ export class RegistrationsService {
     this.assertInternal(current);
     const name = compact(input.name);
     if (!name) throw validationError('Informe o nome do Marcador.');
+    const existing = await this.prisma.registrationTag.findFirst({
+      where: {
+        companyId: current.companyId,
+        name: { equals: name, mode: 'insensitive' },
+      },
+    });
+    if (existing) {
+      if (!existing.active)
+        throw validationError(
+          'Este Marcador já existe e está inativo. Reative-o no catálogo antes de usar.',
+        );
+      return existing;
+    }
     try {
       return await this.prisma.registrationTag.create({
         data: {
@@ -643,6 +699,15 @@ export class RegistrationsService {
         data: {
           id: entry.id,
           companyId: current.companyId,
+          fixedPoints: registrationAddressCreate(
+            normalized,
+            entry.id,
+            current.id,
+          ),
+          documentProfile: normalized.documentProfile
+            ? (normalized.documentProfile as unknown as Prisma.InputJsonValue)
+            : Prisma.DbNull,
+          serviceInstructions: normalized.serviceInstructions,
           taxId: normalized.taxId,
           legalName: normalized.legalName,
           tradeName: normalized.tradeName,
@@ -1138,6 +1203,7 @@ export class RegistrationsService {
           data: {
             id,
             companyId: current.companyId,
+            fixedPoints: registrationAddressCreate(normalized, id, current.id),
             taxId: normalized.taxId,
             legalName: normalized.legalName,
             tradeName: normalized.tradeName,
@@ -1154,6 +1220,10 @@ export class RegistrationsService {
             legalWhatsapp: normalized.legalWhatsapp,
             legalPhones: normalized.legalPhones,
             status: normalized.status.toUpperCase() as RoutingCompanyStatus,
+            documentProfile: normalized.documentProfile
+              ? (normalized.documentProfile as unknown as Prisma.InputJsonValue)
+              : Prisma.DbNull,
+            serviceInstructions: normalized.serviceInstructions,
             avicExternalId: normalized.avicExternalId,
             isTemporary: normalized.isTemporary,
             temporaryReason: normalized.temporaryReason,
@@ -1264,6 +1334,14 @@ export class RegistrationsService {
         const normalized = normalizeRegistrationInput(
           {
             ...input,
+            documentProfile:
+              input.documentProfile === undefined
+                ? (before.documentProfile as unknown as import('../../../domain/registrations/registration').RegistrationDocumentProfile)
+                : input.documentProfile,
+            serviceInstructions:
+              input.serviceInstructions === undefined
+                ? before.serviceInstructions
+                : input.serviceInstructions,
             isTemporary: input.isTemporary ?? before.isTemporary,
             temporaryReason:
               input.temporaryReason === undefined
@@ -1351,6 +1429,10 @@ export class RegistrationsService {
             legalWhatsapp: normalized.legalWhatsapp,
             legalPhones: normalized.legalPhones,
             status: normalized.status.toUpperCase() as RoutingCompanyStatus,
+            documentProfile: normalized.documentProfile
+              ? (normalized.documentProfile as unknown as Prisma.InputJsonValue)
+              : Prisma.DbNull,
+            serviceInstructions: normalized.serviceInstructions,
             avicExternalId: normalized.avicExternalId,
             isTemporary: normalized.isTemporary,
             temporaryReason: normalized.isTemporary
@@ -1366,7 +1448,10 @@ export class RegistrationsService {
             regularizationRequirements: normalized.isTemporary
               ? normalized.regularizationRequirements
               : tracksOperationalRequirements
-                ? registrationOperationalRequirements(normalized.roleCodes)
+                ? registrationOperationalRequirements(
+                    normalized.roleCodes,
+                    normalized.tagCodes,
+                  )
                 : normalized.regularizationRequirements,
             temporaryResponsibleUserId: normalized.isTemporary
               ? normalized.temporaryResponsibleUserId
@@ -1378,6 +1463,36 @@ export class RegistrationsService {
           throw conflict(
             'O Cadastro foi alterado por outro usuário. Recarregue os dados e tente novamente.',
           );
+        }
+        if (input.address !== undefined) {
+          const code = 'ADR-' + registrationId.replaceAll('-', '').slice(0, 20);
+          if (normalized.address) {
+            await transaction.routingFixedPoint.upsert({
+              where: { companyId_code: { companyId: current.companyId, code } },
+              create: {
+                ...normalized.address,
+                code,
+                name: 'Endereço cadastral',
+                companyId: current.companyId,
+                routingCompanyId: registrationId,
+                createdByUserId: current.id,
+              },
+              update: {
+                ...normalized.address,
+                status: 'ACTIVE',
+                version: { increment: 1 },
+              },
+            });
+          } else {
+            await transaction.routingFixedPoint.updateMany({
+              where: {
+                companyId: current.companyId,
+                routingCompanyId: registrationId,
+                code,
+              },
+              data: { status: 'INACTIVE', version: { increment: 1 } },
+            });
+          }
         }
         await Promise.all([
           transaction.registrationRoleAssignment.deleteMany({

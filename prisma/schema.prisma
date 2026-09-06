@@ -1009,6 +1009,8 @@ model RoutingCompany {
   legalWhatsapp      String?              @map("legal_whatsapp") @db.VarChar(20)
   legalPhones        Json                 @default("[]") @map("legal_phones") @db.JsonB
   status             RoutingCompanyStatus @default(ACTIVE)
+  documentProfile Json? @map("document_profile") @db.JsonB
+  serviceInstructions String? @map("service_instructions") @db.VarChar(4000)
   avicExternalId     String?              @map("avic_external_id") @db.VarChar(160)
   avicLastSyncedAt   DateTime?            @map("avic_last_synced_at") @db.Timestamptz(3)
   isTemporary        Boolean              @default(false) @map("is_temporary")
@@ -1048,6 +1050,7 @@ model RoutingCompany {
   groupParticipants                 WhatsAppGroupParticipant[]
   dataReviews                       RegistrationDataReview[]
   customerProfileSuggestions        CustomerProfileSuggestion[]
+  documentRequests DocumentRequest[]
 
   @@unique([id, companyId])
   @@unique([companyId, taxId])
@@ -4109,7 +4112,8 @@ model DocumentChecklistItem {
 model DocumentRequest {
   id              String                 @id @default(uuid()) @db.Uuid
   companyId       String                 @map("company_id") @db.Uuid
-  subjectUserId   String                 @map("subject_user_id") @db.Uuid
+  subjectRegistrationId String? @map("subject_registration_id") @db.Uuid
+  subjectUserId   String?                 @map("subject_user_id") @db.Uuid
   createdByUserId String                 @map("created_by_user_id") @db.Uuid
   checklistId     String                 @map("checklist_id") @db.Uuid
   context         DocumentRequestContext
@@ -4124,7 +4128,8 @@ model DocumentRequest {
   updatedAt       DateTime               @updatedAt @map("updated_at")
 
   company   Company                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  subject   User                      @relation("DocumentRequestSubject", fields: [subjectUserId, companyId], references: [id, companyId], onDelete: Restrict)
+  subjectRegistration RoutingCompany? @relation(fields: [subjectRegistrationId, companyId], references: [id, companyId], onDelete: Restrict)
+  subject   User?                      @relation("DocumentRequestSubject", fields: [subjectUserId, companyId], references: [id, companyId], onDelete: Restrict)
   createdBy User                      @relation("DocumentRequestCreator", fields: [createdByUserId, companyId], references: [id, companyId], onDelete: Restrict)
   checklist DocumentChecklistTemplate @relation(fields: [checklistId, companyId], references: [id, companyId], onDelete: Restrict)
   items     DocumentRequestItem[]

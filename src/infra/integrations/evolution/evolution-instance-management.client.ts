@@ -101,14 +101,21 @@ function parseSnapshot(
     instance?.connectionStatus ??
     instance?.status ??
     response.state;
+  const qrCode = parseQrCode(response);
+  if (providerState == null && !qrCode) {
+    throw new EvolutionInstanceManagementError('invalid-response');
+  }
   return {
     instanceName: expectedInstanceName,
     instanceId:
       optionalString(instance?.instanceId) ??
       optionalString(instance?.id) ??
       null,
-    connectionState: stateFromProvider(providerState),
-    qrCode: parseQrCode(response),
+    connectionState:
+      providerState == null && qrCode
+        ? 'connecting'
+        : stateFromProvider(providerState),
+    qrCode,
   };
 }
 

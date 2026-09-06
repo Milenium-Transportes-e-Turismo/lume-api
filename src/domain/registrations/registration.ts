@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { redactPotentialSecrets } from '../agents/agent-runtime';
 
 import { validationError } from '../../core/errors/app-error';
 import {
@@ -43,11 +44,11 @@ export const DEFAULT_REGISTRATION_ROLES = [
   { code: 'employee', name: 'Funcionário' },
   { code: 'service-provider', name: 'Prestador de serviço' },
   { code: 'partner', name: 'Parceiro' },
-  { code: 'driver', name: 'Motorista' },
   { code: 'passenger', name: 'Passageiro' },
 ] as const;
 
 export const DEFAULT_REGISTRATION_TAGS = [
+  { code: 'driver', name: 'Motorista' },
   { code: 'commercial', name: 'Comercial' },
   { code: 'operations', name: 'Operacional' },
   { code: 'financial', name: 'Financeiro' },
@@ -121,9 +122,14 @@ export function assertTemporaryRegistrationCanBeRegularized(registration: {
 
 export function registrationOperationalRequirements(
   roleCodes: readonly string[],
+  tagCodes: readonly string[] = [],
 ): RegistrationRequirementCode[] {
   const requirements: RegistrationRequirementCode[] = [];
-  if (roleCodes.includes('driver')) {
+  if (
+    roleCodes.includes('driver') ||
+    tagCodes.includes('driver') ||
+    tagCodes.includes('motorista')
+  ) {
     requirements.push('driver-license-before-assignment');
   }
   if (roleCodes.includes('passenger')) {
@@ -147,7 +153,70 @@ export interface RegistrationEmailInput {
   isPrimary?: boolean;
 }
 
+export interface RegistrationAddress {
+  street: string;
+  number: string;
+  complement?: string | null;
+  district: string;
+  postalCode: string;
+  city: string;
+  state: string;
+}
+
+export function normalizeRegistrationAddress(
+  value: RegistrationAddress | null | undefined,
+): RegistrationAddress | null {
+  if (!value) return null;
+  const normalized = {
+    street: value.street.trim(),
+    number: value.number.trim(),
+    complement: value.complement?.trim() || null,
+    district: value.district.trim(),
+    postalCode: value.postalCode.replace(/\D/g, ''),
+    city: value.city.trim(),
+    state: value.state.trim().toUpperCase(),
+  };
+  if (
+    !normalized.street ||
+    !normalized.number ||
+    !normalized.district ||
+    !normalized.city ||
+    normalized.street.length > 160 ||
+    normalized.number.length > 30 ||
+    normalized.district.length > 120 ||
+    normalized.city.length > 120 ||
+    (normalized.complement?.length ?? 0) > 120 ||
+    !/^\d{8}$/.test(normalized.postalCode) ||
+    !/^[A-Z]{2}$/.test(normalized.state)
+  ) {
+    throw validationError(
+      'Informe endereço completo, CEP com 8 dígitos e UF com 2 letras.',
+    );
+  }
+  return normalized;
+}
+
+export function normalizeRegistrationInstructions(
+  value: string | null | undefined,
+): string | null {
+  const text = value?.trim() || null;
+  if (
+    text &&
+    (text.length > 4000 ||
+      redactPotentialSecrets(text) !== text ||
+      /\b(?:env|docker-secret|vault|secret):\/\//iu.test(text))
+  ) {
+    throw validationError(
+      'As instruções aceitam até 4.000 caracteres e não podem conter credenciais.',
+    );
+  }
+  return text;
+}
+
 export interface RegistrationInput {
+  address?: RegistrationAddress | null;
+  documentProfile?: RegistrationDocumentProfile | null;
+  serviceInstructions?: string | null;
   type: RegistrationType;
   status?: RegistrationStatus;
   avicExternalId?: string | null;
@@ -186,6 +255,9 @@ export interface NormalizedRegistrationEmail {
 }
 
 export interface NormalizedRegistrationInput {
+  address: RegistrationAddress | null;
+  documentProfile: RegistrationDocumentProfile | null;
+  serviceInstructions: string | null;
   type: RegistrationType;
   status: RegistrationStatus;
   avicExternalId: string | null;
@@ -446,6 +518,7 @@ function normalizeTemporaryRegistration(
   }
   for (const requirement of registrationOperationalRequirements(
     context.roleCodes,
+    input.tagCodes,
   )) {
     requirements.add(requirement);
   }
@@ -538,6 +611,14 @@ export function normalizeRegistrationInput(
   return {
     type: input.type,
     status,
+    address: normalizeRegistrationAddress(input.address),
+    documentProfile: normalizeRegistrationDocumentProfile(
+      input.documentProfile,
+      input.type,
+    ),
+    serviceInstructions: normalizeRegistrationInstructions(
+      input.serviceInstructions,
+    ),
     avicExternalId: compactText(input.avicExternalId),
     firstName,
     lastName,
@@ -689,4 +770,72 @@ export function normalizeRegistrationSearch(
   value?: string,
 ): string | undefined {
   return compactText(value) ?? undefined;
+}
+
+export interface RegistrationDocumentProfile {
+  jobTitle: string | null;
+  maritalStatus: string | null;
+  militaryDocumentStatus:
+    'applicable' | 'not-applicable' | 'pending-confirmation';
+  dependents: { name: string; birthDate: string; relationship?: string }[];
+}
+export function normalizeRegistrationDocumentProfile(
+  value: RegistrationDocumentProfile | null | undefined,
+  type: string,
+): RegistrationDocumentProfile | null {
+  if (value == null) return null;
+  if (type !== 'pf')
+    throw validationError('O perfil documental pertence a uma pessoa física.');
+  if (
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    !['applicable', 'not-applicable', 'pending-confirmation'].includes(
+      value.militaryDocumentStatus,
+    ) ||
+    (value.maritalStatus != null &&
+      ![
+        'single',
+        'married',
+        'stable-union',
+        'divorced',
+        'widowed',
+        'not-informed',
+      ].includes(value.maritalStatus)) ||
+    (value.jobTitle != null &&
+      (typeof value.jobTitle !== 'string' || value.jobTitle.length > 120)) ||
+    !Array.isArray(value.dependents) ||
+    value.dependents.length > 30
+  )
+    throw validationError('Perfil documental inválido.');
+  const dependents = value.dependents.map((dependent) => {
+    if (
+      !dependent ||
+      typeof dependent.name !== 'string' ||
+      dependent.name.trim().length < 2 ||
+      dependent.name.length > 120 ||
+      typeof dependent.birthDate !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(dependent.birthDate) ||
+      !Number.isFinite(Date.parse(dependent.birthDate)) ||
+      new Date(dependent.birthDate).toISOString().slice(0, 10) !==
+        dependent.birthDate ||
+      dependent.birthDate > new Date().toISOString().slice(0, 10) ||
+      (dependent.relationship != null &&
+        (typeof dependent.relationship !== 'string' ||
+          dependent.relationship.length > 60))
+    )
+      throw validationError('Dados do dependente inválidos.');
+    return {
+      name: dependent.name.trim(),
+      birthDate: dependent.birthDate,
+      ...(dependent.relationship
+        ? { relationship: dependent.relationship.trim() }
+        : {}),
+    };
+  });
+  return {
+    jobTitle: value.jobTitle?.trim() || null,
+    maritalStatus: value.maritalStatus ?? null,
+    militaryDocumentStatus: value.militaryDocumentStatus,
+    dependents,
+  };
 }

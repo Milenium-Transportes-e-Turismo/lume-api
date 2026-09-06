@@ -1,3 +1,4 @@
+import { Prisma } from '../../../infra/database/prisma/generated/client';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { PrismaService } from '../../../infra/database/prisma/prisma.service';
@@ -143,6 +144,8 @@ function createHarness() {
           if (where.version !== state.version) return { count: 0 };
           const columns = { ...data } as Record<string, unknown>;
           delete columns.version;
+          if (columns.documentProfile === Prisma.DbNull)
+            columns.documentProfile = null;
           state = {
             ...state,
             ...columns,
@@ -442,7 +445,9 @@ describe('RegistrationsService promotion graph', () => {
         createMany: vi.fn().mockResolvedValue({ count: 0 }),
         findMany: vi
           .fn()
-          .mockResolvedValue([{ id: 'tag-operations', code: 'operations' }]),
+          .mockResolvedValue([
+            { id: 'tag-operations', code: 'operations', name: 'Operacional' },
+          ]),
       },
       routingCompany: {
         findFirst: vi.fn().mockResolvedValue(null),

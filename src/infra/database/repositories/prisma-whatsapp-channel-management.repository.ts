@@ -173,7 +173,7 @@ export class PrismaWhatsAppChannelManagementRepository extends WhatsAppChannelMa
 
   constructor(
     private readonly prisma: PrismaService,
-    config: ConfigService,
+    private readonly config: ConfigService,
   ) {
     super();
     const webhookSecret = (
@@ -183,6 +183,14 @@ export class PrismaWhatsAppChannelManagementRepository extends WhatsAppChannelMa
     this.webhookSecretHash = createHash('sha256')
       .update(webhookSecret)
       .digest('hex');
+  }
+
+  listDepartments(companyId: string) {
+    return this.prisma.tenantDepartment.findMany({
+      where: { companyId },
+      select: { id: true, name: true },
+      orderBy: { name: 'asc' },
+    });
   }
 
   async getTenantTechnicalName(companyId: string): Promise<string> {
@@ -219,7 +227,7 @@ export class PrismaWhatsAppChannelManagementRepository extends WhatsAppChannelMa
   ): Promise<CreatePendingWhatsAppChannelResult> {
     if (!this.webhookConfigured) {
       throw validationError(
-        'Configure o segredo do webhook Evolution antes de criar um canal.',
+        'Configuração administrativa ausente ou inválida: EVOLUTION_WEBHOOK_SECRET (mínimo de 32 caracteres).',
       );
     }
     const commandId = validateCommandId(input.commandId);
@@ -252,7 +260,7 @@ export class PrismaWhatsAppChannelManagementRepository extends WhatsAppChannelMa
             ...(input.departmentId ? [input.departmentId] : []),
             ...input.allowedAutomaticTargetDepartmentIds,
           ]);
-          const provider = await transaction.whatsAppProvider.findFirst({
+          let provider = await transaction.whatsAppProvider.findFirst({
             where: {
               companyId: input.companyId,
               enabled: true,
@@ -261,8 +269,60 @@ export class PrismaWhatsAppChannelManagementRepository extends WhatsAppChannelMa
             orderBy: { createdAt: 'asc' },
           });
           if (!provider) {
+            const disabled = await transaction.whatsAppProvider.findFirst({
+              where: {
+                companyId: input.companyId,
+                type: WhatsAppProviderType.EVOLUTION,
+              },
+            });
+            if (disabled) {
+              throw validationError(
+                'O provider Evolution foi desativado. Solicite a reativação ao administrador.',
+              );
+            }
+            const baseUrl = (
+              this.config.get<string>('EVOLUTION_BASE_URL') ?? ''
+            )
+              .trim()
+              .replace(/\/+$/u, '');
+            const apiKey = (
+              this.config.get<string>('EVOLUTION_API_KEY') ?? ''
+            ).trim();
+            const missing = [
+              !baseUrl && 'EVOLUTION_BASE_URL',
+              !apiKey && 'EVOLUTION_API_KEY',
+            ].filter(Boolean);
+            if (missing.length) {
+              throw validationError(
+                'Configuração administrativa ausente: ' +
+                  missing.join(', ') +
+                  '.',
+              );
+            }
+            provider = await transaction.whatsAppProvider.upsert({
+              where: {
+                companyId_name: {
+                  companyId: input.companyId,
+                  name: 'Evolution',
+                },
+              },
+              create: {
+                companyId: input.companyId,
+                name: 'Evolution',
+                type: WhatsAppProviderType.EVOLUTION,
+                baseUrl,
+                apiKeyHash: createHash('sha256').update(apiKey).digest('hex'),
+                enabled: true,
+              },
+              update: {},
+            });
+          }
+          if (
+            !provider.enabled ||
+            provider.type !== WhatsAppProviderType.EVOLUTION
+          ) {
             throw validationError(
-              'Nenhum provider Evolution ativo foi configurado para o tenant.',
+              'O provider Evolution existente exige revisão administrativa.',
             );
           }
           const row = await transaction.whatsAppChannel.create({
@@ -309,7 +369,7 @@ export class PrismaWhatsAppChannelManagementRepository extends WhatsAppChannelMa
               actorUserId: input.actorUserId,
               beforeSnapshot: {},
               afterSnapshot: asPrismaJson(after),
-              metadata: { provider: 'evolution' },
+              metadata: { provider: 'evolution', operationId: commandId },
             },
           });
           return { channel: after, replayed: false };
@@ -465,7 +525,13 @@ export class PrismaWhatsAppChannelManagementRepository extends WhatsAppChannelMa
               actorUserId: input.actorUserId,
               beforeSnapshot: asPrismaJson(before),
               afterSnapshot: asPrismaJson(after),
-              metadata: asPrismaJson(input.metadata ?? {}),
+              metadata: asPrismaJson({
+                ...input.metadata,
+                operationId: commandId.replace(
+                  /:(started|provider-ready|provider-failed)$/u,
+                  '',
+                ),
+              }),
             },
           });
           return { channel: after, replayed: false };

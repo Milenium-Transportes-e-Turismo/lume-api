@@ -16,6 +16,15 @@ import {
 export class ApiUsageController {
   constructor(private readonly usage: ApiUsageService) {}
 
+  @Get('operations')
+  @RequireAnyPermission('settings:view')
+  operations(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Query() query: ListApiUsageQueryDto,
+  ) {
+    return this.usage.operations(current, query);
+  }
+
   @Get('summary')
   @RequireAnyPermission('settings:view')
   summary(

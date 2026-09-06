@@ -148,8 +148,13 @@ export class CreateDocumentRequestDto {
   @IsUUID('4')
   commandId!: string;
 
+  @IsOptional()
   @IsUUID('4')
-  subjectUserId!: string;
+  subjectUserId?: string;
+
+  @IsOptional()
+  @IsUUID('4')
+  subjectRegistrationId?: string;
 
   @IsUUID('4')
   checklistId!: string;

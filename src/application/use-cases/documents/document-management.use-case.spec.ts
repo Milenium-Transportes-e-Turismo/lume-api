@@ -863,7 +863,7 @@ describe('DocumentManagementUseCase.exportXlsx', () => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(result.content as never);
     const documents = workbook.getWorksheet('Documentos')!;
-    const employee = workbook.getWorksheet('Dados do funcionário')!;
+    const employee = workbook.getWorksheet('Dados da pessoa')!;
 
     expect(result.fileName).toBe('dados documentais Taiane Karine.xlsx');
     expect(documents.getRow(2).values).toEqual(

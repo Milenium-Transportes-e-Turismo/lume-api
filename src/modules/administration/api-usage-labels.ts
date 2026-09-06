@@ -7,6 +7,23 @@ const METHOD_LABELS: Readonly<Record<string, string>> = {
 };
 
 const ACTIONS: readonly [RegExp, string][] = [
+  [/^GET \/registrations/, 'Consultar cadastros'],
+  [
+    /^POST \/registrations\/reconciliation.*review/,
+    'Decidir conciliação de cadastro',
+  ],
+  [/^POST \/registrations/, 'Criar cadastro ou vínculo'],
+  [/^PATCH \/registrations/, 'Atualizar cadastro'],
+  [/^GET \/ai-agents/, 'Consultar agentes IA'],
+  [/^(POST|PATCH) \/ai-agents/, 'Configurar agente IA'],
+  [/^GET \/knowledge/, 'Consultar Conhecimento'],
+  [/^(POST|PATCH|DELETE) \/knowledge/, 'Gerenciar Conhecimento'],
+  [/^GET \/whatsapp\/channels/, 'Consultar canais WhatsApp'],
+  [/\/whatsapp\/channels.*qr-code/, 'Solicitar QR Code do canal'],
+  [/^(POST|PATCH) \/whatsapp\/channels/, 'Configurar canal WhatsApp'],
+  [/^POST \/route-planner/, 'Calcular rota'],
+  [/^GET \/administration\/usage/, 'Consultar administração'],
+
   [/^POST \/auth\/login$/, 'Entrar na plataforma'],
   [/^POST \/auth\/refresh$/, 'Renovar sessão'],
   [/^POST \/auth\/logout$/, 'Sair da plataforma'],

@@ -208,4 +208,70 @@ describe('HttpEvolutionInstanceManagementGateway', () => {
     ).rejects.toMatchObject({ reason: 'invalid-configuration' });
     expect(fetcher).not.toHaveBeenCalled();
   });
+  it.each([
+    {
+      instance: { instanceId: 'instance-1', state: 'connecting' },
+      base64: 'aGVsbG8=',
+    },
+    { instance: { instanceId: 'instance-1' }, base64: 'aGVsbG8=' },
+    { base64: 'aGVsbG8=' },
+  ])(
+    'accepts a QR snapshot independently of omitted provider metadata: %j',
+    async (body) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(new Response(JSON.stringify(body))),
+      );
+      await expect(
+        gateway().connect('acme-production-financeiro'),
+      ).resolves.toMatchObject({
+        connectionState: 'connecting',
+        qrCode: { base64: 'aGVsbG8=' },
+      });
+    },
+  );
+
+  it.each([{}, null, [], { base64: '<invalid>' }])(
+    'rejects invalid QR response %j',
+    async (body) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(new Response(JSON.stringify(body))),
+      );
+      await expect(
+        gateway().connect('acme-production-financeiro'),
+      ).rejects.toMatchObject({
+        reason: 'invalid-response',
+      });
+    },
+  );
+
+  it('accepts an already connected instance without a QR', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ instance: { state: 'open' } })),
+        ),
+    );
+    await expect(
+      gateway().connect('acme-production-financeiro'),
+    ).resolves.toMatchObject({
+      connectionState: 'connected',
+      qrCode: null,
+    });
+  });
+
+  it('reports a real provider outage', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response('{}', { status: 503 })),
+    );
+    await expect(
+      gateway().connect('acme-production-financeiro'),
+    ).rejects.toMatchObject({
+      reason: 'provider-unavailable',
+    });
+  });
 });

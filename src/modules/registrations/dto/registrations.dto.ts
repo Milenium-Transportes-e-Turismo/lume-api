@@ -23,6 +23,7 @@ import {
   REGISTRATION_PHONE_TYPES,
   REGISTRATION_STATUSES,
   REGISTRATION_TYPES,
+  type RegistrationDocumentProfile,
   type RegistrationEmailType,
   type RegistrationPhoneType,
   type RegistrationStatus,
@@ -58,7 +59,26 @@ export class RegistrationEmailDto {
   @IsOptional() @IsBoolean() isPrimary?: boolean;
 }
 
+export class RegistrationAddressDto {
+  @IsString() @MaxLength(160) street!: string;
+  @IsString() @MaxLength(30) number!: string;
+  @IsOptional() @IsString() @MaxLength(120) complement?: string | null;
+  @IsString() @MaxLength(120) district!: string;
+  @IsString() @MaxLength(10) postalCode!: string;
+  @IsString() @MaxLength(120) city!: string;
+  @IsString() @MaxLength(2) state!: string;
+}
+
 export class RegistrationFieldsDto {
+  @IsOptional()
+  @IsObject()
+  documentProfile?: RegistrationDocumentProfile | null;
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => RegistrationAddressDto)
+  address?: RegistrationAddressDto | null;
+  @IsOptional() @IsString() @MaxLength(4000) serviceInstructions?:
+    string | null;
   @IsIn(REGISTRATION_TYPES) type!: RegistrationType;
   @IsOptional() @IsIn(REGISTRATION_STATUSES) status?: RegistrationStatus;
   @IsOptional() @IsString() @MaxLength(160) avicExternalId?: string | null;

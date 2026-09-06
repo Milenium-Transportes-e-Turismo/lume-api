@@ -32,6 +32,7 @@ function channel(
 
 function repository() {
   return {
+    listDepartments: vi.fn(async () => []),
     getTenantTechnicalName: vi.fn(async () => 'Acme Turismo'),
     list: vi.fn(async () => []),
     get: vi.fn(async () => channel()),
@@ -277,5 +278,44 @@ describe('ManageWhatsAppChannelUseCase', () => {
       displayName: 'Financeiro e cobrança',
       routingMode: 'general-triage',
     });
+  });
+  it('preserves an assigned instance ID when connect returns only a QR', async () => {
+    const channels = repository();
+    const provider = {
+      ...evolution(),
+      connect: vi.fn(async () => ({
+        instanceName: 'acme-production-financeiro',
+        instanceId: null,
+        connectionState: 'connecting' as const,
+        qrCode: { code: null, base64: 'aGVsbG8=' },
+      })),
+    };
+    const result = await new ManageWhatsAppChannelUseCase(
+      channels,
+      provider,
+    ).requestQr(command);
+    expect(result.channel.evolutionInstanceId).toBe('instance-1');
+    expect(result.qrCode).not.toBeNull();
+    expect(result.providerIssue).toBeNull();
+    for (const [input] of channels.mutate.mock.calls) {
+      expect(input.patch).not.toHaveProperty('evolutionInstanceId');
+    }
+  });
+
+  it('does not relabel persistence failures as an Evolution outage', async () => {
+    const channels = repository();
+    const failure = new Error('database constraint');
+    channels.mutate
+      .mockResolvedValueOnce({
+        channel: channel({ version: 2 }),
+        replayed: false,
+      })
+      .mockRejectedValueOnce(failure);
+    await expect(
+      new ManageWhatsAppChannelUseCase(channels, evolution()).requestQr(
+        command,
+      ),
+    ).rejects.toBe(failure);
+    expect(channels.mutate).toHaveBeenCalledTimes(2);
   });
 });
