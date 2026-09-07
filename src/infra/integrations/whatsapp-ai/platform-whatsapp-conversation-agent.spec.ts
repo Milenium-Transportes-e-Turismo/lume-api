@@ -403,3 +403,54 @@ describe('histórico multimodal do atendimento', () => {
     }
   });
 });
+
+it('envia o resumo anterior e a confirmação curta aos agentes sem reiniciar o contexto', async () => {
+  const execute = vi.fn().mockResolvedValue({
+    ...completed,
+    executionId: 'short-confirmation',
+    outputText: customerJson('Dados confirmados.'),
+  });
+  const { subject, prisma } = createSubject(execute);
+  prisma.whatsAppMessage.findMany.mockResolvedValue([
+    {
+      direction: 'INBOUND',
+      text: 'está',
+      occurredAt: new Date('2026-09-07T22:00:29Z'),
+      mediaAsset: null,
+    },
+    {
+      direction: 'OUTBOUND',
+      text: 'Uberlândia para Goiânia, saída 20/09/2026, retorno 22/09/2026, 10 passageiros. Está correto?',
+      occurredAt: new Date('2026-09-07T21:57:47Z'),
+      mediaAsset: null,
+    },
+  ]);
+  await subject.complete({
+    ...input,
+    userMessage: 'está',
+    contextThrough: '2026-09-07T22:00:29Z',
+  });
+  for (const [request] of execute.mock.calls) {
+    expect(request.input).toContain('Está correto?');
+    expect(request.input).toContain('10 passageiros');
+    expect(request.input).toContain('está');
+    expect(request.input.indexOf('Está correto?')).toBeLessThan(
+      request.input.indexOf('"text":"está"'),
+    );
+  }
+  expect(prisma.whatsAppMessage.findMany).toHaveBeenCalledWith(
+    expect.objectContaining({
+      where: expect.objectContaining({
+        companyId: input.companyId,
+        conversationId: input.conversationId,
+        serviceSessionId: input.serviceSessionId,
+        OR: expect.arrayContaining([
+          expect.objectContaining({
+            direction: 'OUTBOUND',
+            deliveryStatus: { in: ['SENT', 'DELIVERED', 'READ'] },
+          }),
+        ]),
+      }),
+    }),
+  );
+});

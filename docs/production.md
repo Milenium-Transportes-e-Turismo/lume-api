@@ -251,3 +251,13 @@ preservando a ativação dos canais existentes. Não há novas variáveis de amb
 Publicar a Web compatível depois da API. A opção fica em Canais WhatsApp > Editar
 configuração > Agentes de IA habilitados. Na reversão de imagem, a coluna adicional
 pode permanecer; não é necessário remover dados ou desfazer a migration.
+
+## Reiniciar staging sem retroceder a versão instalada
+
+Ao recriar somente a API, preservar o identificador imutável da imagem do
+container atual. O nome padrão lume-staging-api-api pode apontar para um build
+antigo quando o deploy anterior utilizou outro nome ou um override de Compose.
+O script scripts/lume-staging.sh da instalação usa um override de imagem obtido
+por docker inspect para a opção de reinício; se não conseguir identificar a
+imagem, cancela a operação. O reinício não deve executar build, pull ou migration.
+Após a operação, conferir tanto a disponibilidade quanto a identidade da imagem.
