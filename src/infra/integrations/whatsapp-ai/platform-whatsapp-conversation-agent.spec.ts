@@ -434,8 +434,8 @@ it('envia o resumo anterior e a confirmação curta aos agentes sem reiniciar o 
     expect(request.input).toContain('Está correto?');
     expect(request.input).toContain('10 passageiros');
     expect(request.input).toContain('está');
-    expect(request.input.indexOf('Está correto?')).toBeLessThan(
-      request.input.indexOf('"text":"está"'),
+    expect(String(request.input).indexOf('Está correto?')).toBeLessThan(
+      String(request.input).indexOf('"text":"está"'),
     );
   }
   expect(prisma.whatsAppMessage.findMany).toHaveBeenCalledWith(
