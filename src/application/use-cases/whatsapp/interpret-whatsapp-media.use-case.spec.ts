@@ -288,3 +288,21 @@ describe('InterpretWhatsAppMediaUseCase', () => {
     expect(repository.complete).not.toHaveBeenCalled();
   });
 });
+
+it('não inicia análise de mídia enfileirada quando os agentes do canal estão desabilitados', async () => {
+  const { useCase, repository, gateway, storage } = subject(
+    candidate({ agentsEnabled: false }),
+  );
+  await expect(
+    useCase.analyzeMessage({
+      companyId,
+      conversationId,
+      messageId,
+      actorUserId: '00000000-0000-4000-8000-000000000011',
+    }),
+  ).resolves.toMatchObject({ status: 'succeeded' });
+  expect(repository.getForMessage).toHaveBeenCalled();
+  expect(repository.claim).not.toHaveBeenCalled();
+  expect(storage.read).not.toHaveBeenCalled();
+  expect(gateway.interpret).not.toHaveBeenCalled();
+});

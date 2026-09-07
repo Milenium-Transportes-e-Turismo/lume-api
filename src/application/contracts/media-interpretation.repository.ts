@@ -30,6 +30,7 @@ export interface MediaInterpretationConfiguration {
 }
 
 export interface MediaInterpretationCandidate {
+  readonly agentsEnabled?: boolean;
   readonly companyId: string;
   readonly mediaAssetId: string;
   readonly messageId: string;

@@ -9,6 +9,7 @@ import type {
 } from '../../domain/whatsapp/whatsapp.constants';
 
 export interface WebhookChannelConfiguration {
+  agentsEnabled?: boolean;
   id: string;
   companyId: string;
   instanceName: string;

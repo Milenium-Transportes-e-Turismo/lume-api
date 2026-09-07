@@ -644,7 +644,9 @@ const conversationInclude = {
     },
   },
   contact: true,
-  channel: { select: { id: true, name: true, phoneNumber: true } },
+  channel: {
+    select: { id: true, name: true, phoneNumber: true, agentsEnabled: true },
+  },
   assignedTo: { select: { id: true, name: true } },
   pendingTransferRequestedBy: { select: { id: true, name: true } },
   quoteRequests: { orderBy: { sequence: 'desc' as const }, take: 1 },
@@ -2117,11 +2119,12 @@ export class PrismaWhatsAppRepository
   private assertSessionAllowsAutomaticReply(
     conversation: Pick<
       ConversationWithRelations,
-      'conversationState' | 'flowStep' | 'assignedToUserId'
+      'conversationState' | 'flowStep' | 'assignedToUserId' | 'channel'
     >,
     session: ServiceSessionAuthorization,
   ): void {
     if (
+      conversation.channel?.agentsEnabled === false ||
       automaticReplyBlocked(session) ||
       conversation.conversationState !== ConversationState.BOT_ACTIVE ||
       conversation.flowStep === FlowStep.HUMAN_SERVICE ||
@@ -2150,6 +2153,7 @@ export class PrismaWhatsAppRepository
         companyId: true,
         instanceName: true,
         webhookSecretHash: true,
+        agentsEnabled: true,
         ignoreGroups: true,
         ignoreFromMe: true,
         enabled: true,
@@ -2953,6 +2957,7 @@ export class PrismaWhatsAppRepository
         status: ServiceSessionStatus.CLOSING,
         controlMode: ServiceSessionControlMode.AI,
         isForeground: true,
+        sourceChannel: { agentsEnabled: true },
         closingDeadlineAt: { lte: input.now },
       },
       orderBy: [{ closingDeadlineAt: 'asc' }, { id: 'asc' }],
@@ -2983,6 +2988,7 @@ export class PrismaWhatsAppRepository
           status: ServiceSessionStatus.OPEN,
           controlMode: ServiceSessionControlMode.AI,
           isForeground: true,
+          sourceChannel: { agentsEnabled: true },
           conversationResolved: true,
           closingStartedAt: null,
           closingDeadlineAt: null,
@@ -3053,6 +3059,7 @@ export class PrismaWhatsAppRepository
         !session.isForeground ||
         !session.conversationResolved ||
         !pendingActionsAreEmpty(session.pendingActions) ||
+        conversation.channel?.agentsEnabled === false ||
         conversation.conversationState !== ConversationState.BOT_ACTIVE ||
         conversation.flowStep === FlowStep.HUMAN_SERVICE ||
         conversation.assignedToUserId !== null
@@ -3205,6 +3212,7 @@ export class PrismaWhatsAppRepository
             session.closingStartedAt === null ||
             session.closingDeadlineAt === null ||
             session.closingDeadlineAt > now ||
+            conversation.channel?.agentsEnabled === false ||
             conversation.conversationState !== ConversationState.BOT_ACTIVE ||
             conversation.flowStep === FlowStep.HUMAN_SERVICE ||
             conversation.assignedToUserId !== null
@@ -5172,6 +5180,7 @@ export class PrismaWhatsAppRepository
           conversation.flowStep === FlowStep.HUMAN_SERVICE;
         const automationAllowed =
           input.automationEnabled &&
+          input.channel.agentsEnabled !== false &&
           foundation.session.controlMode === ServiceSessionControlMode.AI &&
           foundation.session.status === ServiceSessionStatus.OPEN &&
           foundation.session.isForeground &&
@@ -7556,7 +7565,7 @@ export class PrismaWhatsAppRepository
             automationPurpose: true,
             direction: true,
             deliveryStatus: true,
-            channel: { select: { instanceName: true } },
+            channel: { select: { instanceName: true, agentsEnabled: true } },
           },
         });
         if (!message) throw notFound('Mensagem');
@@ -7567,6 +7576,17 @@ export class PrismaWhatsAppRepository
         if (message.direction !== MessageDirection.OUTBOUND) {
           throw validationError(
             'Somente mensagens outbound podem ser reservadas para envio.',
+          );
+        }
+        if (
+          message.channel.agentsEnabled === false &&
+          !message.actorUserId &&
+          (message.actorType === WhatsAppMessageActorType.AI_AGENT ||
+            message.automationPurpose !== null)
+        ) {
+          throw new AppError(
+            'CONFLICT',
+            'Os agentes de IA estão desabilitados neste canal.',
           );
         }
         const bypassSessionGate = [

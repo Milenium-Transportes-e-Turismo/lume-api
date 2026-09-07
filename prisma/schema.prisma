@@ -2344,6 +2344,7 @@ model WhatsAppChannel {
   organizationalStatus WhatsAppChannelOrganizationalStatus @default(PENDING) @map("organizational_status")
   connectionStatus     WhatsAppChannelConnectionStatus     @default(DISCONNECTED) @map("connection_status")
   webhookSecretHash    String                              @map("webhook_secret_hash") @db.Char(64)
+  agentsEnabled        Boolean                             @default(true) @map("agents_enabled")
   ignoreGroups         Boolean                             @default(false) @map("ignore_groups")
   ignoreFromMe         Boolean                             @default(false) @map("ignore_from_me")
   enabled              Boolean                             @default(true)

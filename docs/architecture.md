@@ -349,3 +349,12 @@ a projeção de estado, responsável e etapa usada pelo painel e pela autorizaç
 de resposta humana. A matriz existente mantém a etapa de retomada ao devolver
 à IA. A projeção acompanha a sessão em primeiro plano e usa a versão da
 conversa para detectar concorrência; não decide o controle de forma independente.
+
+## Pausa de agentes por canal
+
+WhatsAppChannel.agentsEnabled é persistido no PostgreSQL, com padrão true e
+mutação versionada pelo fluxo existente de gestão dos canais. Este controle é
+independente do estado organizacional e da conexão do dispositivo. Os consumidores
+de automação, a carga de agentes por sessão, a análise de mídia e o envio automático
+consultam a configuração autoritativa. O recebimento e o atendimento humano
+permanecem disponíveis com agentes desabilitados.

@@ -98,6 +98,7 @@ function toManagedChannel(row: ChannelRow): ManagedWhatsAppChannel {
     companyId: row.companyId,
     providerId: row.providerId,
     displayName: row.name,
+    agentsEnabled: row.agentsEnabled,
     phoneNumber: row.phoneNumber,
     evolutionInstanceName: row.instanceName,
     evolutionInstanceId: row.evolutionInstanceId,
@@ -333,6 +334,7 @@ export class PrismaWhatsAppChannelManagementRepository extends WhatsAppChannelMa
               name: input.displayName,
               phoneNumber: input.phoneNumber,
               instanceName: input.evolutionInstanceName,
+              agentsEnabled: input.agentsEnabled ?? true,
               departmentId: input.departmentId,
               routingMode: routingToPrisma[input.routingMode],
               organizationalStatus: WhatsAppChannelOrganizationalStatus.PENDING,
@@ -439,6 +441,9 @@ export class PrismaWhatsAppChannelManagementRepository extends WhatsAppChannelMa
             ...targetIds,
           ]);
           const data: Prisma.WhatsAppChannelUpdateManyMutationInput = {
+            ...(input.patch.agentsEnabled === undefined
+              ? {}
+              : { agentsEnabled: input.patch.agentsEnabled }),
             version: { increment: 1 },
             ...(input.patch.displayName === undefined
               ? {}

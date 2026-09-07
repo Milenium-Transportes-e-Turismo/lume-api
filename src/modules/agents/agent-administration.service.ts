@@ -366,7 +366,7 @@ export class AgentAdministrationService {
     });
 
     return this.prisma.$transaction(async (transaction) => {
-      await transaction.$queryRaw`
+      await transaction.$executeRaw`
         SELECT pg_advisory_xact_lock(
           hashtext(${`${current.companyId}:agent-tenant-instructions:${agentId}`})
         )
@@ -523,7 +523,7 @@ export class AgentAdministrationService {
       }),
     );
     return this.prisma.$transaction(async (transaction) => {
-      await transaction.$queryRaw`
+      await transaction.$executeRaw`
         SELECT pg_advisory_xact_lock(
           hashtext(${`${current.companyId}:agent-tenant-instructions:${agentId}`})
         )

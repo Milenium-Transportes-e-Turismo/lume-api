@@ -3,6 +3,7 @@ import {
   ArrayMaxSize,
   ArrayUnique,
   IsArray,
+  IsBoolean,
   IsIn,
   IsInt,
   IsOptional,
@@ -40,6 +41,11 @@ export class WhatsAppChannelCommandDto {
 }
 
 export class CreateWhatsAppChannelDto {
+  @ApiPropertyOptional({ default: true })
+  @IsOptional()
+  @IsBoolean()
+  agentsEnabled?: boolean;
+
   @ApiProperty({ format: 'uuid' })
   @IsUUID('4')
   commandId!: string;
@@ -79,6 +85,11 @@ export class CreateWhatsAppChannelDto {
 }
 
 export class UpdateWhatsAppChannelDto extends WhatsAppChannelCommandDto {
+  @ApiPropertyOptional({ default: true })
+  @IsOptional()
+  @IsBoolean()
+  agentsEnabled?: boolean;
+
   @ApiProperty({ minLength: 2, maxLength: 80 })
   @Transform(({ value }: { value: unknown }) => trimmed(value))
   @IsString()

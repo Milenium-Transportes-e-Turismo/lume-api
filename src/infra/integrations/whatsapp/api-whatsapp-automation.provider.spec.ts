@@ -106,6 +106,7 @@ function createSubject(input?: {
 }) {
   const calls: string[] = [];
   const repository = {
+    findWebhookChannel: vi.fn().mockResolvedValue({ agentsEnabled: true }),
     getPendingContinuityClassification: vi.fn(async () => null),
     applyContinuityClassification: vi.fn(async () => ({
       serviceSessionId: '00000000-0000-4000-8000-000000000010',
@@ -1132,4 +1133,17 @@ it('abre a coleta natural e persiste os dados do áudio antes de responder', asy
   expect(repository.createOutbound).toHaveBeenCalledWith(
     expect.objectContaining({ expectedVersion: 2 }),
   );
+});
+
+it('suprime eventos já enfileirados quando os agentes do canal estão desabilitados', async () => {
+  const { subject, agent, repository } = createSubject({
+    repository: {
+      findWebhookChannel: vi.fn().mockResolvedValue({ agentsEnabled: false }),
+    },
+  });
+  await subject.execute(event());
+  expect(agent.complete).not.toHaveBeenCalled();
+  expect(agent.classifyContinuity).not.toHaveBeenCalled();
+  expect(repository.createOutbound).not.toHaveBeenCalled();
+  expect(repository.completeOutboxExecution).toHaveBeenCalled();
 });

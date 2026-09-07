@@ -402,6 +402,7 @@ export class PrismaMediaInterpretationRepository extends MediaInterpretationRepo
           groupMessages: { none: {} },
           messages: {
             some: {
+              channel: { agentsEnabled: true },
               direction: MessageDirection.INBOUND,
               serviceSession: {
                 is: { status: { not: ServiceSessionStatus.CLOSED } },
@@ -460,6 +461,7 @@ export class PrismaMediaInterpretationRepository extends MediaInterpretationRepo
           select: {
             id: true,
             conversationId: true,
+            channel: { select: { agentsEnabled: true } },
             serviceSessionId: true,
             serviceSession: {
               select: { id: true, controlMode: true, version: true },
@@ -490,6 +492,7 @@ export class PrismaMediaInterpretationRepository extends MediaInterpretationRepo
     const interpretation = asset.interpretation as InterpretationRow | null;
     return {
       companyId: asset.companyId,
+      agentsEnabled: message.channel?.agentsEnabled ?? true,
       mediaAssetId: asset.id,
       messageId: message.id,
       conversationId: message.conversationId,

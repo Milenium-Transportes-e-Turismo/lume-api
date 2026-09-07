@@ -338,3 +338,24 @@ somente após confirmar que não foram enviados ou processados.
 
 Banco e volume `WHATSAPP_MEDIA_STORAGE_PATH` formam um único conjunto de backup.
 Restaurar apenas um deles pode deixar metadados sem arquivo ou arquivos órfãos.
+
+## Controle de agentes por canal
+
+POST /api/v1/whatsapp/channels e PATCH /api/v1/whatsapp/channels/:channelId
+aceitam agentsEnabled, booleano opcional. Na criação o padrão é true; na edição,
+a omissão preserva a configuração existente. A resposta do canal contém o valor.
+O identificador channelId pertence ao caminho e não deve integrar o corpo PATCH.
+Permanecem as permissões de canais, companyId, commandId, expectedVersion,
+idempotência e auditoria. Edições concorrentes retornam conflito de versão.
+
+agentsEnabled=false não desativa o canal nem seu webhook: mensagens continuam
+persistidas e operadores continuam podendo assumir e responder. A configuração
+é verificada no recebimento, no consumidor da fila, na carga da configuração dos
+agentes, na interpretação de mídia e antes do envio automático. Encerramentos
+automáticos também respeitam a pausa. Uma solicitação já enviada ao provedor antes
+da desativação pode terminar; a configuração não desfaz mensagens já enviadas.
+Reabilitar permite novas entradas sem reexecutar eventos concluídos durante a pausa.
+
+Publicação e restauração de instruções do agente usam lock transacional com
+executeRaw, pois pg_advisory_xact_lock retorna void. Isso preserva serialização e
+idempotência sem exigir desserialização de um resultado de consulta.

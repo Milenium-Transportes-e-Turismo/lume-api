@@ -481,3 +481,11 @@ Orquestrador e especialistas recebem histórico limitado da mesma empresa,
 conversa e sessão, incluindo transcrição efetiva e correção humana de mídia.
 Pedidos de orçamento eventual em linguagem natural iniciam a coleta canônica;
 os campos extraídos são persistidos antes da resposta.
+
+## Agentes por canal WhatsApp
+
+A configuração de cada canal inclui agentsEnabled (padrão true). Desabilitar
+os agentes preserva a recepção de mensagens e o atendimento humano, mas suspende
+respostas automáticas, novas execuções de agentes, análise de mídias e encerramento
+automático naquele canal. Ativar novamente permite processar novas entradas;
+não reproduz automaticamente eventos já concluídos durante a pausa.

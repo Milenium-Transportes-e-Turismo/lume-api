@@ -242,3 +242,12 @@ o evento de automação. As instruções dos agentes pertencem ao tenant, sem c�
 por número. Sessões assumidas por uma pessoa não recebem respostas automáticas.
 O E2E cobre um segundo canal conectado e sua primeira mensagem, sem enviar
 mensagens externas nem exigir um dispositivo físico.
+
+## Atualização do controle de agentes por canal
+
+Aplicar a migration 20260907211000_channel_agents_enabled antes da nova API.
+Ela adiciona agents_enabled boolean NOT NULL DEFAULT true em whatsapp_channels,
+preservando a ativação dos canais existentes. Não há novas variáveis de ambiente.
+Publicar a Web compatível depois da API. A opção fica em Canais WhatsApp > Editar
+configuração > Agentes de IA habilitados. Na reversão de imagem, a coluna adicional
+pode permanecer; não é necessário remover dados ou desfazer a migration.

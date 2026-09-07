@@ -8267,4 +8267,148 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       automationAllowed: true,
     });
   });
+  it('publica, repete e restaura instruções do Atendimento Lume', async () => {
+    const agent = await prisma.lumeAgent.findFirstOrThrow({
+      where: { companyId: tenantId, code: 'customer-service' },
+    });
+    const path = '/api/v1/agents/' + agent.id + '/tenant-instructions';
+    const firstInput = {
+      commandId: randomUUID(),
+      expectedVersion: 0,
+      content:
+        'Responda com clareza e considere os dados já fornecidos pelo cliente.',
+    };
+    const first = await request(app.getHttpServer())
+      .post(path)
+      .set('authorization', 'Bearer ' + accessToken)
+      .send(firstInput)
+      .expect(201);
+    expect(first.body).toMatchObject({ version: 1, idempotent: false });
+    await request(app.getHttpServer())
+      .post(path)
+      .set('authorization', 'Bearer ' + accessToken)
+      .send(firstInput)
+      .expect(201)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ version: 1, idempotent: true }),
+      );
+    await request(app.getHttpServer())
+      .post(path)
+      .set('authorization', 'Bearer ' + accessToken)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: 1,
+        content: 'Seja objetivo e não repita perguntas já respondidas.',
+      })
+      .expect(201);
+    await request(app.getHttpServer())
+      .post(path + '/' + first.body.promptVersionId + '/rollback')
+      .set('authorization', 'Bearer ' + accessToken)
+      .send({ commandId: randomUUID(), expectedVersion: 2 })
+      .expect(201)
+      .expect(({ body }) => expect(body.version).toBe(3));
+    const active = await prisma.agentPromptVersion.findFirstOrThrow({
+      where: {
+        companyId: tenantId,
+        agentId: agent.id,
+        kind: 'TENANT_INSTRUCTIONS',
+        status: 'ACTIVE',
+      },
+    });
+    expect(active.content).toBe(firstInput.content);
+  });
+
+  it('desabilita agentes por canal sem perder mensagens e reabilita novas entradas', async () => {
+    const original = await prisma.whatsAppChannel.findUniqueOrThrow({
+      where: { id: channelId },
+    });
+    const channel = await prisma.whatsAppChannel.create({
+      data: {
+        companyId: tenantId,
+        providerId: original.providerId,
+        name: 'Canal IA E2E',
+        phoneNumber: '5511991122335',
+        instanceName: 'lume-e2e-agents-toggle',
+        webhookSecretHash: original.webhookSecretHash,
+        organizationalStatus: 'ACTIVE',
+        connectionStatus: 'CONNECTED',
+        routingMode: 'GENERAL_TRIAGE',
+      },
+    });
+    const path = '/api/v1/whatsapp/channels/' + channel.id;
+    const change = {
+      commandId: randomUUID(),
+      expectedVersion: channel.version,
+      displayName: channel.name,
+      departmentId: null,
+      routingMode: 'general-triage',
+      allowedAutomaticTargetDepartmentIds: [],
+      agentsEnabled: false,
+    };
+    const disabled = await request(app.getHttpServer())
+      .patch(path)
+      .set('authorization', 'Bearer ' + accessToken)
+      .send(change)
+      .expect(200);
+    expect(disabled.body.agentsEnabled).toBe(false);
+    await request(app.getHttpServer())
+      .patch(path)
+      .set('authorization', 'Bearer ' + accessToken)
+      .send({ ...change, commandId: randomUUID() })
+      .expect(409);
+    const inbound = await signedWebhook(
+      app,
+      {
+        ...webhookPayload('agents-off', '5511988877020', 'Olá, quero viajar'),
+        instance: channel.instanceName,
+      },
+      channel.id,
+    ).expect(202);
+    expect(inbound.body).toMatchObject({
+      accepted: true,
+      automationAllowed: false,
+      canGenerateReply: false,
+      canSendReply: false,
+    });
+    await expect(
+      prisma.whatsAppMessage.count({
+        where: {
+          companyId: tenantId,
+          conversationId: inbound.body.conversationId as string,
+        },
+      }),
+    ).resolves.toBe(1);
+    await expect(
+      whatsappRepository.assertAutomaticReplyAllowed(
+        tenantId,
+        inbound.body.conversationId as string,
+      ),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    const enabled = await request(app.getHttpServer())
+      .patch(path)
+      .set('authorization', 'Bearer ' + accessToken)
+      .send({
+        ...change,
+        commandId: randomUUID(),
+        expectedVersion: disabled.body.version,
+        agentsEnabled: true,
+      })
+      .expect(200);
+    expect(enabled.body.agentsEnabled).toBe(true);
+    const next = await signedWebhook(
+      app,
+      {
+        ...webhookPayload('agents-on', '5511988877020', 'Vamos continuar'),
+        instance: channel.instanceName,
+      },
+      channel.id,
+    ).expect(202);
+    expect(next.body.automationAllowed).toBe(true);
+    await expect(
+      whatsappRepository.assertAutomaticReplyAllowed(
+        tenantId,
+        next.body.conversationId as string,
+      ),
+    ).resolves.toMatchObject({ allowed: true });
+  });
 });

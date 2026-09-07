@@ -173,6 +173,14 @@ export class InterpretWhatsAppMediaUseCase {
   }): Promise<InterpretWhatsAppMediaResult> {
     const candidate = await this.repository.loadCandidate(input);
     if (!candidate) throw notFound('Mídia individual');
+    if (candidate.agentsEnabled === false) {
+      return this.repository.getForMessage({
+        companyId: candidate.companyId,
+        conversationId: candidate.conversationId,
+        messageId: candidate.messageId,
+      });
+    }
+
     const decision = decideMediaInterpretation({
       state: candidate.state,
       controlMode: candidate.controlMode,

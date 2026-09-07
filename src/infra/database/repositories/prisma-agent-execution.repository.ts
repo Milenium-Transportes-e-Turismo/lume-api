@@ -356,6 +356,7 @@ export class PrismaAgentExecutionRepository
           id: input.serviceSessionId,
           companyId: input.companyId,
           controlMode: ServiceSessionControlMode.AI,
+          sourceChannel: { agentsEnabled: true },
           status: {
             in: [
               ServiceSessionStatus.OPEN,

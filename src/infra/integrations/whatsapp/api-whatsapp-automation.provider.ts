@@ -201,6 +201,11 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
       await this.complete(event, 'succeeded', [payload.eventId]);
       return;
     }
+    const channel = await this.repository.findWebhookChannel(payload.channelId);
+    if (!channel || channel.agentsEnabled === false) {
+      await this.complete(event, 'succeeded', [payload.eventId]);
+      return;
+    }
     await this.resolvePendingContinuity(event, payload);
     const checkpoint = await this.checkpointStore.getOrCreate(
       event,
@@ -637,6 +642,8 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
     payload: AutomationPayload,
   ): Promise<boolean> {
     if (!(error instanceof AppError) || error.code !== 'CONFLICT') return false;
+    const channel = await this.repository.findWebhookChannel(payload.channelId);
+    if (channel?.agentsEnabled === false) return true;
     const current = asAutomationConversation(
       await this.repository.getConversation(
         event.companyId,

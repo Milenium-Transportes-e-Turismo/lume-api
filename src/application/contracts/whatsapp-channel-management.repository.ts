@@ -16,6 +16,7 @@ export interface ManagedWhatsAppChannel extends WhatsAppChannelSnapshot {
 }
 
 export interface CreatePendingWhatsAppChannelInput {
+  readonly agentsEnabled?: boolean;
   readonly companyId: string;
   readonly actorUserId: string;
   readonly commandId: string;
@@ -33,6 +34,7 @@ export interface CreatePendingWhatsAppChannelResult {
 }
 
 export interface WhatsAppChannelMutationPatch {
+  readonly agentsEnabled?: boolean;
   readonly displayName?: string;
   readonly departmentId?: string | null;
   readonly routingMode?: ChannelRoutingMode;

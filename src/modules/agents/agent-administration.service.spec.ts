@@ -179,7 +179,7 @@ describe('AgentAdministrationService', () => {
 
   it('versions only tenant instructions with optimistic concurrency and audit', async () => {
     const transaction = {
-      $queryRaw: vi.fn().mockResolvedValue([]),
+      $executeRaw: vi.fn().mockResolvedValue(0),
       tenantAuditLog: {
         findFirst: vi.fn().mockResolvedValue(null),
         create: vi.fn().mockResolvedValue({}),
@@ -263,7 +263,7 @@ describe('AgentAdministrationService', () => {
 
   it('rolls back by creating a new immutable version and auditing the source', async () => {
     const transaction = {
-      $queryRaw: vi.fn().mockResolvedValue([]),
+      $executeRaw: vi.fn().mockResolvedValue(0),
       tenantAuditLog: {
         findFirst: vi.fn().mockResolvedValue(null),
         create: vi.fn().mockResolvedValue({}),

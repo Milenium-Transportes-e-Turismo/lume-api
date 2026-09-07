@@ -99,6 +99,7 @@ export class CreateWhatsAppChannelUseCase {
     readonly phoneNumber: string;
     readonly departmentId: string | null;
     readonly routingMode: ChannelRoutingMode;
+    readonly agentsEnabled?: boolean;
     readonly allowedAutomaticTargetDepartmentIds: readonly string[];
   }): Promise<WhatsAppChannelOperationResult> {
     webhookUrl(this.publicApiBaseUrl, 'configuration-check');
@@ -115,6 +116,7 @@ export class CreateWhatsAppChannelUseCase {
       evolutionInstanceName: instanceName,
       departmentId: input.departmentId,
       routingMode: input.routingMode,
+      agentsEnabled: input.agentsEnabled ?? true,
       organizationalStatus: 'pending',
       connectionStatus: 'disconnected',
       allowedAutomaticTargetDepartmentIds:
@@ -129,6 +131,7 @@ export class CreateWhatsAppChannelUseCase {
       evolutionInstanceName: instanceName,
       departmentId: configuration.departmentId,
       routingMode: configuration.routingMode,
+      agentsEnabled: configuration.agentsEnabled,
       allowedAutomaticTargetDepartmentIds:
         configuration.allowedAutomaticTargetDepartmentIds,
     });
@@ -199,11 +202,13 @@ export class ManageWhatsAppChannelUseCase {
     readonly displayName: string;
     readonly departmentId: string | null;
     readonly routingMode: ChannelRoutingMode;
+    readonly agentsEnabled?: boolean;
     readonly allowedAutomaticTargetDepartmentIds: readonly string[];
   }): Promise<ManagedWhatsAppChannel> {
     const current = await this.required(input.companyId, input.channelId);
     const next = validateChannelConfiguration({
       ...current,
+      agentsEnabled: input.agentsEnabled ?? current.agentsEnabled ?? true,
       displayName: input.displayName,
       departmentId: input.departmentId,
       routingMode: input.routingMode,
@@ -219,6 +224,7 @@ export class ManageWhatsAppChannelUseCase {
       actorUserId: input.actorUserId,
       patch: {
         displayName: next.displayName,
+        agentsEnabled: next.agentsEnabled,
         departmentId: next.departmentId,
         routingMode: next.routingMode,
         allowedAutomaticTargetDepartmentIds:

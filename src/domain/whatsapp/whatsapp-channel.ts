@@ -26,6 +26,7 @@ export type ChannelConnectionStatus =
 export type ChannelRoutingMode = (typeof CHANNEL_ROUTING_MODES)[number];
 
 export interface WhatsAppChannelSnapshot {
+  readonly agentsEnabled?: boolean;
   readonly displayName: string;
   readonly phoneNumber: string;
   readonly evolutionInstanceName: string;

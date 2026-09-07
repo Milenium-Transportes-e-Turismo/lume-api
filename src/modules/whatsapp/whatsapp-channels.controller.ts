@@ -83,6 +83,7 @@ export class WhatsAppChannelsController {
       phoneNumber: body.phoneNumber,
       departmentId: body.departmentId ?? null,
       routingMode: body.routingMode,
+      agentsEnabled: body.agentsEnabled,
       allowedAutomaticTargetDepartmentIds:
         body.allowedAutomaticTargetDepartmentIds,
     });
@@ -104,6 +105,7 @@ export class WhatsAppChannelsController {
       displayName: body.displayName,
       departmentId: body.departmentId ?? null,
       routingMode: body.routingMode,
+      agentsEnabled: body.agentsEnabled,
       allowedAutomaticTargetDepartmentIds:
         body.allowedAutomaticTargetDepartmentIds,
     });
