@@ -1063,3 +1063,73 @@ describe('ApiWhatsAppAutomationProvider', () => {
     );
   });
 });
+
+it('abre a coleta natural e persiste os dados do áudio antes de responder', async () => {
+  const quote = {
+    id: '00000000-0000-4000-8000-000000000077',
+    sequence: 1,
+    status: 'collecting-information',
+    version: 1,
+  };
+  const patchQuoteRequest = vi.fn(async (_company, _id, patch) => ({
+    ...quote,
+    ...patch,
+    version: 2,
+  }));
+  const { subject, repository, agent, calls } = createSubject({
+    repository: {
+      transition: vi.fn(async () => {
+        calls.push('transition:start-quote');
+        return conversation({
+          version: 2,
+          flowStep: 'quote-data-collection',
+          requestStatus: 'collecting-information',
+          currentQuoteRequest: quote,
+        });
+      }),
+    },
+  });
+  Object.assign(repository, { patchQuoteRequest });
+  agent.complete.mockResolvedValueOnce({
+    provider: 'openai',
+    model: 'gpt-5.6-terra',
+    attempt: 1,
+    output: {
+      message: 'Qual sua preferência de veículo?',
+      collectionStatus: 'collecting',
+      extractedDataPatch: {
+        serviceType: 'eventual',
+        origin: 'Uberlândia',
+        destination: 'Goiânia',
+        departureAt: '2026-10-08T09:00:00-03:00',
+        returnAt: '2026-10-10T21:00:00-03:00',
+        passengerCount: 15,
+        structuredData: { tripType: 'round_trip' },
+      },
+      missingFields: ['vehicleType'],
+      summaryPresented: false,
+      customerDecision: 'undecided',
+    },
+  });
+  await subject.execute(event());
+  expect(repository.transition).toHaveBeenCalledWith(
+    expect.objectContaining({ name: 'start-quote', expectedVersion: 1 }),
+  );
+  expect(patchQuoteRequest).toHaveBeenCalledWith(
+    ids.company,
+    quote.id,
+    expect.objectContaining({
+      origin: 'Uberlândia',
+      destination: 'Goiânia',
+      passengerCount: 15,
+      expectedVersion: 1,
+      departureAt: new Date('2026-10-08T09:00:00-03:00'),
+    }),
+  );
+  expect(calls.indexOf('transition:start-quote')).toBeLessThan(
+    calls.indexOf('create-outbound'),
+  );
+  expect(repository.createOutbound).toHaveBeenCalledWith(
+    expect.objectContaining({ expectedVersion: 2 }),
+  );
+});

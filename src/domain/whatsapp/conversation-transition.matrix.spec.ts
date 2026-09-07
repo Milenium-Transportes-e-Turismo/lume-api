@@ -592,3 +592,13 @@ describe('matriz MVP de conversas WhatsApp', () => {
     ).toThrow('ator system');
   });
 });
+
+it('inicia orçamento em linguagem natural no Comercial, preservando o limite departamental', () => {
+  expect(transition(initial, 'start-quote')).toMatchObject({
+    flowStep: 'quote-data-collection',
+    requestStatus: 'collecting-information',
+  });
+  expect(() =>
+    transition({ ...initial, department: 'financial' }, 'start-quote'),
+  ).toThrow();
+});

@@ -13,6 +13,7 @@ export interface WhatsAppConversationAgentInput {
   readonly serviceSessionId: string;
   readonly aiMode: AiMode;
   readonly userMessage: string;
+  readonly contextThrough?: string;
   readonly mediaInterpretations?: readonly AgentMediaInterpretationReference[];
   readonly currentConversation: AutomationConversation | null;
   readonly instructionText?: string;

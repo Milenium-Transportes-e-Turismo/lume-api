@@ -407,6 +407,10 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
         serviceSessionId: replyAuthorization.serviceSessionId,
         aiMode: plan.aiMode,
         userMessage: bufferedText,
+        contextThrough: batch.messages
+          .map((message) => message.occurredAt)
+          .sort()
+          .at(-1),
         ...(mediaInterpretations.length > 0 ? { mediaInterpretations } : {}),
         currentConversation: conversation,
       } satisfies WhatsAppConversationAgentInput;
@@ -427,11 +431,34 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
           reason: aiResult.output.priorityReason.trim(),
         };
       }
-      assertSafeAiDecision(aiResult.output, plan.aiMode, bufferedText);
-      const actions = deriveAiActions(aiResult.output, plan.aiMode);
+      let effectiveMode = plan.aiMode;
+      if (
+        effectiveMode === 'natural-service' &&
+        conversation.department === 'commercial' &&
+        !conversation.currentQuoteRequest &&
+        conversation.requestStatus === 'not-started' &&
+        ['main-menu', 'commercial-menu'].includes(conversation.flowStep) &&
+        aiResult.output.extractedDataPatch.serviceType === 'eventual' &&
+        aiResult.output.customerDecision !== 'human-requested' &&
+        aiResult.output.collectionStatus !== 'human-handoff'
+      ) {
+        assertSafeAiDecision(aiResult.output, 'eventual-quote', bufferedText);
+        conversation = await this.transition(
+          event,
+          conversation,
+          'start-quote',
+          {
+            ...plan,
+            reason: 'natural-language-eventual-quote',
+          },
+        );
+        effectiveMode = 'eventual-quote';
+      }
+      assertSafeAiDecision(aiResult.output, effectiveMode, bufferedText);
+      const actions = deriveAiActions(aiResult.output, effectiveMode);
       conversationResolved = aiOutputResolvesConversation(
         aiResult.output,
-        plan.aiMode,
+        effectiveMode,
       );
       transitionBeforeSend = actions.transitionBeforeSend;
       transitionAfterSend = actions.transitionAfterSend;
@@ -445,7 +472,7 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
             }
           : { reason: transitionReason };
       responseMessage =
-        plan.aiMode !== 'natural-service' &&
+        effectiveMode !== 'natural-service' &&
         aiResult.output.customerDecision === 'confirmed'
           ? QUOTE_CONFIRMATION_MESSAGE
           : aiResult.output.message;
@@ -462,11 +489,11 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
           },
         );
       }
-      if (plan.aiMode !== 'natural-service') {
+      if (effectiveMode !== 'natural-service') {
         conversation = await this.patchQuoteFromAi(
           event,
           conversation,
-          plan.aiMode,
+          effectiveMode,
           aiResult.output,
         );
       }

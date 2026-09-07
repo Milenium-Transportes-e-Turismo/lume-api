@@ -79,6 +79,7 @@ function createSubject(
   ],
 ) {
   const prisma = {
+    whatsAppMessage: { findMany: vi.fn().mockResolvedValue([]) },
     lumeAgent: {
       findMany: vi.fn().mockResolvedValue(agents),
       findFirst: vi.fn().mockResolvedValue(null),
@@ -253,7 +254,8 @@ describe('PlatformWhatsAppConversationAgent', () => {
       execute.mock.calls.every(
         ([call]) =>
           call.serviceSessionId === input.serviceSessionId &&
-          call.mediaInterpretations === input.mediaInterpretations &&
+          JSON.stringify(call.mediaInterpretations) ===
+            JSON.stringify(input.mediaInterpretations) &&
           /^[a-f0-9]{48}$/.test(call.safetyIdentifier),
       ),
     ).toBe(true);
@@ -335,5 +337,69 @@ describe('PlatformWhatsAppConversationAgent', () => {
     await expect(subject.complete(input)).rejects.toMatchObject({
       code: 'EXTERNAL_SERVICE_UNAVAILABLE',
     });
+  });
+});
+
+describe('histórico multimodal do atendimento', () => {
+  it('preserva dados do áudio e complemento para todos os agentes, com correção humana e isolamento da sessão', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      ...completed,
+      executionId: 'history-test',
+      outputText: customerJson('Qual sua preferência de veículo?'),
+    });
+    const { subject, prisma } = createSubject(execute);
+    prisma.whatsAppMessage.findMany.mockResolvedValue([
+      {
+        direction: 'INBOUND',
+        text: 'Ida e volta, saída 9h, retorno 10/10 às 21h',
+        occurredAt: new Date('2026-09-06T12:07:00Z'),
+        mediaAsset: null,
+      },
+      {
+        direction: 'INBOUND',
+        text: null,
+        occurredAt: new Date('2026-09-06T12:05:00Z'),
+        mediaAsset: {
+          interpretation: {
+            id: 'audio-interpretation',
+            status: 'SUCCEEDED',
+            transcription: 'transcrição antiga',
+            extractedText: null,
+            summary: null,
+            correction: {
+              correction:
+                'Uberlândia para Goiânia em 08/10/2026, 15 passageiros',
+            },
+          },
+        },
+      },
+    ]);
+    await subject.complete({
+      ...input,
+      userMessage: 'Mais eu já informei',
+      contextThrough: '2026-09-06T12:10:00Z',
+    });
+    expect(prisma.whatsAppMessage.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          companyId: input.companyId,
+          conversationId: input.conversationId,
+          serviceSessionId: input.serviceSessionId,
+          occurredAt: { lte: new Date('2026-09-06T12:10:00Z') },
+        }),
+        take: 50,
+      }),
+    );
+    for (const [request] of execute.mock.calls) {
+      expect(request.input).toContain(
+        'Uberlândia para Goiânia em 08/10/2026, 15 passageiros',
+      );
+      expect(request.input).toContain('retorno 10/10 às 21h');
+      expect(request.input).not.toContain('transcrição antiga');
+      expect(request.mediaInterpretations).toContainEqual({
+        interpretationId: 'audio-interpretation',
+        effectiveSource: 'human',
+      });
+    }
   });
 });

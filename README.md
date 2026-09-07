@@ -472,3 +472,12 @@ GET /whatsapp/channels/:channelId/pairing exige whatsapp-channels:connect, aplic
 GET /administration/usage/activity exige administrador e settings:view. Une operações de auditoria agrupadas pelo comando e métricas de requisição em ordem cronológica, com uma única paginação e isolamento pelo tenant. Filtros de resultado HTTP se aplicam somente às requisições. Não deduzimos associação entre comandos e requisições por proximidade de horário.
 
 Estas alterações não exigem migration nem novas variáveis de ambiente. O uso de ViaCEP requer saída HTTPS da API. A geração/renovação de QR não prova que o telefone conseguiu parear; essa etapa exige validação no aplicativo WhatsApp.
+
+### Continuidade de atendimento e coleta comercial
+
+O painel recebe a sessão nativa vinculada à conversa, com seu identificador,
+versão e ações disponíveis. Comandos de atendimento usam essa sessão.
+Orquestrador e especialistas recebem histórico limitado da mesma empresa,
+conversa e sessão, incluindo transcrição efetiva e correção humana de mídia.
+Pedidos de orçamento eventual em linguagem natural iniciam a coleta canônica;
+os campos extraídos são persistidos antes da resposta.

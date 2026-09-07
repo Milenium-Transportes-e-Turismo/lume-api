@@ -315,6 +315,7 @@ function webhookPayload(
 function signedWebhook(
   app: INestApplication,
   payload: ReturnType<typeof webhookPayload>,
+  targetChannelId = channelId,
 ) {
   const raw = JSON.stringify(payload);
   const timestamp = String(payload.data.messageTimestamp);
@@ -324,7 +325,7 @@ function signedWebhook(
     .update(raw)
     .digest('hex');
   return request(app.getHttpServer())
-    .post(`/api/v1/webhooks/evolution/${channelId}`)
+    .post(`/api/v1/webhooks/evolution/${targetChannelId}`)
     .set('content-type', 'application/json')
     .set('x-evolution-timestamp', timestamp)
     .set('x-evolution-signature', `sha256=${signature}`)
@@ -8108,5 +8109,122 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
           'early-terminated',
         ]);
       });
+  });
+  it('publica a sessão nativa e permite assumir pelo admin e pelo Comercial', async () => {
+    const operator = await prisma.user.create({
+      data: {
+        companyId: tenantId,
+        name: 'Operador sessão E2E',
+        username: 'session.operator',
+        usernameNormalized: 'session.operator',
+        email: 'session.operator@example.test',
+        emailNormalized: 'session.operator@example.test',
+        passwordHash: 'hash-e2e-sem-uso',
+        departments: ['commercial'],
+        permissionCodes: [
+          'whatsapp-conversations:view',
+          'service:view',
+          'service:assume',
+        ],
+      },
+    });
+    const operatorToken = await accessTokens.sign({
+      sub: operator.id,
+      companyId: tenantId,
+      tokenVersion: operator.tokenVersion,
+    });
+    for (const [index, token] of [accessToken, operatorToken].entries()) {
+      const inbound = await signedWebhook(
+        app,
+        webhookPayload(
+          'native-session-' + index,
+          '551198887700' + index,
+          'Olá',
+        ),
+      ).expect(202);
+      const conversationId = inbound.body.conversationId as string;
+      const detail = await request(app.getHttpServer())
+        .get('/api/v1/whatsapp/conversations/' + conversationId)
+        .set('authorization', 'Bearer ' + token)
+        .expect(200);
+      const session = detail.body.currentServiceSession;
+      expect(session.id).not.toBe(conversationId);
+      expect(session.availableActions).toContain('ASSUME');
+      await request(app.getHttpServer())
+        .post('/api/v1/service/sessions/' + session.id + '/actions/assume')
+        .set('authorization', 'Bearer ' + token)
+        .send({ commandId: randomUUID(), expectedVersion: session.version })
+        .expect(201);
+      const updated = await request(app.getHttpServer())
+        .get('/api/v1/whatsapp/conversations/' + conversationId)
+        .set('authorization', 'Bearer ' + token)
+        .expect(200);
+      expect(updated.body.currentServiceSession).toMatchObject({
+        id: session.id,
+        controlMode: 'human',
+        version: session.version + 1,
+      });
+      if (index === 1)
+        expect(updated.body.currentServiceSession.responsibleUserId).toBe(
+          operator.id,
+        );
+    }
+  });
+  it('habilita IA na primeira mensagem de outro canal conectado', async () => {
+    const original = await prisma.whatsAppChannel.findUniqueOrThrow({
+      where: { id: channelId },
+    });
+    const channel = await prisma.whatsAppChannel.create({
+      data: {
+        companyId: tenantId,
+        providerId: original.providerId,
+        name: 'Outro dispositivo E2E',
+        phoneNumber: '5511991122334',
+        instanceName: 'lume-e2e-outro-dispositivo',
+        webhookSecretHash: original.webhookSecretHash,
+        organizationalStatus: 'ACTIVE',
+        connectionStatus: 'CONNECTED',
+        routingMode: 'GENERAL_TRIAGE',
+        enabled: true,
+      },
+    });
+    const payload = {
+      ...webhookPayload(
+        'new-channel-first-message',
+        '5511988877010',
+        'Quero um orçamento',
+      ),
+      instance: channel.instanceName,
+    };
+    const inbound = await signedWebhook(app, payload, channel.id).expect(202);
+    expect(inbound.body).toMatchObject({
+      accepted: true,
+      automationAllowed: true,
+      canGenerateReply: true,
+      canSendReply: true,
+      isFirstContact: true,
+    });
+    const session = await prisma.serviceSession.findUniqueOrThrow({
+      where: { id: inbound.body.serviceSessionId as string },
+    });
+    expect(session).toMatchObject({
+      companyId: tenantId,
+      sourceChannelId: channel.id,
+      controlMode: 'AI',
+      status: 'OPEN',
+      isForeground: true,
+    });
+    const event = await prisma.integrationOutbox.findFirstOrThrow({
+      where: {
+        companyId: tenantId,
+        aggregateId: inbound.body.conversationId as string,
+        topic: 'whatsapp.inbound.persisted',
+      },
+    });
+    expect(event.payload).toMatchObject({
+      channelId: channel.id,
+      serviceSessionId: session.id,
+      automationAllowed: true,
+    });
   });
 });

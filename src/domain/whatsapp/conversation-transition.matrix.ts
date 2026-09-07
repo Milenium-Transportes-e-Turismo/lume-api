@@ -186,11 +186,12 @@ export function resolveConversationTransition(
     case 'start-quote':
       assertState(current, ['bot-active'], name);
       if (
-        current.flowStep !== 'commercial-menu' ||
+        !['commercial-menu', 'main-menu'].includes(current.flowStep) ||
+        current.department !== 'commercial' ||
         current.requestStatus !== 'not-started'
       ) {
         throw validationError(
-          'A primeira coleta exige o menu comercial sem orçamento anterior.',
+          'A primeira coleta exige atendimento Comercial sem orçamento anterior.',
         );
       }
       return {

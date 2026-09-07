@@ -222,3 +222,23 @@ GET /whatsapp/channels/:channelId/pairing exige whatsapp-channels:connect, aplic
 GET /administration/usage/activity exige administrador e settings:view. Une operações de auditoria agrupadas pelo comando e métricas de requisição em ordem cronológica, com uma única paginação e isolamento pelo tenant. Filtros de resultado HTTP se aplicam somente às requisições. Não deduzimos associação entre comandos e requisições por proximidade de horário.
 
 Estas alterações não exigem migration nem novas variáveis de ambiente. O uso de ViaCEP requer saída HTTPS da API. A geração/renovação de QR não prova que o telefone conseguiu parear; essa etapa exige validação no aplicativo WhatsApp.
+
+## Correção de continuidade e assumir atendimento (2026-09-07)
+
+Esta alteração não requer migration nem novas variáveis. Recompile e publique
+a Tenant API. O Web já aceita currentServiceSession no contrato publicado.
+
+Valide a leitura da sessão nativa no painel, assumir com administrador e
+operador Comercial autorizado, e coleta de dados em áudio seguida de mensagem
+que complementa horário/retorno. Não reenvie respostas históricas para validar.
+As instruções de negócio do agente são publicadas em Agentes de IA >
+Atendimento Lume > Instruções do tenant > Nova versão. A publicação substitui
+o conteúdo completo da camada do tenant e preserva o histórico versionado.
+
+Novos canais criados pela aplicação configuram o webhook de recebimento da
+Evolution automaticamente. Com WHATSAPP_ENABLED=true, a primeira mensagem de
+um contato em outro canal habilitado cria uma sessão em controle AI e publica
+o evento de automação. As instruções dos agentes pertencem ao tenant, sem cópia
+por número. Sessões assumidas por uma pessoa não recebem respostas automáticas.
+O E2E cobre um segundo canal conectado e sua primeira mensagem, sem enviar
+mensagens externas nem exigir um dispositivo físico.

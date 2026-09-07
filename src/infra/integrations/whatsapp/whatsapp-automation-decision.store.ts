@@ -104,6 +104,9 @@ function decisionInputHash(input: WhatsAppConversationAgentInput): string {
         serviceSessionId: input.serviceSessionId,
         aiMode: input.aiMode,
         userMessage: input.userMessage,
+        ...(input.contextThrough
+          ? { contextThrough: input.contextThrough }
+          : {}),
         ...(input.mediaInterpretations?.length
           ? { mediaInterpretations: input.mediaInterpretations }
           : {}),

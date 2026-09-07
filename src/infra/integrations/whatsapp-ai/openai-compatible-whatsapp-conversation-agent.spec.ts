@@ -93,7 +93,9 @@ describe('OpenAiCompatibleWhatsAppConversationAgent', () => {
       'Bearer openai-secret-key',
     );
     expect(body.model).toBe('openai-model');
-    expect(body.messages[0]?.content).toContain('Agente Comercial da Milenium');
+    expect(body.messages[0]?.content).toContain(
+      'Coleta de orçamento de transporte',
+    );
     expect(result).toMatchObject({
       provider: 'openai',
       model: 'openai-model',

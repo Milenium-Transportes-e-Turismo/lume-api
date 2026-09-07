@@ -324,3 +324,22 @@ GET /whatsapp/channels/:channelId/pairing exige whatsapp-channels:connect, aplic
 GET /administration/usage/activity exige administrador e settings:view. Une operações de auditoria agrupadas pelo comando e métricas de requisição em ordem cronológica, com uma única paginação e isolamento pelo tenant. Filtros de resultado HTTP se aplicam somente às requisições. Não deduzimos associação entre comandos e requisições por proximidade de horário.
 
 Estas alterações não exigem migration nem novas variáveis de ambiente. O uso de ViaCEP requer saída HTTPS da API. A geração/renovação de QR não prova que o telefone conseguiu parear; essa etapa exige validação no aplicativo WhatsApp.
+
+## Continuidade multimodal e projeção de sessão (2026-09-07)
+
+A projeção de WhatsAppConversation inclui currentServiceSession a partir da
+thread, priorizando a sessão foreground e a mais recente. Reutiliza o mesmo
+presenter dos comandos de atendimento; IDs e versões de conversa e sessão não
+são intercambiáveis.
+
+PlatformWhatsAppConversationAgent lê até 50 mensagens da mesma empresa,
+conversa e sessão, limitadas ao instante do último item do lote. Saídas
+malsucedidas não entram no histórico. Transcrições já persistidas e correções
+humanas são reutilizadas sem reanalisar a mídia e suas referências acompanham
+as execuções participantes. O histórico é conteúdo não confiável.
+
+No Comercial, um patch estruturado serviceType=eventual em atendimento natural,
+sem quote anterior e sem handoff, aciona start-quote na matriz existente.
+A transição aceita main-menu e commercial-menu somente no departamento
+Comercial. O patch e os comandos subsequentes conservam versão, idempotência
+e a confirmação explícita necessária para concluir orçamento.

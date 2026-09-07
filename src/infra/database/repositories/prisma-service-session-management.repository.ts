@@ -48,7 +48,7 @@ import {
 import { rethrowKnownPrismaConflict } from '../prisma/prisma-errors';
 import { PrismaService } from '../prisma/prisma.service';
 
-const sessionInclude = {
+export const sessionInclude = {
   sourceChannel: { select: { name: true } },
   thread: {
     select: {
@@ -226,7 +226,7 @@ function availableActions(
   return actions;
 }
 
-function toManaged(row: SessionRow): ManagedServiceSession {
+export function toManaged(row: SessionRow): ManagedServiceSession {
   return {
     id: row.id,
     companyId: row.companyId,

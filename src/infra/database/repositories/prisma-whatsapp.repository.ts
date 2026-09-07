@@ -1,3 +1,7 @@
+import {
+  sessionInclude,
+  toManaged,
+} from './prisma-service-session-management.repository';
 import { createHash, randomUUID } from 'node:crypto';
 
 import { Injectable } from '@nestjs/common';
@@ -627,6 +631,18 @@ const actorToPrisma = {
 } as const;
 
 const conversationInclude = {
+  thread: {
+    select: {
+      sessions: {
+        orderBy: [
+          { isForeground: 'desc' },
+          { createdAt: 'desc' },
+        ] as Prisma.ServiceSessionOrderByWithRelationInput[],
+        take: 1,
+        include: sessionInclude,
+      },
+    },
+  },
   contact: true,
   channel: { select: { id: true, name: true, phoneNumber: true } },
   assignedTo: { select: { id: true, name: true } },
@@ -1319,7 +1335,9 @@ function presentProposalDocument(row: {
 }
 
 function presentConversation(row: ConversationWithRelations) {
+  const session = row.thread?.sessions[0];
   return {
+    ...(session ? { currentServiceSession: toManaged(session) } : {}),
     id: row.id,
     companyId: row.companyId,
     channel: row.channel,
