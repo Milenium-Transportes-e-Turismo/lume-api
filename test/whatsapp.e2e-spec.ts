@@ -8411,4 +8411,169 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       ),
     ).resolves.toMatchObject({ allowed: true });
   });
+  it('envia somente o aviso autorizado de handoff e preserva o bloqueio das respostas da IA', async () => {
+    const inbound = await signedWebhook(
+      app,
+      webhookPayload(
+        'handoff-delivery-fix',
+        '5511988877040',
+        'Quero falar com uma pessoa',
+      ),
+    ).expect(202);
+    const conversationId = inbound.body.conversationId as string;
+    await transitionSystem({
+      conversationId,
+      commandId: randomUUID(),
+      expectedVersion: 1,
+      actorUserId: null,
+      name: 'forward',
+      metadata: {
+        reason: 'customer-requested-human',
+        targetDepartment: 'commercial',
+      },
+      automaticHumanHandoff: {
+        customerMessage: 'Vou encaminhar para nossa equipe.',
+        occurredAt: new Date('2026-09-07T15:00:00Z'),
+      },
+    });
+    const notice = await prisma.whatsAppMessage.findFirstOrThrow({
+      where: { companyId: tenantId, conversationId, direction: 'OUTBOUND' },
+      include: { attempts: true },
+    });
+    await prisma.whatsAppMessage.update({
+      where: { id: notice.id },
+      data: { actorType: 'AI_AGENT' },
+    });
+    const history = await request(app.getHttpServer())
+      .get('/api/v1/whatsapp/conversations/' + conversationId + '/messages')
+      .set('authorization', 'Bearer ' + accessToken)
+      .expect(200);
+    expect(history.body.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: notice.id,
+          actor: expect.objectContaining({ type: 'AI_AGENT' }),
+          source: 'AUTOMATION',
+          deliveryStatus: 'pending',
+        }),
+      ]),
+    );
+    const claim = {
+      companyId: tenantId,
+      messageId: notice.id,
+      attemptId: notice.attempts[0].id,
+      commandId: randomUUID(),
+      ownerId: e2eDispatchOwnerId,
+    };
+    await expect(
+      whatsappRepository.assertAutomaticReplyAllowed(tenantId, conversationId),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    await prisma.whatsAppMessage.update({
+      where: { id: notice.id },
+      data: { automationPurpose: null },
+    });
+    await expect(
+      whatsappRepository.claimEvolutionDispatch(claim),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    await prisma.whatsAppMessage.update({
+      where: { id: notice.id },
+      data: { automationPurpose: notice.automationPurpose },
+    });
+    await expect(
+      whatsappRepository.claimEvolutionDispatch(claim),
+    ).resolves.toMatchObject({ shouldSend: true });
+    await prisma.serviceSession.update({
+      where: { id: notice.serviceSessionId! },
+      data: {
+        status: 'OPEN',
+        responsibleUserId: (
+          await prisma.user.findFirstOrThrow({ where: { companyId: tenantId } })
+        ).id,
+      },
+    });
+    await expect(
+      whatsappRepository.claimEvolutionDispatch({
+        ...claim,
+        commandId: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('marca falha definitiva antes de despacho sem confundir resultado desconhecido com falha', async () => {
+    for (const dispatchState of ['READY', 'UNKNOWN'] as const) {
+      const inbound = await signedWebhook(
+        app,
+        webhookPayload(
+          'failed-delivery-' + dispatchState,
+          dispatchState === 'READY' ? '5511988877041' : '5511988877042',
+          'Falar com atendente',
+        ),
+      ).expect(202);
+      const conversationId = inbound.body.conversationId as string;
+      await transitionSystem({
+        conversationId,
+        commandId: randomUUID(),
+        expectedVersion: 1,
+        actorUserId: null,
+        name: 'forward',
+        metadata: {
+          reason: 'customer-requested-human',
+          targetDepartment: 'commercial',
+        },
+        automaticHumanHandoff: {
+          customerMessage: 'Encaminhando para nossa equipe.',
+          occurredAt: new Date('2026-09-07T15:00:00Z'),
+        },
+      });
+      const notice = await prisma.whatsAppMessage.findFirstOrThrow({
+        where: { companyId: tenantId, conversationId, direction: 'OUTBOUND' },
+        include: { attempts: true },
+      });
+      const event = await prisma.integrationOutbox.findFirstOrThrow({
+        where: {
+          companyId: tenantId,
+          aggregateId: conversationId,
+          topic: 'whatsapp.outbound.requested',
+        },
+      });
+      const executionId = randomUUID();
+      await prisma.integrationOutbox.update({
+        where: { id: event.id },
+        data: { status: 'PROCESSING', executionId, processingProvider: 'API' },
+      });
+      await prisma.whatsAppAutomationExecution.create({
+        data: {
+          companyId: tenantId,
+          outboxEventId: event.id,
+          executionId,
+          provider: 'API',
+          attemptNumber: 1,
+        },
+      });
+      await prisma.whatsAppMessageAttempt.update({
+        where: { id: notice.attempts[0].id },
+        data: { dispatchState },
+      });
+      await completeAutomationOutbox({
+        eventId: event.id,
+        commandId: randomUUID(),
+        executionId,
+        aggregateId: conversationId,
+        aggregateType: event.aggregateType,
+        outcome: 'terminal-failure',
+        errorCode: 'DISPATCH_BLOCKED',
+        errorMessage: 'Bloqueada antes do envio',
+      });
+      const final = await prisma.whatsAppMessage.findUniqueOrThrow({
+        where: { id: notice.id },
+        include: { attempts: true },
+      });
+      expect(final.deliveryStatus).toBe(
+        dispatchState === 'READY' ? 'FAILED' : 'PENDING',
+      );
+      expect(final.attempts[0].dispatchState).toBe(
+        dispatchState === 'READY' ? 'FAILED' : 'UNKNOWN',
+      );
+    }
+  });
 });

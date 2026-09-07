@@ -320,6 +320,8 @@ describe('PlatformWhatsAppConversationAgent', () => {
       customerDecision: 'human-requested',
       priority: 'normal',
       priorityReason: 'pedido explícito',
+      message:
+        'Vou encaminhar seu atendimento para nossa equipe dar continuidade.',
     });
   });
 

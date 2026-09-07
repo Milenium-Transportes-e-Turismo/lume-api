@@ -489,3 +489,11 @@ os agentes preserva a recepção de mensagens e o atendimento humano, mas suspen
 respostas automáticas, novas execuções de agentes, análise de mídias e encerramento
 automático naquele canal. Ativar novamente permite processar novas entradas;
 não reproduz automaticamente eventos já concluídos durante a pausa.
+
+## Autoria e envio no WhatsApp
+
+Mensagens retornam actor e source a partir da autoria persistida. Avisos de
+handoff têm autorização específica, limitada à mensagem vinculada à transição
+e à sessão ainda aguardando equipe. Respostas comuns de IA continuam bloqueadas
+sob controle humano. Falha terminal anterior ao despacho atualiza a mensagem
+para failed; resultado desconhecido do provedor exige reconciliação.

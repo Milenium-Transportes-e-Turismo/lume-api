@@ -359,3 +359,24 @@ Reabilitar permite novas entradas sem reexecutar eventos concluídos durante a p
 Publicação e restauração de instruções do agente usam lock transacional com
 executeRaw, pois pg_advisory_xact_lock retorna void. Isso preserva serialização e
 idempotência sem exigir desserialização de um resultado de consulta.
+
+## Autoria e aviso de encaminhamento
+
+O presenter de mensagens publica actor.type, actor.id, actor.name e source.
+Tipos seguem CUSTOMER, HUMAN_USER, EXTERNAL_HUMAN, AI_AGENT e SYSTEM.
+O nome de usuário humano vem do cadastro; mensagens de IA preservam o agentId.
+
+Mensagens human-handoff/off-hours-handoff podem ser reservadas para envio
+mesmo após a passagem ao controle humano, desde que estejam vinculadas à
+transição forward e à sessão foreground WAITING_HUMAN, sem responsável.
+O aviso fica obsoleto se o atendimento mudar. Não há liberação geral da IA
+sob controle humano; a desativação de agentes por canal permanece respeitada.
+
+Quando a outbox de envio termina em falha, somente tentativas READY, sem claim
+ou identificador de provedor, podem passar a FAILED com a mensagem. Tentativas
+LEASED, UNKNOWN ou SUCCEEDED impedem essa inferência e exigem reconciliação.
+
+HUMAN_REQUIRED em metadados da interpretação não significa que o cliente
+solicitou atendimento humano. A orientação do orquestrador distingue esse
+marcador de um pedido real; quando o orquestrador solicita handoff e o agente
+continua perguntando, a resposta final torna-se um aviso de encaminhamento.

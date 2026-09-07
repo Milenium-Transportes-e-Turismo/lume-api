@@ -7658,7 +7658,55 @@ export class PrismaWhatsAppRepository
             );
           }
         }
+        const handoffPurpose = ['human-handoff', 'off-hours-handoff'].includes(
+          message.automationPurpose ?? '',
+        );
+        if (handoffPurpose) {
+          if (!message.serviceSessionId)
+            throw new AppError(
+              'CONFLICT',
+              'O aviso de encaminhamento não possui sessão.',
+            );
+          await this.lockCommand(
+            transaction,
+            input.companyId,
+            'whatsapp-conversation',
+            message.conversationId,
+          );
+          const [handoffSession, handoffTransition] = await Promise.all([
+            transaction.serviceSession.findFirst({
+              where: {
+                companyId: input.companyId,
+                id: message.serviceSessionId ?? '',
+                status: ServiceSessionStatus.WAITING_HUMAN,
+                controlMode: ServiceSessionControlMode.HUMAN,
+                isForeground: true,
+                responsibleUserId: null,
+              },
+              select: { id: true },
+            }),
+            transaction.whatsAppConversationTransition.findFirst({
+              where: {
+                companyId: input.companyId,
+                conversationId: message.conversationId,
+                name: 'forward',
+                metadata: {
+                  path: ['humanHandoff', 'messageId'],
+                  equals: message.id,
+                },
+              },
+              select: { id: true },
+            }),
+          ]);
+          if (!handoffSession || !handoffTransition) {
+            throw new AppError(
+              'CONFLICT',
+              'O aviso de encaminhamento não corresponde ao atendimento aguardando equipe.',
+            );
+          }
+        }
         const automaticReply =
+          !handoffPurpose &&
           !bypassSessionGate &&
           lifecyclePurpose !== 'service-session-closing-question' &&
           lifecyclePurpose !== 'service-session-closure' &&
@@ -8505,6 +8553,62 @@ export class PrismaWhatsAppRepository
                     lastError: failure,
                   },
         });
+        if (
+          updated.status === IntegrationOutboxStatus.DEAD &&
+          event.topic === 'whatsapp.outbound.requested'
+        ) {
+          const outboundPayload = event.payload as Record<string, unknown>;
+          if (
+            typeof outboundPayload.messageId === 'string' &&
+            typeof outboundPayload.attemptId === 'string'
+          ) {
+            const failedBeforeDispatch =
+              await transaction.whatsAppMessageAttempt.updateMany({
+                where: {
+                  companyId: input.companyId,
+                  id: outboundPayload.attemptId,
+                  messageId: outboundPayload.messageId,
+                  status: MessageAttemptStatus.PENDING,
+                  dispatchState: EvolutionDispatchState.READY,
+                  dispatchClaimId: null,
+                  providerMessageId: null,
+                  message: {
+                    providerMessageId: null,
+                    deliveryStatus: DeliveryStatus.PENDING,
+                    attempts: {
+                      none: {
+                        dispatchState: {
+                          in: [
+                            EvolutionDispatchState.LEASED,
+                            EvolutionDispatchState.UNKNOWN,
+                            EvolutionDispatchState.SUCCEEDED,
+                          ],
+                        },
+                      },
+                    },
+                  },
+                },
+                data: {
+                  status: MessageAttemptStatus.FAILED,
+                  dispatchState: EvolutionDispatchState.FAILED,
+                  errorCode: 'AUTOMATION_FAILED_BEFORE_DISPATCH',
+                  errorMessage: failure,
+                  completedAt: now,
+                },
+              });
+            if (failedBeforeDispatch.count > 0) {
+              await transaction.whatsAppMessage.updateMany({
+                where: {
+                  companyId: input.companyId,
+                  id: outboundPayload.messageId,
+                  deliveryStatus: DeliveryStatus.PENDING,
+                  providerMessageId: null,
+                },
+                data: { deliveryStatus: DeliveryStatus.FAILED },
+              });
+            }
+          }
+        }
         const executionStatus =
           input.outcome === 'succeeded'
             ? WhatsAppAutomationExecutionStatus.SUCCEEDED
@@ -12317,6 +12421,9 @@ export class PrismaWhatsAppRepository
       conversationId: string;
       mediaAssetId?: string | null;
       actorUserId: string | null;
+      actorType?: WhatsAppMessageActorType | null;
+      actorAgentId?: string | null;
+      source?: WhatsAppMessageSource | null;
       providerMessageId: string | null;
       direction: MessageDirection;
       deliveryStatus: DeliveryStatus;
@@ -12364,6 +12471,20 @@ export class PrismaWhatsAppRepository
       mediaAsset: presentMessageMediaAsset(row.mediaAsset ?? null),
       automationPurpose: row.automationPurpose,
       recipientPhone: row.recipientPhone,
+      actor: row.actorType
+        ? {
+            type: row.actorType,
+            id:
+              row.actorType === WhatsAppMessageActorType.AI_AGENT
+                ? (row.actorAgentId ?? null)
+                : row.actorUserId,
+            name:
+              row.actorType === WhatsAppMessageActorType.HUMAN_USER
+                ? (row.actorUser?.name ?? null)
+                : null,
+          }
+        : null,
+      source: row.source ?? null,
       sentBy: row.actorUser
         ? { id: row.actorUser.id, name: row.actorUser.name }
         : null,

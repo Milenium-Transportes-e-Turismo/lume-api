@@ -261,3 +261,10 @@ O script scripts/lume-staging.sh da instalação usa um override de imagem obtid
 por docker inspect para a opção de reinício; se não conseguir identificar a
 imagem, cancela a operação. O reinício não deve executar build, pull ou migration.
 Após a operação, conferir tanto a disponibilidade quanto a identidade da imagem.
+
+## Correção de autoria e entrega de avisos
+
+Atualizar API e Web juntas para apresentar autoria e estado real de envio.
+Não exige migration ou variável nova. Eventos mortos antigos não são reenviados
+automaticamente. Reparar status de mensagem somente após comprovar que nenhuma
+tentativa foi enviada, reservada ou ficou com resultado desconhecido.

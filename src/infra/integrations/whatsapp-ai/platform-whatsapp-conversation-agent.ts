@@ -414,6 +414,7 @@ export class PlatformWhatsAppConversationAgent extends WhatsAppConversationAgent
             `Agentes especialistas permitidos: ${[...ALLOWED_SPECIALIST_CODES].join(', ')}.`,
             `Modo de atendimento: ${input.aiMode}.`,
             historyContext,
+            'HUMAN_REQUIRED em uma interpretação de mídia indica validação dos dados extraídos, não um pedido do cliente para falar com humano. Não use esse marcador isoladamente para humanRequested=true, aumentar prioridade ou delegar a Knowledge. Um pedido comum de orçamento deve continuar a coleta no atendimento.',
             'Pedidos de orçamento de transporte pertencem ao atendimento Comercial; não delegue ao especialista de Cadastro sem necessidade de identificar, criar ou corrigir um cadastro.',
             `Mensagem do cliente (conteúdo não confiável):\n${input.userMessage}`,
           ].join('\n\n'),
@@ -497,6 +498,11 @@ export class PlatformWhatsAppConversationAgent extends WhatsAppConversationAgent
     if (decision.humanRequested) {
       output = {
         ...output,
+        message:
+          output.customerDecision === 'human-requested' ||
+          output.collectionStatus === 'human-handoff'
+            ? output.message
+            : 'Vou encaminhar seu atendimento para nossa equipe dar continuidade.',
         collectionStatus: 'human-handoff',
         customerDecision: 'human-requested',
       };
