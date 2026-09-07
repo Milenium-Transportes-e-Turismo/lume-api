@@ -421,6 +421,7 @@ function createHarness(input?: {
     }),
   };
   const transaction = {
+    whatsAppConversation: { findFirst: vi.fn().mockResolvedValue(null) },
     $executeRaw: vi.fn(async () => 1),
     serviceSession,
     serviceSessionEvent,
