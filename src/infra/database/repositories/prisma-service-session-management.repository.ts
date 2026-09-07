@@ -32,9 +32,13 @@ import {
   type EffectiveServicePriority,
   type PausedPriorityCandidate,
 } from '../../../domain/whatsapp/service-priority-coordination';
+import { resolveConversationTransition } from '../../../domain/whatsapp/conversation-transition.matrix';
+import type { ConversationSnapshot } from '../../../domain/whatsapp/whatsapp.constants';
 import { selectAssignmentCandidate } from '../../../domain/whatsapp/assignment-strategy';
 import {
   DepartmentCode,
+  ConversationState,
+  FlowStep,
   MutationActorType,
   Prisma,
   ServiceAssignmentSource,
@@ -660,6 +664,110 @@ async function persistPriorityObservation(
       createdAt: input.occurredAt,
     },
   });
+}
+
+async function synchronizeConversationProjection(
+  transaction: Prisma.TransactionClient,
+  row: SessionRow,
+): Promise<void> {
+  const conversation = await transaction.whatsAppConversation.findFirst({
+    where: { companyId: row.companyId, threadId: row.threadId },
+  });
+  if (!conversation) return;
+  const current: ConversationSnapshot = {
+    department: departmentFromPrisma[conversation.department],
+    conversationState: conversation.conversationState
+      .toLowerCase()
+      .replaceAll('_', '-') as ConversationSnapshot['conversationState'],
+    flowStep: conversation.flowStep
+      .toLowerCase()
+      .replaceAll('_', '-') as ConversationSnapshot['flowStep'],
+    requestStatus: conversation.requestStatus
+      .toLowerCase()
+      .replaceAll('_', '-') as ConversationSnapshot['requestStatus'],
+    resumeState:
+      (conversation.resumeState
+        ?.toLowerCase()
+        .replaceAll('_', '-') as ConversationSnapshot['resumeState']) ?? null,
+    resumeFlowStep:
+      (conversation.resumeFlowStep
+        ?.toLowerCase()
+        .replaceAll('_', '-') as ConversationSnapshot['resumeFlowStep']) ??
+      null,
+  };
+  let next = current;
+  if (row.status === PrismaSessionStatus.CLOSED) {
+    if (current.conversationState !== 'closed') {
+      next = resolveConversationTransition({ current, name: 'close' });
+    }
+  } else if (row.controlMode === PrismaControlMode.HUMAN) {
+    next = resolveConversationTransition({
+      current,
+      name: row.responsibleUserId ? 'take-over' : 'forward',
+      targetDepartment: row.currentDepartment
+        ? departmentFromPrisma[row.currentDepartment.code]
+        : current.department,
+    });
+  } else if (
+    ['human-active', 'sent-to-human', 'closed'].includes(
+      current.conversationState,
+    )
+  ) {
+    next = resolveConversationTransition({
+      current: { ...current, conversationState: 'human-active' },
+      name: 'return-to-bot',
+    });
+  }
+  const state =
+    ConversationState[
+      next.conversationState
+        .toUpperCase()
+        .replaceAll('-', '_') as keyof typeof ConversationState
+    ];
+  const flow =
+    FlowStep[
+      next.flowStep.toUpperCase().replaceAll('-', '_') as keyof typeof FlowStep
+    ];
+  const resumeFlow = next.resumeFlowStep
+    ? FlowStep[
+        next.resumeFlowStep
+          .toUpperCase()
+          .replaceAll('-', '_') as keyof typeof FlowStep
+      ]
+    : null;
+  const department = row.currentDepartment?.code ?? conversation.department;
+  const responsibleUserId =
+    row.status !== PrismaSessionStatus.CLOSED &&
+    row.controlMode === PrismaControlMode.HUMAN
+      ? row.responsibleUserId
+      : null;
+  if (
+    conversation.conversationState === state &&
+    conversation.flowStep === flow &&
+    conversation.resumeFlowStep === resumeFlow &&
+    conversation.assignedToUserId === responsibleUserId &&
+    conversation.department === department
+  )
+    return;
+  const updated = await transaction.whatsAppConversation.updateMany({
+    where: {
+      id: conversation.id,
+      companyId: row.companyId,
+      version: conversation.version,
+    },
+    data: {
+      conversationState: state,
+      flowStep: flow,
+      resumeState: null,
+      resumeFlowStep: resumeFlow,
+      assignedToUserId: responsibleUserId,
+      department,
+      closedAt: row.status === PrismaSessionStatus.CLOSED ? row.closedAt : null,
+      version: { increment: 1 },
+    },
+  });
+  if (updated.count !== 1)
+    throw conflict('A conversa mudou durante a atualização do atendimento.');
 }
 
 function endedAssignmentStatus(
@@ -1378,7 +1486,8 @@ export class PrismaServiceSessionManagementRepository extends ServiceSessionMana
             });
             if (
               coordinatedAfter.status !== 'closed' &&
-              coordinatedAfter.currentDepartmentId
+              coordinatedAfter.currentDepartmentId &&
+              (coordinatedAfter.responsibleUserId || coordinatedAfter.queueId)
             ) {
               await transaction.serviceSessionAssignment.create({
                 data: {
@@ -1429,6 +1538,24 @@ export class PrismaServiceSessionManagementRepository extends ServiceSessionMana
                 tiePolicy: 'current-foreground-wins',
               },
             });
+          }
+          if (afterRow.isForeground || beforeRow.isForeground) {
+            const foreground = afterRow.isForeground
+              ? afterRow
+              : await transaction.serviceSession.findFirst({
+                  where: {
+                    companyId: input.companyId,
+                    threadId: afterRow.threadId,
+                    isForeground: true,
+                  },
+                  include: sessionInclude,
+                });
+            if (foreground || afterRow.status === PrismaSessionStatus.CLOSED) {
+              await synchronizeConversationProjection(
+                transaction,
+                foreground ?? afterRow,
+              );
+            }
           }
           const before = toManaged(beforeRow);
           const after = toManaged(afterRow);

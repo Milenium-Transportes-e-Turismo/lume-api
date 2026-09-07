@@ -343,3 +343,9 @@ sem quote anterior e sem handoff, aciona start-quote na matriz existente.
 A transição aceita main-menu e commercial-menu somente no departamento
 Comercial. O patch e os comandos subsequentes conservam versão, idempotência
 e a confirmação explícita necessária para concluir orçamento.
+
+As ações nativas de atendimento sincronizam, na mesma transação serializável,
+a projeção de estado, responsável e etapa usada pelo painel e pela autorização
+de resposta humana. A matriz existente mantém a etapa de retomada ao devolver
+à IA. A projeção acompanha a sessão em primeiro plano e usa a versão da
+conversa para detectar concorrência; não decide o controle de forma independente.

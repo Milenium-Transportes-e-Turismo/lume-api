@@ -8123,6 +8123,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         departments: ['commercial'],
         permissionCodes: [
           'whatsapp-conversations:view',
+          'whatsapp-conversations:attend',
           'service:view',
           'service:assume',
         ],
@@ -8164,10 +8165,49 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         controlMode: 'human',
         version: session.version + 1,
       });
+      expect(updated.body).toMatchObject({
+        conversationState: 'human-active',
+        flowStep: 'human-service',
+        assignedTo: {
+          id: updated.body.currentServiceSession.responsibleUserId,
+        },
+      });
+      await expect(
+        whatsappRepository.authorizeHumanOutbound({
+          companyId: tenantId,
+          conversationId,
+          actorUserId: updated.body.currentServiceSession
+            .responsibleUserId as string,
+          commandId: randomUUID(),
+          idempotencyKey: randomUUID(),
+          expectedVersion: updated.body.version as number,
+          text: 'Validação sem criar nem enviar mensagem.',
+        }),
+      ).resolves.toBeUndefined();
       if (index === 1)
         expect(updated.body.currentServiceSession.responsibleUserId).toBe(
           operator.id,
         );
+      await request(app.getHttpServer())
+        .post(
+          '/api/v1/service/sessions/' + session.id + '/actions/return-to-ai',
+        )
+        .set('authorization', 'Bearer ' + accessToken)
+        .send({
+          commandId: randomUUID(),
+          expectedVersion: updated.body.currentServiceSession.version,
+        })
+        .expect(201);
+      const returned = await request(app.getHttpServer())
+        .get('/api/v1/whatsapp/conversations/' + conversationId)
+        .set('authorization', 'Bearer ' + token)
+        .expect(200);
+      expect(returned.body).toMatchObject({
+        conversationState: 'bot-active',
+        flowStep: 'main-menu',
+        assignedTo: null,
+        currentServiceSession: { controlMode: 'ai', responsibleUserId: null },
+      });
     }
   });
   it('habilita IA na primeira mensagem de outro canal conectado', async () => {
