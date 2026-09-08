@@ -327,6 +327,99 @@ describe('PlatformWhatsAppConversationAgent', () => {
     });
   });
 
+  it.each([undefined, 'commercial'])(
+    'routes a quote from Financeiro when only the service agent requests a human (initial target %s)',
+    async (initialTarget) => {
+      const execute = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ...completed,
+          executionId: 'orchestrator',
+          outputText: JSON.stringify({
+            intent: 'quote_discussion',
+            humanRequested: false,
+            priority: 'normal',
+            reason: 'Cliente quer tratar do orçamento em andamento.',
+            targetDepartment: initialTarget,
+          }),
+        })
+        .mockResolvedValueOnce({
+          ...completed,
+          executionId: 'service',
+          outputText: JSON.stringify({
+            ...JSON.parse(
+              customerJson(
+                'Vou encaminhar sua solicitação ao time responsável.',
+              ),
+            ),
+            collectionStatus: 'completed',
+            customerDecision: 'human-requested',
+          }),
+        })
+        .mockResolvedValueOnce({
+          ...completed,
+          executionId: 'routing',
+          outputText: JSON.stringify({
+            targetDepartment: 'commercial',
+          }),
+        });
+      const { subject } = createSubject(execute);
+      const result = await subject.complete({
+        ...input,
+        userMessage: 'Eu quero falar sobre meu orçamento.',
+        currentConversation: {
+          id: input.conversationId,
+          department: 'financial',
+          version: 17,
+          conversationState: 'bot-active',
+          flowStep: 'main-menu',
+          requestStatus: 'rejected',
+          resumeState: null,
+        },
+      });
+      expect(result.output.targetDepartment).toBe('commercial');
+      expect(result.output.customerDecision).toBe('human-requested');
+      expect(execute).toHaveBeenCalledTimes(initialTarget ? 2 : 3);
+      if (!initialTarget) {
+        expect(execute.mock.calls[2][0]).toMatchObject({
+          agentId: 'agent-orchestrator',
+          parentExecutionId: 'orchestrator',
+          input: expect.stringContaining('Eu quero falar sobre meu orçamento.'),
+        });
+      }
+    },
+  );
+
+  it.each([undefined, 'unknown-department'])(
+    'does not confirm a handoff or fall back to the origin when routing returns %s',
+    async (targetDepartment) => {
+      const execute = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ...completed,
+          executionId: 'orchestrator',
+          outputText: '{}',
+        })
+        .mockResolvedValueOnce({
+          ...completed,
+          executionId: 'service',
+          outputText: JSON.stringify({
+            ...JSON.parse(customerJson()),
+            customerDecision: 'human-requested',
+          }),
+        })
+        .mockResolvedValueOnce({
+          ...completed,
+          executionId: 'routing',
+          outputText: JSON.stringify({ targetDepartment }),
+        });
+      const { subject } = createSubject(execute);
+      await expect(subject.complete(input)).rejects.toThrow(
+        'departamento válido',
+      );
+    },
+  );
+
   it('fails closed when the customer-facing agent returns an invalid schema', async () => {
     const execute = vi.fn().mockResolvedValue({
       ...completed,

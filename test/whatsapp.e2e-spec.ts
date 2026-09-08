@@ -8633,4 +8633,82 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       whatsappRepository.assertAutomaticReplyAllowed(tenantId, conversationId),
     ).rejects.toMatchObject({ code: 'CONFLICT' });
   });
+  it('encaminha do Financeiro devolvido à IA para a fila do Comercial e mantém o aviso no outbox', async () => {
+    const inbound = await signedWebhook(
+      app,
+      webhookPayload(
+        'financial-quote-handoff',
+        '5511988877060',
+        'Quero falar sobre meu orçamento',
+      ),
+    ).expect(202);
+    const conversationId = inbound.body.conversationId as string;
+    const detail = await request(app.getHttpServer())
+      .get('/api/v1/whatsapp/conversations/' + conversationId)
+      .set('authorization', 'Bearer ' + accessToken)
+      .expect(200);
+    const initial = detail.body.currentServiceSession;
+    const financial = await prisma.tenantDepartment.findFirstOrThrow({
+      where: { companyId: tenantId, code: 'FINANCIAL' },
+    });
+    const commercial = await prisma.tenantDepartment.findFirstOrThrow({
+      where: { companyId: tenantId, code: 'COMMERCIAL' },
+    });
+    const transferred = await request(app.getHttpServer())
+      .post('/api/v1/service/sessions/' + initial.id + '/actions/transfer')
+      .set('authorization', 'Bearer ' + accessToken)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: initial.version,
+        departmentId: financial.id,
+      })
+      .expect(201);
+    await request(app.getHttpServer())
+      .post('/api/v1/service/sessions/' + initial.id + '/actions/return-to-ai')
+      .set('authorization', 'Bearer ' + accessToken)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: transferred.body.version,
+      })
+      .expect(201);
+    const before = await prisma.whatsAppConversation.findUniqueOrThrow({
+      where: { id: conversationId },
+    });
+    await transitionSystem({
+      conversationId,
+      commandId: randomUUID(),
+      expectedVersion: before.version,
+      actorUserId: null,
+      name: 'forward',
+      targetDepartment: 'commercial',
+      metadata: { targetDepartment: 'commercial', reason: 'quote-discussion' },
+      automaticHumanHandoff: {
+        customerMessage: 'Vou encaminhar ao Comercial.',
+        occurredAt: new Date(),
+      },
+    });
+    const session = await prisma.serviceSession.findUniqueOrThrow({
+      where: { id: initial.id },
+      include: { queue: true },
+    });
+    expect(session).toMatchObject({
+      currentDepartmentId: commercial.id,
+      status: 'WAITING_HUMAN',
+      controlMode: 'HUMAN',
+      responsibleUserId: null,
+      queue: { departmentId: commercial.id },
+    });
+    const notice = await prisma.whatsAppMessage.findFirstOrThrow({
+      where: {
+        companyId: tenantId,
+        conversationId,
+        direction: 'OUTBOUND',
+        text: 'Vou encaminhar ao Comercial.',
+      },
+    });
+    expect(notice.deliveryStatus).toBe('PENDING');
+    await expect(
+      whatsappRepository.assertAutomaticReplyAllowed(tenantId, conversationId),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
 });

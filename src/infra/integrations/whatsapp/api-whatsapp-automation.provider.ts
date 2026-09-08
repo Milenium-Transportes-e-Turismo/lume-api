@@ -461,6 +461,12 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
       }
       assertSafeAiDecision(aiResult.output, effectiveMode, bufferedText);
       const actions = deriveAiActions(aiResult.output, effectiveMode);
+      if (
+        actions.transitionAfterSend === 'forward' &&
+        !aiResult.output.targetDepartment
+      ) {
+        throw contractInvalid('targetDepartment');
+      }
       conversationResolved = aiOutputResolvesConversation(
         aiResult.output,
         effectiveMode,
@@ -471,8 +477,7 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
       transitionMetadata =
         actions.transitionAfterSend === 'forward'
           ? {
-              targetDepartment:
-                aiResult.output.targetDepartment ?? conversation.department,
+              targetDepartment: aiResult.output.targetDepartment,
               reason: transitionReason,
               historyAvailableInPanel: true,
             }

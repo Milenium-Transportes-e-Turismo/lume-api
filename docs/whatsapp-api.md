@@ -397,3 +397,14 @@ são opcionais: quando ausentes, o atendimento aguarda a equipe de destino sob
 controle humano, sem herdar a atribuição anterior. Isolamento, versão, auditoria e
 idempotência permanecem obrigatórios. O aviso automático de encaminhamento usa o
 outbox existente; não há envio paralelo.
+
+## Destino obrigatório no encaminhamento automático
+
+A classificação informa o departamento do assunto mesmo quando não solicita
+humano. Se o agente de atendimento decidir encaminhar depois e faltar destino,
+o orquestrador resolve essa informação em uma execução silenciosa adicional,
+com histórico, transcrição e comando idempotente. Destino ausente ou inválido
+interrompe o processamento antes da mensagem e da transferência; não se usa
+automaticamente o departamento de origem. O inbox/outbox existente controla
+retentativas. Orçamento e negociação pertencem ao Comercial; pagamento de viagem
+realizada pertence ao Financeiro.

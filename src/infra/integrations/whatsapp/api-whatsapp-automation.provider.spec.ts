@@ -611,6 +611,27 @@ describe('ApiWhatsAppAutomationProvider', () => {
     );
   });
 
+  it('blocks a handoff without a department before announcing or persisting a transfer', async () => {
+    const { subject, repository, evolution, agent } = createSubject();
+    agent.complete.mockResolvedValueOnce({
+      provider: 'openai',
+      model: 'test',
+      attempt: 1,
+      output: {
+        message: 'Vou encaminhar.',
+        collectionStatus: 'human-handoff',
+        customerDecision: 'human-requested',
+        extractedDataPatch: {},
+        missingFields: [],
+        summaryPresented: false,
+      },
+    });
+    await expect(subject.execute(event())).rejects.toThrow('targetDepartment');
+    expect(repository.transition).not.toHaveBeenCalled();
+    expect(repository.createOutbound).not.toHaveBeenCalled();
+    expect(evolution.send).not.toHaveBeenCalled();
+  });
+
   it('delega o envio do handoff ao outbox transacional e interrompe o envio direto', async () => {
     const { subject, repository, evolution, agent, calls } = createSubject();
     agent.complete.mockResolvedValueOnce({
@@ -628,6 +649,7 @@ describe('ApiWhatsAppAutomationProvider', () => {
         customerDecision: 'human-requested',
         priority: 'high',
         priorityReason: 'Cliente pediu atendimento humano.',
+        targetDepartment: 'commercial',
       },
     });
 

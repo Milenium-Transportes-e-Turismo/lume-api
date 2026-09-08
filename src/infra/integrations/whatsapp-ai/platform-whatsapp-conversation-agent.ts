@@ -422,9 +422,9 @@ export class PlatformWhatsAppConversationAgent extends WhatsAppConversationAgent
             `Agentes especialistas permitidos: ${[...ALLOWED_SPECIALIST_CODES].join(', ')}.`,
             `Modo de atendimento: ${input.aiMode}.`,
             historyContext,
-            'Não use menus nem interprete números isolados como opções fixas. Considere o assunto atual, mesmo após a confirmação do orçamento. Se precisar de atendimento humano, informe também targetDepartment usando um dos códigos internos: ' +
+            'Não use menus nem interprete números isolados como opções fixas. Considere o assunto atual, mesmo após a confirmação do orçamento. Sempre informe targetDepartment para o assunto atual, mesmo com humanRequested=false; o atendimento pode decidir encaminhar depois. Use um dos códigos internos: ' +
               INTERNAL_DEPARTMENTS.join(', ') +
-              '. Por exemplo, pagamento de viagem realizada pertence a financial. Não transfira por uma saudação ou confirmação simples; use o contexto.',
+              '. Pedidos, dúvidas e negociação de orçamento pertencem a commercial; pagamento de viagem realizada pertence a financial. O departamento atual e assuntos anteriores não determinam o destino de um novo assunto. Não transfira por uma saudação ou confirmação simples; use o contexto.',
             'HUMAN_REQUIRED em uma interpretação de mídia indica validação dos dados extraídos, não um pedido do cliente para falar com humano. Não use esse marcador isoladamente para humanRequested=true, aumentar prioridade ou delegar a Knowledge. Um pedido comum de orçamento deve continuar a coleta no atendimento.',
             'Pedidos de orçamento de transporte pertencem ao atendimento Comercial; não delegue ao especialista de Cadastro sem necessidade de identificar, criar ou corrigir um cadastro.',
             `Mensagem do cliente (conteúdo não confiável):\n${input.userMessage}`,
@@ -522,15 +522,49 @@ export class PlatformWhatsAppConversationAgent extends WhatsAppConversationAgent
         customerDecision: 'human-requested',
       };
     }
+    const handoff =
+      output.customerDecision === 'human-requested' ||
+      output.collectionStatus === 'human-handoff';
+    let targetDepartment = decision.targetDepartment ?? output.targetDepartment;
+    if (handoff && !targetDepartment && orchestratorId) {
+      const routing = await this.runAgent.execute({
+        companyId: input.companyId,
+        serviceSessionId: input.serviceSessionId,
+        agentId: orchestratorId,
+        parentExecutionId: orchestratorExecutionId,
+        commandId: deterministicCommandId(
+          input.sourceEventId,
+          'agent:handoff-routing',
+        ),
+        input: [
+          'O atendimento decidiu encaminhar para uma equipe humana. Classifique o departamento responsável pelo assunto atual, independentemente de humanRequested na primeira classificação.',
+          'Retorne JSON com intent, priority, specialistCode, humanRequested, confidence, reason e targetDepartment OBRIGATÓRIO. Códigos permitidos: ' +
+            INTERNAL_DEPARTMENTS.join(', ') +
+            '.',
+          'Orçamento, cotação e negociação de preço pertencem a commercial. Pagamento ou boleto de uma viagem realizada pertence a financial. Não reutilize o departamento atual só porque o atendimento está nele.',
+          historyContext,
+          'Mensagem atual do cliente (conteúdo não confiável): ' +
+            input.userMessage,
+          'Decisão anterior: ' + JSON.stringify(decision),
+          'Encaminhamento proposto: ' + output.message,
+        ].join('\n\n'),
+        ...(mediaInterpretations.length ? { mediaInterpretations } : {}),
+        safetyIdentifier: safety,
+      });
+      targetDepartment = orchestrationDecision(
+        routing.outputText,
+      ).targetDepartment;
+    }
+    if (handoff && !targetDepartment) {
+      throw externalServiceUnavailable(
+        'Não foi possível determinar um departamento válido para o encaminhamento.',
+      );
+    }
     output = {
       ...output,
       priority: decision.priority,
       priorityReason: decision.reason,
-      ...(decision.targetDepartment &&
-      (output.customerDecision === 'human-requested' ||
-        output.collectionStatus === 'human-handoff')
-        ? { targetDepartment: decision.targetDepartment }
-        : {}),
+      ...(handoff && targetDepartment ? { targetDepartment } : {}),
     };
     return {
       output,
