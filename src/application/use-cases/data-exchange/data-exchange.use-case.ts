@@ -93,6 +93,46 @@ export class DataExchangeUseCase {
     });
   }
 
+  async exportCsv(input: {
+    companyId: string;
+    actorUserId: string;
+    commandId: string;
+    fileName: string;
+    purpose: string;
+    headers: string[];
+    rows: string[][];
+  }) {
+    const content = await this.converter.createCsv(input.headers, input.rows);
+    const validated = validateDataExchangeFile(
+      {
+        originalName: input.fileName,
+        mimeType: 'text/csv',
+        sizeBytes: content.byteLength,
+        content,
+      },
+      this.maximumBytes,
+    );
+    return this.repository.store({
+      companyId: input.companyId,
+      actorUserId: input.actorUserId,
+      commandId: input.commandId,
+      kind: 'conversion',
+      requestFingerprint: fingerprint({
+        operation: 'export-csv',
+        companyId: input.companyId,
+        actorUserId: input.actorUserId,
+        purpose: input.purpose,
+        fileName: input.fileName,
+        sha256: validated.sha256,
+      }),
+      ...validated,
+      content,
+      metadata: { purpose: input.purpose, rowCount: input.rows.length },
+      expiresAt: this.expiresAt(),
+      maximumTenantBytes: this.maximumTenantBytes,
+    });
+  }
+
   async get(companyId: string, artifactId: string) {
     const artifact = await this.repository.find(companyId, artifactId);
     if (!artifact) throw notFound('Arquivo temporário');

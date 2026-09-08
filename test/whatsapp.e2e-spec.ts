@@ -591,6 +591,91 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     }
   });
 
+  it('exports only approved active registrations as a private Google Contacts CSV', async () => {
+    const auth = 'Bearer ' + accessToken;
+    const suffix = randomUUID().slice(0, 8);
+    const approved = await prisma.routingCompany.create({
+      data: {
+        companyId: tenantId,
+        taxId: 'exp-' + suffix,
+        legalName: 'José Exportação ' + suffix,
+        clientType: 'PF',
+        firstName: 'José',
+        lastName: 'Exportação ' + suffix,
+        individualName: 'José Exportação ' + suffix,
+        status: 'ACTIVE',
+        isTemporary: false,
+        registrationPhones: {
+          create: {
+            normalizedValue: '5534999990123',
+            number: '999990123',
+            areaCode: '34',
+          },
+        },
+      },
+    });
+    await prisma.routingCompany.createMany({
+      data: [
+        {
+          companyId: tenantId,
+          taxId: 'temp-' + suffix,
+          legalName: 'TEMPORARIO-' + suffix,
+          isTemporary: true,
+          temporaryReason: 'Teste isolado de exportação.',
+          regularizationDueAt: new Date('2027-01-01'),
+          temporaryResponsibleUserId: commercialAttendant.id,
+        },
+        {
+          companyId: tenantId,
+          taxId: 'off-' + suffix,
+          legalName: 'INATIVO-' + suffix,
+          status: 'INACTIVE',
+        },
+      ],
+    });
+    const preview = await request(app.getHttpServer())
+      .get('/api/v1/registrations/contact-export')
+      .set('authorization', auth)
+      .expect(200);
+    expect(preview.body.contacts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: approved.id })]),
+    );
+    const commandId = randomUUID();
+    const first = await request(app.getHttpServer())
+      .post('/api/v1/registrations/contact-export')
+      .set('authorization', auth)
+      .send({ commandId, batch: 1 })
+      .expect(201);
+    expect(first.headers['content-type']).toContain('text/csv');
+    expect(first.headers['cache-control']).toContain('no-store');
+    expect(first.headers['content-disposition']).toContain(
+      'lume-google-contacts-1.csv',
+    );
+    expect(first.text).toContain('José,Exportação ' + suffix);
+    expect(first.text).toContain('+5534999990123');
+    expect(first.text).not.toContain('TEMPORARIO-' + suffix);
+    expect(first.text).not.toContain('INATIVO-' + suffix);
+    const replay = await request(app.getHttpServer())
+      .post('/api/v1/registrations/contact-export')
+      .set('authorization', auth)
+      .send({ commandId, batch: 1 })
+      .expect(201);
+    expect(replay.text).toBe(first.text);
+    expect(
+      await prisma.dataExchangeArtifact.count({
+        where: { companyId: tenantId, commandId },
+      }),
+    ).toBe(1);
+    await request(app.getHttpServer())
+      .get('/api/v1/registrations/contact-export')
+      .expect(401);
+    await request(app.getHttpServer())
+      .post('/api/v1/registrations/contact-export')
+      .set('authorization', auth)
+      .send({ commandId: randomUUID(), batch: 0 })
+      .expect(400);
+  });
+
   it('mantém endereço e perfil documental no Cadastro e solicita documentos sem conta de acesso', async () => {
     const address = {
       street: 'Rua Teste',

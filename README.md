@@ -525,3 +525,14 @@ interrompe o processamento antes da mensagem e da transferência; não se usa
 automaticamente o departamento de origem. O inbox/outbox existente controla
 retentativas. Orçamento e negociação pertencem ao Comercial; pagamento de viagem
 realizada pertence ao Financeiro.
+
+## Contatos para Google Contacts
+
+A página /contacts consulta os cadastros canônicos ativos e não temporários e
+oferece somente exportação CSV compatível com Google Contacts. Importação e
+manutenção da agenda deixam esta página; correções são feitas em Cadastro.
+A API publica GET/POST /api/v1/registrations/contact-export, com prévia e lotes
+de até 3.000 cadastros. Consulta exige clients:view; exportação exige também
+documents:view ou documents:manage. Geração, limites e persistência temporária
+reutilizam DataExchange. Não requer migration ou novas variáveis; atualizar API
+antes do Web. A importação no Google é feita manualmente com o CSV baixado.

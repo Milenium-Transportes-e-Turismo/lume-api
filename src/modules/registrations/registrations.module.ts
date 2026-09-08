@@ -1,3 +1,6 @@
+import { DataExchangeModule } from '../data-exchange/data-exchange.module';
+import { RegistrationContactExportService } from '../../application/use-cases/registrations/registration-contact-export.service';
+import { RegistrationContactExportController } from './registration-contact-export.controller';
 import { Module } from '@nestjs/common';
 
 import { RegistrationReconciliationService } from '../../application/use-cases/registrations/registration-reconciliation.service';
@@ -7,8 +10,14 @@ import { RegistrationReconciliationController } from './registration-reconciliat
 import { RegistrationsController } from './registrations.controller';
 
 @Module({
-  controllers: [RegistrationsController, RegistrationReconciliationController],
+  imports: [DataExchangeModule],
+  controllers: [
+    RegistrationContactExportController,
+    RegistrationsController,
+    RegistrationReconciliationController,
+  ],
   providers: [
+    RegistrationContactExportService,
     RegistrationsService,
     RegistrationReconciliationWorkbookService,
     RegistrationReconciliationService,

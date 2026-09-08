@@ -85,3 +85,14 @@ artefato. Ela não deve interpretar planilhas localmente. No backend, reutilize:
 7. conteúdo perigoso;
 8. conversão e download;
 9. retenção.
+
+## Contatos para Google Contacts
+
+A página /contacts consulta os cadastros canônicos ativos e não temporários e
+oferece somente exportação CSV compatível com Google Contacts. Importação e
+manutenção da agenda deixam esta página; correções são feitas em Cadastro.
+A API publica GET/POST /api/v1/registrations/contact-export, com prévia e lotes
+de até 3.000 cadastros. Consulta exige clients:view; exportação exige também
+documents:view ou documents:manage. Geração, limites e persistência temporária
+reutilizam DataExchange. Não requer migration ou novas variáveis; atualizar API
+antes do Web. A importação no Google é feita manualmente com o CSV baixado.

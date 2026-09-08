@@ -104,6 +104,37 @@ function worksheetToDelimited(
 
 @Injectable()
 export class DataExchangeConverter {
+  async createCsv(
+    headers: readonly string[],
+    rows: readonly (readonly string[])[],
+  ) {
+    if (
+      headers.length > MAX_DELIMITED_COLUMNS ||
+      rows.length + 1 > MAX_DELIMITED_ROWS ||
+      (rows.length + 1) * headers.length > MAX_DELIMITED_CELLS ||
+      rows.some((row) => row.length !== headers.length)
+    ) {
+      throw unsupportedFileFormat(
+        'A tabela excede os limites de exportação CSV.',
+      );
+    }
+    const lines = [headers, ...rows].map((row, rowIndex) =>
+      row
+        .map((value, column) => {
+          // Only a validated international phone may retain its leading plus.
+          const phone =
+            rowIndex > 0 &&
+            /^Phone [1-9][0-9]* - Value$/.test(headers[column] ?? '') &&
+            /^\+[1-9][0-9]{6,14}$/.test(value);
+          return delimitedValue(phone ? value : cellText(value), ',');
+        })
+        .join(','),
+    );
+    const content = Buffer.from(lines.join('\r\n') + '\r\n', 'utf8');
+    await this.validate('csv', content);
+    return content;
+  }
+
   async validate(
     sourceFormat: DataExchangeFormat,
     content: Buffer,
