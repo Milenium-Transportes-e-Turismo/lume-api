@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT } from './whatsapp.constants';
 import {
-  COMMERCIAL_MENU,
-  MAIN_MENU,
+  QUOTE_CONFIRMATION_MESSAGE,
   appendBufferedMessage,
   aiOutputResolvesConversation,
   buildBufferedText,
@@ -113,16 +112,41 @@ function envelope(
 }
 
 describe('fluxo de automação do WhatsApp', () => {
-  it('preserva os menus canônicos do perfil n8n', () => {
-    expect(MAIN_MENU).toContain('1 - Comercial');
-    expect(MAIN_MENU).toContain('9 - Operacional');
-    expect(COMMERCIAL_MENU).toContain(
-      '1 - Solicitar orçamento de fretamento eventual',
-    );
-    expect(COMMERCIAL_MENU).toContain(
-      '2 - Solicitar orçamento de fretamento contínuo',
-    );
+  it('confirma a coleta sem prometer um menu no próximo contato', () => {
+    expect(QUOTE_CONFIRMATION_MESSAGE).not.toMatch(/menu|opção|número/i);
   });
+
+  it.each([
+    'main-menu',
+    'commercial-menu',
+    'commercial-follow-up-menu',
+  ] as const)(
+    'usa contexto em %s inclusive com marcadores legados de menu',
+    (flowStep) => {
+      const current = conversation({
+        flowStep,
+        requestStatus: 'under-review',
+        followUpMenuPresentedAt: null,
+      });
+      for (const text of [
+        'Quero falar do pagamento da viagem de quinze dias atrás',
+        '0',
+        '1',
+        'Obrigado',
+      ]) {
+        const plan = decideAutomationPlan({
+          envelope: envelope(text, current, { contextualTransition: true }),
+        });
+        expect(plan).toMatchObject({
+          kind: 'ai',
+          aiMode: 'natural-service',
+          responseMessage: null,
+          transitionBeforeAi: null,
+          transitionAfterSend: null,
+        });
+      }
+    },
+  );
 
   it('entende a primeira mensagem em linguagem natural sem impor menu', () => {
     const current = conversation({ mainMenuPresentedAt: null });
@@ -175,46 +199,21 @@ describe('fluxo de automação do WhatsApp', () => {
     },
   );
 
-  it('coleta nome e motivo do fretamento contínuo antes de notificar a Diretoria', () => {
-    const current = conversation({ flowStep: 'commercial-menu', version: 3 });
-
-    expect(
-      decideAutomationPlan({ envelope: envelope('2', current) }),
-    ).toMatchObject({
-      kind: 'static-reply',
-      aiMode: null,
-      transitionBeforeAi: 'start-department-contact',
-      transitionAfterSend: null,
-      transitionMetadata: {
-        targetDepartment: 'management',
-        departmentOption: 'commercial-continuous-director',
-      },
-      reason: 'continuous-quote-director-contact-requested',
-    });
-  });
-
-  it('notifica a Diretoria depois que o cliente informa nome e motivo', () => {
+  it('retoma contexto de contato departamental legado sem notificação ou menu fixo', () => {
     const current = conversation({
       flowStep: 'main-menu',
       department: 'management',
       departmentContactOption: 'commercial-continuous-director',
-      version: 4,
     });
-
     expect(
       decideAutomationPlan({
-        envelope: envelope(
-          'Maria - fretamento contínuo para colaboradores',
-          current,
-        ),
+        envelope: envelope('Maria, sobre o fretamento contínuo', current),
       }),
     ).toMatchObject({
-      kind: 'static-reply',
-      responseMessage: expect.stringContaining('Departamento: Diretoria'),
-      transitionAfterSend: 'return-to-main-menu',
-      outboundPurpose: 'department-notification',
-      outboundRecipientPhoneEnv: 'MILENIUM_DIRECTOR_PHONE',
-      reason: 'department-contact-forwarded',
+      kind: 'ai',
+      aiMode: 'natural-service',
+      transitionAfterSend: null,
+      responseMessage: null,
     });
   });
 
@@ -383,24 +382,6 @@ describe('fluxo de automação do WhatsApp', () => {
       kind: 'human-notification',
       responseMessage: null,
       reason: 'human-active-blocks-bot',
-    });
-  });
-
-  it('encaminha opção inválida do acompanhamento para humano', () => {
-    const current = conversation({
-      flowStep: 'commercial-follow-up-menu',
-      requestStatus: 'under-review',
-      followUpMenuPresentedAt: '2026-07-25T12:00:00.000Z',
-    });
-
-    expect(
-      decideAutomationPlan({ envelope: envelope('quero ajuda', current) }),
-    ).toMatchObject({
-      transitionAfterSend: 'forward',
-      transitionMetadata: {
-        targetDepartment: 'commercial',
-        reason: 'invalid-commercial-follow-up-option',
-      },
     });
   });
 

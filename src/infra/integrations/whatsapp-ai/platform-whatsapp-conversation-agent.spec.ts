@@ -301,6 +301,7 @@ describe('PlatformWhatsAppConversationAgent', () => {
           priority: 'normal',
           specialistCode: null,
           humanRequested: true,
+          targetDepartment: 'financial',
           confidence: 1,
           reason: 'pedido explícito',
         }),
@@ -318,6 +319,7 @@ describe('PlatformWhatsAppConversationAgent', () => {
     expect(result.output).toMatchObject({
       collectionStatus: 'human-handoff',
       customerDecision: 'human-requested',
+      targetDepartment: 'financial',
       priority: 'normal',
       priorityReason: 'pedido explícito',
       message:

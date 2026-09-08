@@ -8576,4 +8576,61 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       );
     }
   });
+  it('transfere pelo painel somente com departamento, sem fila ou responsável, e rejeita repetição com versão antiga', async () => {
+    const inbound = await signedWebhook(
+      app,
+      webhookPayload(
+        'department-only-transfer',
+        '5511988877050',
+        'Preciso falar com Compras',
+      ),
+    ).expect(202);
+    const conversationId = inbound.body.conversationId as string;
+    const detail = await request(app.getHttpServer())
+      .get('/api/v1/whatsapp/conversations/' + conversationId)
+      .set('authorization', 'Bearer ' + accessToken)
+      .expect(200);
+    const session = detail.body.currentServiceSession;
+    const target = await prisma.tenantDepartment.findFirstOrThrow({
+      where: { companyId: tenantId, code: 'PURCHASING' },
+    });
+    const command = {
+      commandId: randomUUID(),
+      expectedVersion: session.version,
+      departmentId: target.id,
+    };
+    for (let replay = 0; replay < 2; replay++) {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/service/sessions/' + session.id + '/actions/transfer')
+        .set('authorization', 'Bearer ' + accessToken)
+        .send(command);
+      expect(response.status, JSON.stringify(response.body)).toBe(
+        replay === 0 ? 201 : 409,
+      );
+    }
+    const updated = await request(app.getHttpServer())
+      .get('/api/v1/service/sessions/' + session.id)
+      .set('authorization', 'Bearer ' + accessToken)
+      .expect(200);
+    expect(updated.body).toMatchObject({
+      currentDepartmentId: target.id,
+      queueId: null,
+      responsibleUserId: null,
+      status: 'waiting-human',
+      controlMode: 'human',
+      version: session.version + 1,
+    });
+    expect(
+      await prisma.serviceSessionEvent.count({
+        where: {
+          companyId: tenantId,
+          serviceSessionId: session.id,
+          commandId: command.commandId,
+        },
+      }),
+    ).toBe(1);
+    await expect(
+      whatsappRepository.assertAutomaticReplyAllowed(tenantId, conversationId),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
 });

@@ -123,6 +123,29 @@ describe('ServiceSession', () => {
     });
   });
 
+  it('transfere só para o departamento e aguarda equipe sem herdar responsável ou fila', () => {
+    const transferred = evolveServiceSession(
+      session({
+        controlMode: 'human',
+        responsibleUserId: 'previous-user',
+        queueId: 'previous-queue',
+      }),
+      {
+        type: 'transfer',
+        departmentId: 'be81489f-b186-4642-8548-716d040c7157',
+      },
+    );
+    expect(transferred).toMatchObject({
+      currentDepartmentId: 'be81489f-b186-4642-8548-716d040c7157',
+      responsibleUserId: null,
+      queueId: null,
+      status: 'waiting-human',
+      controlMode: 'human',
+      version: 2,
+    });
+    expect(() => assertAiCustomerFacingDispatchAllowed(transferred)).toThrow();
+  });
+
   it('supports priority interruption without changing who controls the session', () => {
     const human = session({
       controlMode: 'human',

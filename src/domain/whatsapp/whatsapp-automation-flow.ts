@@ -1,4 +1,7 @@
-import type { Department } from '../access/access.constants';
+import {
+  INTERNAL_DEPARTMENTS,
+  type Department,
+} from '../access/access.constants';
 import type { ServicePriority } from './service-session';
 import type { QuoteRequestStatus } from '../commercial/quote-status';
 import {
@@ -9,130 +12,8 @@ import {
   type TransitionName,
 } from './whatsapp.constants';
 
-export const MAIN_MENU = [
-  'Olá! Sou a Milena, assistente virtual da Milenium.',
-  '',
-  '1 - Comercial',
-  '2 - Compras (Fornecedores)',
-  '3 - Controladoria',
-  '4 - Departamento Pessoal',
-  '5 - Financeiro',
-  '6 - Gerência',
-  '7 - Manutenção',
-  '8 - Monitoramento',
-  '9 - Operacional',
-  '',
-  'Responda com o número da opção desejada.',
-].join('\n');
-
-export const DEPARTMENT_CONTACT_PROMPT =
-  'Para prosseguir, informe seu nome e o motivo do seu contato em uma única mensagem';
-
-export const DEPARTMENT_CONTACTS = {
-  'commercial-continuous-director': {
-    label: 'Diretoria',
-    departmentPhoneEnv: 'MILENIUM_DIRECTOR_PHONE',
-    targetDepartment: 'management',
-  },
-  '2': {
-    label: 'Compras (Fornecedores)',
-    departmentPhoneEnv: 'MILENIUM_DEPARTMENT_PURCHASES_PHONE',
-    targetDepartment: 'purchasing',
-  },
-  '3': {
-    label: 'Controladoria',
-    departmentPhoneEnv: 'MILENIUM_DEPARTMENT_CONTROLLING_PHONE',
-    targetDepartment: 'controlling',
-  },
-  '4': {
-    label: 'Departamento Pessoal',
-    departmentPhoneEnv: 'MILENIUM_DEPARTMENT_DP_PHONE',
-    targetDepartment: 'personnel-department',
-  },
-  '5': {
-    label: 'Financeiro',
-    departmentPhoneEnv: 'MILENIUM_DEPARTMENT_FINANCE_PHONE',
-    targetDepartment: 'financial',
-  },
-  '6': {
-    label: 'Gerência',
-    departmentPhoneEnv: 'MILENIUM_DEPARTMENT_MANAGEMENT_PHONE',
-    targetDepartment: 'management',
-  },
-  '7': {
-    label: 'Manutenção',
-    departmentPhoneEnv: 'MILENIUM_DEPARTMENT_MAINTENANCE_PHONE',
-    targetDepartment: 'maintenance',
-  },
-  '8': {
-    label: 'Monitoramento',
-    departmentPhoneEnv: 'MILENIUM_DEPARTMENT_MONITORING_PHONE',
-    targetDepartment: 'monitoring',
-  },
-  '9': {
-    label: 'Operacional',
-    departmentPhoneEnv: 'MILENIUM_DEPARTMENT_OPERATIONAL_PHONE',
-    targetDepartment: 'operations',
-  },
-} as const satisfies Readonly<
-  Record<
-    string,
-    {
-      label: string;
-      departmentPhoneEnv: string;
-      targetDepartment: Department;
-    }
-  >
->;
-
-export const COMMERCIAL_MENU = [
-  'Menu Comercial',
-  '',
-  'Informe a opção desejada:',
-  '1 - Solicitar orçamento de fretamento eventual',
-  '2 - Solicitar orçamento de fretamento contínuo',
-  '3 - Dúvida ou alteração',
-  '4 - Acompanhamento',
-  '5 - Documentos',
-  '6 - Outros assuntos comerciais',
-  '0 - Menu principal',
-].join('\n');
-
-export const COMMERCIAL_FOLLOW_UP_MENU = [
-  'Olá sou a Milena, assistente virtual da Milenium Transportes e identifiquei que você tem uma solicitação em andamento, por favor, responda com a opção desejada:',
-  '',
-  'Informe a opção desejada:',
-  '1. Verificar status do orçamento',
-  '2. Alterar dados do orçamento',
-  '3. Enviar documentação',
-  '4. Acompanhar viagem',
-  '0. Voltar para menu inicial',
-].join('\n');
-
 export const QUOTE_CONFIRMATION_MESSAGE =
-  'Orçamento confirmado. Encaminhei sua solicitação ao time Comercial. No próximo contato, você receberá o menu de acompanhamento da solicitação.';
-
-export const HUMAN_REASON_BY_OPTION: Readonly<Record<string, string>> = {
-  '3': 'commercial-question-or-change',
-  '4': 'commercial-follow-up',
-  '5': 'commercial-documents',
-  '6': 'other-commercial-subject',
-};
-
-export const FOLLOW_UP_HUMAN_REASON_BY_OPTION: Readonly<
-  Record<string, string>
-> = {
-  '1': 'quote-status-requested',
-  '2': 'quote-change-requested',
-  '3': 'quote-documentation',
-  '4': 'trip-follow-up',
-};
-
-export const FOLLOW_UP_HANDOFF_MESSAGE =
-  'Seu atendimento foi redirecionado para o time Comercial. Um especialista irá entrar em contato em breve.';
-
-export const INVALID_FOLLOW_UP_HANDOFF_MESSAGE =
-  'Não consegui identificar uma das opções disponíveis. Seu atendimento foi redirecionado para o time Comercial e um especialista irá entrar em contato em breve.';
+  'Dados do orçamento confirmados. Sua solicitação foi encaminhada ao time Comercial. Pode continuar a conversa por aqui sempre que precisar.';
 
 export type AutomationTopic =
   | 'whatsapp.inbound.persisted'
@@ -264,6 +145,7 @@ export interface AiProviderOutput {
   readonly priority?: ServicePriority;
   /** Auditable explanation for the orchestration priority. */
   readonly priorityReason?: string;
+  readonly targetDepartment?: Department;
 }
 
 export interface AiValidationResult {
@@ -397,40 +279,11 @@ export function decideAutomationPlan(input: {
     };
   }
 
-  if (currentConversation.departmentContactOption) {
-    return decideDepartmentContact(
-      currentConversation.departmentContactOption,
-      messageText,
-      envelope.payload.contact.phone,
-    );
-  }
-
-  if (
-    routingConversation.flowStep === 'commercial-follow-up-menu' &&
-    (envelope.payload.contextualTransition ||
-      currentConversation.followUpMenuPresentedAt === null)
-  ) {
-    return {
-      kind: 'static-reply',
-      responseMessage: COMMERCIAL_FOLLOW_UP_MENU,
-      transitionBeforeAi: null,
-      transitionAfterSend: null,
-      transitionMetadata: null,
-      aiMode: null,
-      reason: 'commercial-follow-up-menu-presented',
-      outboundPurpose: 'commercial-follow-up-menu',
-    };
-  }
-
-  if (routingConversation.flowStep === 'commercial-follow-up-menu') {
-    return decideCommercialFollowUpMenu(messageText);
-  }
-
   if (!messageText) {
     return {
       kind: 'static-reply',
       responseMessage:
-        'No MVP eu consigo processar texto, áudio já transcrito e texto extraído de imagem ou PDF. Por favor, descreva o conteúdo em uma mensagem de texto.',
+        'Não consegui identificar o conteúdo da mensagem. Pode me explicar o que precisa?',
       transitionBeforeAi: null,
       transitionAfterSend: null,
       transitionMetadata: null,
@@ -443,7 +296,8 @@ export function decideAutomationPlan(input: {
     case 'main-menu':
       return aiPlan('natural-service', null, 'natural-language-service');
     case 'commercial-menu':
-      return decideCommercialMenu(messageText);
+    case 'commercial-follow-up-menu':
+      return aiPlan('natural-service', null, 'contextual-commercial-service');
     case 'quote-data-collection':
       return aiPlan(
         resolveQuoteMode(routingConversation),
@@ -543,6 +397,13 @@ export function validateAiProviderOutput(value: unknown): AiValidationResult {
     errors.push('priorityReason deve possuir entre 1 e 500 caracteres');
   }
 
+  if (
+    output.targetDepartment !== undefined &&
+    !INTERNAL_DEPARTMENTS.includes(output.targetDepartment as never)
+  ) {
+    errors.push('targetDepartment é inválido');
+  }
+
   if (errors.length > 0) {
     return { valid: false, errors, output: null };
   }
@@ -559,6 +420,9 @@ export function validateAiProviderOutput(value: unknown): AiValidationResult {
       summaryPresented: output.summaryPresented as boolean,
       customerDecision:
         output.customerDecision as AiProviderOutput['customerDecision'],
+      ...(output.targetDepartment
+        ? { targetDepartment: output.targetDepartment as Department }
+        : {}),
       ...(hasPriority
         ? {
             priority: output.priority as ServicePriority,
@@ -815,164 +679,6 @@ export function redisConversationPrefix(input: {
   ].join(':');
 }
 
-export function decideMainMenu(
-  messageText: string,
-  conversation: AutomationConversation,
-): AutomationPlan {
-  const option = normalizedOption(messageText);
-
-  if (option === '1') {
-    const hasActiveQuote =
-      conversation.currentQuoteRequest != null &&
-      QUOTE_STATUSES_WITH_FOLLOW_UP_MENU.has(conversation.requestStatus);
-    return {
-      kind: 'static-reply',
-      responseMessage: hasActiveQuote
-        ? COMMERCIAL_FOLLOW_UP_MENU
-        : COMMERCIAL_MENU,
-      transitionBeforeAi: 'select-commercial',
-      transitionAfterSend: null,
-      transitionMetadata: null,
-      aiMode: null,
-      reason: hasActiveQuote
-        ? 'commercial-follow-up-selected'
-        : 'commercial-selected',
-      outboundPurpose: hasActiveQuote ? 'commercial-follow-up-menu' : null,
-    };
-  }
-
-  const department =
-    DEPARTMENT_CONTACTS[option as keyof typeof DEPARTMENT_CONTACTS];
-  if (department) {
-    return {
-      kind: 'static-reply',
-      responseMessage: DEPARTMENT_CONTACT_PROMPT,
-      transitionBeforeAi: 'start-department-contact',
-      transitionAfterSend: null,
-      transitionMetadata: {
-        targetDepartment: department.targetDepartment,
-        departmentOption: option,
-      },
-      aiMode: null,
-      reason: 'department-contact-requested',
-    };
-  }
-
-  return {
-    kind: 'static-reply',
-    responseMessage: /^\d+$/.test(option)
-      ? `Opção inválida.\n\n${MAIN_MENU}`
-      : MAIN_MENU,
-    transitionBeforeAi: null,
-    transitionAfterSend: null,
-    transitionMetadata: null,
-    aiMode: null,
-    reason: /^\d+$/.test(option)
-      ? 'invalid-main-menu-option'
-      : 'main-menu-prompt',
-  };
-}
-
-function decideCommercialMenu(messageText: string): AutomationPlan {
-  const option = normalizedOption(messageText);
-
-  if (option === '1') {
-    return aiPlan('eventual-quote', 'start-quote', 'start-eventual-quote');
-  }
-
-  if (option === '2') {
-    const directorContact =
-      DEPARTMENT_CONTACTS['commercial-continuous-director'];
-    return {
-      kind: 'static-reply',
-      responseMessage: DEPARTMENT_CONTACT_PROMPT,
-      transitionBeforeAi: 'start-department-contact',
-      transitionAfterSend: null,
-      transitionMetadata: {
-        targetDepartment: directorContact.targetDepartment,
-        departmentOption: 'commercial-continuous-director',
-      },
-      aiMode: null,
-      reason: 'continuous-quote-director-contact-requested',
-    };
-  }
-
-  if (HUMAN_REASON_BY_OPTION[option]) {
-    return {
-      kind: 'static-reply',
-      responseMessage: FOLLOW_UP_HANDOFF_MESSAGE,
-      transitionBeforeAi: null,
-      transitionAfterSend: 'forward',
-      transitionMetadata: {
-        targetDepartment: 'commercial',
-        reason: HUMAN_REASON_BY_OPTION[option],
-        historyAvailableInPanel: true,
-      },
-      aiMode: null,
-      reason: HUMAN_REASON_BY_OPTION[option],
-    };
-  }
-
-  if (option === '0') {
-    return {
-      kind: 'static-reply',
-      responseMessage: MAIN_MENU,
-      transitionBeforeAi: 'return-to-main-menu',
-      transitionAfterSend: null,
-      transitionMetadata: null,
-      aiMode: null,
-      reason: 'return-to-main-menu',
-      outboundPurpose: 'main-menu',
-    };
-  }
-
-  return {
-    kind: 'static-reply',
-    responseMessage: `Opção inválida.\n\n${COMMERCIAL_MENU}`,
-    transitionBeforeAi: null,
-    transitionAfterSend: null,
-    transitionMetadata: null,
-    aiMode: null,
-    reason: 'invalid-commercial-menu-option',
-  };
-}
-
-function decideCommercialFollowUpMenu(messageText: string): AutomationPlan {
-  const option = normalizedOption(messageText);
-
-  if (option === '0') {
-    return {
-      kind: 'static-reply',
-      responseMessage: MAIN_MENU,
-      transitionBeforeAi: 'return-to-main-menu',
-      transitionAfterSend: null,
-      transitionMetadata: null,
-      aiMode: null,
-      reason: 'return-to-main-menu',
-      outboundPurpose: 'main-menu',
-    };
-  }
-
-  const reason =
-    FOLLOW_UP_HUMAN_REASON_BY_OPTION[option] ??
-    'invalid-commercial-follow-up-option';
-  return {
-    kind: 'static-reply',
-    responseMessage: FOLLOW_UP_HUMAN_REASON_BY_OPTION[option]
-      ? FOLLOW_UP_HANDOFF_MESSAGE
-      : INVALID_FOLLOW_UP_HANDOFF_MESSAGE,
-    transitionBeforeAi: null,
-    transitionAfterSend: 'forward',
-    transitionMetadata: {
-      targetDepartment: 'commercial',
-      reason,
-      historyAvailableInPanel: true,
-    },
-    aiMode: null,
-    reason,
-  };
-}
-
 function aiPlan(
   aiMode: AiMode,
   transitionBeforeAi: TransitionName | null,
@@ -998,70 +704,6 @@ function suppressed(reason: string): AutomationPlan {
     transitionMetadata: null,
     aiMode: null,
     reason,
-  };
-}
-
-function normalizedOption(value: string): string {
-  const firstLine = value
-    .split(/\r?\n/)
-    .map((line) => line.trim().toLowerCase())
-    .find(Boolean);
-  return firstLine ?? '';
-}
-
-function decideDepartmentContact(
-  option: string,
-  messageText: string,
-  customerPhone: string,
-): AutomationPlan {
-  const department =
-    DEPARTMENT_CONTACTS[option as keyof typeof DEPARTMENT_CONTACTS];
-  if (!department) {
-    return {
-      kind: 'static-reply',
-      responseMessage: MAIN_MENU,
-      transitionBeforeAi: 'return-to-main-menu',
-      transitionAfterSend: null,
-      transitionMetadata: null,
-      aiMode: null,
-      reason: 'invalid-department-contact-state',
-      outboundPurpose: 'main-menu',
-    };
-  }
-
-  if (!messageText) {
-    return {
-      kind: 'static-reply',
-      responseMessage: DEPARTMENT_CONTACT_PROMPT,
-      transitionBeforeAi: null,
-      transitionAfterSend: null,
-      transitionMetadata: null,
-      aiMode: null,
-      reason: 'department-contact-text-required',
-    };
-  }
-
-  return {
-    kind: 'static-reply',
-    responseMessage: [
-      'Novo contato recebido pelo atendimento virtual.',
-      `Departamento: ${department.label}`,
-      `Telefone do cliente: ${customerPhone}`,
-      `Nome e motivo informado: ${messageText}`,
-      'Por favor, retorne o contato',
-    ].join('\n'),
-    transitionBeforeAi: null,
-    transitionAfterSend: 'return-to-main-menu',
-    transitionMetadata: {
-      targetDepartment: department.targetDepartment,
-      departmentOption: option,
-      reason: 'department-contact-forwarded',
-      historyAvailableInPanel: true,
-    },
-    aiMode: null,
-    reason: 'department-contact-forwarded',
-    outboundPurpose: 'department-notification',
-    outboundRecipientPhoneEnv: department.departmentPhoneEnv,
   };
 }
 

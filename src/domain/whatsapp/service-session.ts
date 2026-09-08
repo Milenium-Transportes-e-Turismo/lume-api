@@ -196,11 +196,6 @@ export function evolveServiceSession(
       const queueId = command.queueId
         ? requireNonEmpty(command.queueId, 'Fila')
         : null;
-      if (userId === null && queueId === null) {
-        throw validationError(
-          'Informe uma fila ou um responsável para a transferência.',
-        );
-      }
       return next(snapshot, {
         currentDepartmentId: requireNonEmpty(
           command.departmentId,

@@ -8,7 +8,7 @@ A Tenant API é a única responsável pelo fluxo de WhatsApp. O módulo concentr
 - deduplicação, persistência e ordenação de eventos;
 - conversa canônica por empresa, canal e número;
 - mensagens, anexos, histórico e estado do atendimento;
-- menus, automação comercial e integração com IA;
+- atendimento contextual, automação comercial e integração com IA;
 - envio de mensagens e propostas em PDF pela Evolution;
 - recuperação autenticada de imagens, áudios, vídeos, figurinhas e documentos.
 
@@ -380,3 +380,20 @@ HUMAN_REQUIRED em metadados da interpretação não significa que o cliente
 solicitou atendimento humano. A orientação do orquestrador distingue esse
 marcador de um pedido real; quando o orquestrador solicita handoff e o agente
 continua perguntando, a resposta final torna-se um aviso de encaminhamento.
+
+## Atendimento contextual, transferência e mídia
+
+O atendimento automático não apresenta mais menus numéricos. Mensagens após a
+confirmação do orçamento passam pelos agentes com histórico e dados persistidos,
+sem reiniciar a coleta. As etapas legadas com nome de menu continuam legíveis no
+banco, mas não emitem listas de opções. A confirmação da coleta também não
+promete menus futuros. O agente responde somente dentro de suas permissões e
+encaminha decisões humanas; o departamento sugerido é validado contra os códigos
+internos, e a transferência continua sujeita às validações do tenant. Por exemplo,
+pagamento de uma viagem realizada pode ser encaminhado ao Financeiro.
+
+A transferência de ServiceSession aceita somente departmentId. Fila e responsável
+são opcionais: quando ausentes, o atendimento aguarda a equipe de destino sob
+controle humano, sem herdar a atribuição anterior. Isolamento, versão, auditoria e
+idempotência permanecem obrigatórios. O aviso automático de encaminhamento usa o
+outbox existente; não há envio paralelo.

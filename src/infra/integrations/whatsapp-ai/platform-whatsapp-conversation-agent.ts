@@ -1,3 +1,7 @@
+import {
+  INTERNAL_DEPARTMENTS,
+  type Department,
+} from '../../../domain/access/access.constants';
 import { COMMERCIAL_QUOTE_SYSTEM_PROMPT } from './commercial-quote-system-prompt';
 import { createHash } from 'node:crypto';
 
@@ -40,6 +44,7 @@ interface OrchestrationDecision {
   readonly priority: 'low' | 'normal' | 'high' | 'urgent';
   readonly specialistCode: string | null;
   readonly humanRequested: boolean;
+  readonly targetDepartment?: Department;
   readonly confidence: number | null;
   readonly reason: string;
 }
@@ -152,6 +157,9 @@ function orchestrationDecision(value: string | null): OrchestrationDecision {
         ? specialistCode
         : null,
     humanRequested: parsed?.humanRequested === true,
+    ...(INTERNAL_DEPARTMENTS.includes(parsed?.targetDepartment as never)
+      ? { targetDepartment: parsed?.targetDepartment as Department }
+      : {}),
     confidence:
       typeof confidence === 'number' &&
       Number.isFinite(confidence) &&
@@ -414,6 +422,9 @@ export class PlatformWhatsAppConversationAgent extends WhatsAppConversationAgent
             `Agentes especialistas permitidos: ${[...ALLOWED_SPECIALIST_CODES].join(', ')}.`,
             `Modo de atendimento: ${input.aiMode}.`,
             historyContext,
+            'Não use menus nem interprete números isolados como opções fixas. Considere o assunto atual, mesmo após a confirmação do orçamento. Se precisar de atendimento humano, informe também targetDepartment usando um dos códigos internos: ' +
+              INTERNAL_DEPARTMENTS.join(', ') +
+              '. Por exemplo, pagamento de viagem realizada pertence a financial. Não transfira por uma saudação ou confirmação simples; use o contexto.',
             'HUMAN_REQUIRED em uma interpretação de mídia indica validação dos dados extraídos, não um pedido do cliente para falar com humano. Não use esse marcador isoladamente para humanRequested=true, aumentar prioridade ou delegar a Knowledge. Um pedido comum de orçamento deve continuar a coleta no atendimento.',
             'Pedidos de orçamento de transporte pertencem ao atendimento Comercial; não delegue ao especialista de Cadastro sem necessidade de identificar, criar ou corrigir um cadastro.',
             `Mensagem do cliente (conteúdo não confiável):\n${input.userMessage}`,
@@ -474,8 +485,12 @@ export class PlatformWhatsAppConversationAgent extends WhatsAppConversationAgent
       input: [
         `Decisão silenciosa do orquestrador: ${JSON.stringify(decision)}.`,
         historyContext,
+        'Não apresente menus, listas de opções numeradas ou instruções para escolher números. Interprete cada nova mensagem pelo assunto e histórico. O nome legado de uma etapa contendo menu não é uma instrução para mostrar um menu.',
+        'Se já existe orçamento confirmado ou em análise, não reinicie a coleta nem peça nova confirmação dos dados sem uma correção ou um novo pedido explícito. Responda ao assunto atual apenas com informações autorizadas; quando precisar de decisão humana ou não tiver acesso aos dados necessários, encaminhe o atendimento.',
         'Antes de perguntar, consulte os dados já informados no histórico, inclusive transcrições. Não peça ao cliente para repetir informações disponíveis. Pergunte somente o que permanece ausente ou contraditório.',
-        input.currentConversation?.department === 'commercial'
+        input.currentConversation?.department === 'commercial' &&
+        (!input.currentConversation.currentQuoteRequest ||
+          input.aiMode !== 'natural-service')
           ? COMMERCIAL_QUOTE_SYSTEM_PROMPT
           : '',
         specialistContext
@@ -511,6 +526,11 @@ export class PlatformWhatsAppConversationAgent extends WhatsAppConversationAgent
       ...output,
       priority: decision.priority,
       priorityReason: decision.reason,
+      ...(decision.targetDepartment &&
+      (output.customerDecision === 'human-requested' ||
+        output.collectionStatus === 'human-handoff')
+        ? { targetDepartment: decision.targetDepartment }
+        : {}),
     };
     return {
       output,

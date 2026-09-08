@@ -483,6 +483,81 @@ describe('ApiWhatsAppAutomationProvider', () => {
     );
   });
 
+  it('analisa pagamento após orçamento e encaminha ao Financeiro sem emitir menu ou reiniciar coleta', async () => {
+    const text =
+      'Quero falar sobre o pagamento de uma viagem de quinze dias atrás';
+    const current = conversation({
+      mainMenuPresentedAt: '2026-08-06T11:00:00.000Z',
+      flowStep: 'commercial-follow-up-menu',
+      requestStatus: 'under-review',
+      currentQuoteRequest: {
+        id: '00000000-0000-4000-8000-000000000095',
+        version: 3,
+        status: 'under-review',
+        sequence: 1,
+        origin: 'Uberlândia',
+        destination: 'Goiânia',
+      },
+    });
+    const { subject, repository, agent, evolution } = createSubject({
+      repository: {
+        getAutomationBatch: vi.fn(async () => ({
+          conversation: current,
+          batch: {
+            messages: [
+              {
+                sourceEventId: 'evolution:source-1',
+                messageId: ids.message,
+                occurredAt: '2026-08-06T12:00:00.000Z',
+                persistedAt: '2026-08-06T12:00:00.000Z',
+                kind: 'text',
+                text,
+              },
+            ],
+          },
+        })),
+      },
+    });
+    agent.complete.mockResolvedValueOnce({
+      provider: 'openai',
+      model: 'test',
+      attempt: 1,
+      output: {
+        message: 'Vou encaminhar seu atendimento ao Financeiro.',
+        collectionStatus: 'human-handoff',
+        customerDecision: 'human-requested',
+        targetDepartment: 'financial',
+        extractedDataPatch: {},
+        missingFields: [],
+        summaryPresented: false,
+      },
+    });
+    await subject.execute(
+      event('whatsapp.inbound.persisted', {
+        isFirstContact: false,
+        conversation: current,
+      }),
+    );
+    expect(agent.complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        aiMode: 'natural-service',
+        userMessage: text,
+        currentConversation: expect.objectContaining({
+          currentQuoteRequest: current.currentQuoteRequest,
+        }),
+      }),
+    );
+    expect(repository.transition).toHaveBeenCalledTimes(1);
+    expect(repository.transition).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'forward',
+        metadata: expect.objectContaining({ targetDepartment: 'financial' }),
+      }),
+    );
+    expect(repository.createOutbound).not.toHaveBeenCalled();
+    expect(evolution.send).not.toHaveBeenCalled();
+  });
+
   it('persists the structured natural-service completion for the formal lifecycle', async () => {
     const { subject, repository, agent } = createSubject();
     agent.complete.mockResolvedValueOnce({

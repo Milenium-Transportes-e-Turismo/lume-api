@@ -471,7 +471,8 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
       transitionMetadata =
         actions.transitionAfterSend === 'forward'
           ? {
-              targetDepartment: conversation.department,
+              targetDepartment:
+                aiResult.output.targetDepartment ?? conversation.department,
               reason: transitionReason,
               historyAvailableInPanel: true,
             }
