@@ -2183,9 +2183,13 @@ export class DocumentManagementUseCase {
         { subjectRegistrationId: { not: null } },
         { subject: { deletedAt: null } },
       ],
-      ...(!canManage ? { subjectUserId: principal.id } : {}),
-      ...(query.subjectUserId && canManage
-        ? { subjectUserId: query.subjectUserId }
+      ...(!canManage || query.subjectUserId
+        ? {
+            AND: this.subjectOwnershipWhere(
+              principal.companyId,
+              canManage ? query.subjectUserId! : principal.id,
+            ),
+          }
         : {}),
       ...(query.status ? { status: requestStatusToPrisma[query.status] } : {}),
       ...(query.context
@@ -2523,7 +2527,7 @@ export class DocumentManagementUseCase {
       },
     });
     if (!item) throw notFound('Item documental');
-    this.assertOwnOrManage(principal, item.request.subjectUserId);
+    await this.assertOwnOrManage(principal, item.request);
     const currentStatus = itemStatusFromPrisma[item.status];
     if (
       ![
@@ -2730,10 +2734,7 @@ export class DocumentManagementUseCase {
       },
     });
     if (!submission) throw notFound('Envio documental');
-    this.assertOwnOrManage(
-      principal,
-      submission.requestItem.request.subjectUserId,
-    );
+    await this.assertOwnOrManage(principal, submission.requestItem.request);
     if (submission.validation?.status === DocumentValidationStatus.COMPLETED) {
       return {
         request: await this.getRequestById(
@@ -3008,10 +3009,7 @@ export class DocumentManagementUseCase {
       },
     });
     if (!submission) throw notFound('Envio documental');
-    this.assertOwnOrManage(
-      principal,
-      submission.requestItem.request.subjectUserId,
-    );
+    await this.assertOwnOrManage(principal, submission.requestItem.request);
     if (submission.version !== submission.requestItem.currentVersion) {
       throw conflict('Somente o envio atual pode ser removido.');
     }
@@ -3670,9 +3668,9 @@ export class DocumentManagementUseCase {
       },
     });
     if (!file || file.deletedAt) throw notFound('Arquivo documental');
-    this.assertOwnOrManage(
+    await this.assertOwnOrManage(
       principal,
-      file.submission.requestItem.request.subjectUserId,
+      file.submission.requestItem.request,
     );
     await this.audit(
       principal,
@@ -3719,7 +3717,14 @@ export class DocumentManagementUseCase {
         companyId: principal.companyId,
         status: PrismaDocumentItemStatus.APPROVED,
         validUntil: { gte: now, lte: until },
-        ...(!canManage ? { request: { subjectUserId: principal.id } } : {}),
+        ...(!canManage
+          ? {
+              request: this.subjectOwnershipWhere(
+                principal.companyId,
+                principal.id,
+              ),
+            }
+          : {}),
       },
       include: {
         documentType: {
@@ -4217,15 +4222,51 @@ export class DocumentManagementUseCase {
       include: requestDetailInclude,
     });
     if (!row) throw notFound('Solicitação documental');
-    this.assertOwnOrManage(principal, row.subjectUserId);
+    await this.assertOwnOrManage(principal, row);
     return presentRequest(row);
   }
 
-  private assertOwnOrManage(
+  private subjectOwnershipWhere(
+    companyId: string,
+    userId: string,
+  ): Prisma.DocumentRequestWhereInput {
+    return {
+      OR: [
+        { subjectUserId: userId, subject: { deletedAt: null } },
+        {
+          subjectRegistration: {
+            personUsers: { some: { id: userId, companyId, deletedAt: null } },
+          },
+        },
+      ],
+    };
+  }
+
+  private async assertOwnOrManage(
     principal: AuthenticatedPrincipal,
-    subjectUserId: string | null,
-  ): void {
-    if (principal.id === subjectUserId) return;
+    subject: {
+      subjectUserId: string | null;
+      subjectRegistrationId?: string | null;
+    },
+  ): Promise<void> {
+    if (principal.id === subject.subjectUserId) return;
+    if (
+      hasPeopleOperationsScope(principal) &&
+      canExercisePermission(principal, 'documents:manage')
+    )
+      return;
+    if (subject.subjectRegistrationId) {
+      const owner = await this.prisma.user.findFirst({
+        where: {
+          id: principal.id,
+          companyId: principal.companyId,
+          deletedAt: null,
+          personRegistrationId: subject.subjectRegistrationId,
+        },
+        select: { id: true },
+      });
+      if (owner) return;
+    }
     assertManage(principal);
   }
 

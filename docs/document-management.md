@@ -1,12 +1,13 @@
 # Gestão documental
 
 O módulo atende admissão, atualização, renovação, regularização, desligamento e
-outras solicitações. No modelo legado executável, a solicitação ainda é
-vinculada ao tenant e a um `User`. O modelo alvo aprovado usa um Titular
-Principal genérico — Pessoa, Empresa, Vínculo de Trabalho, Candidato, veículo,
-contrato, orçamento ou viagem — sem criar usuários fictícios. Até a migration e
-as mutações de titularidade serem ativadas, documentos legados ambíguos
-permanecem não classificados e disponíveis para revisão humana.
+outras solicitações. As solicitações podem ser vinculadas ao Cadastro por
+subjectRegistrationId ou, por compatibilidade, à conta por subjectUserId,
+sempre dentro do tenant. O portal pessoal reconhece a associação auditada
+User.personRegistrationId para apresentar solicitações do Cadastro sem criar
+usuários fictícios nem duplicar documentos. O modelo alvo de Titular Principal
+genérico também prevê vínculos de trabalho, veículos, contratos, orçamentos e
+viagens; documentos legados ambíguos continuam disponíveis para revisão humana.
 
 ## Segurança e acesso
 
@@ -209,3 +210,7 @@ Para habilitar OpenAI, as três configurações são obrigatórias e independent
 validador estrutural local. Reinicie a API depois de alterar o ambiente.
 
 O bootstrap pode ser repetido e cria somente registros iniciais ausentes.
+
+## Titularidade no portal pessoal
+
+Meus documentos inclui solicitações vinculadas diretamente à conta e solicitações vinculadas ao Cadastro por meio da associação pessoal persistida em User.personRegistrationId. A mesma titularidade é verificada na abertura, envio, conclusão, remoção e download dos arquivos, no histórico e nos vencimentos. A associação deve pertencer à mesma empresa e a uma conta não excluída. O vínculo organizacional routingCompanyId, nomes ou e-mails semelhantes não concedem acesso pessoal. Contas legadas sem associação devem ser vinculadas pelo fluxo auditado de associação de pessoa; a correspondência automática exige CPF exato e único.

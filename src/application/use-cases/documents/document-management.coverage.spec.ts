@@ -1355,7 +1355,22 @@ describe('DocumentManagementUseCase queries and renewal', () => {
       30,
     );
     expect(findMany.mock.calls[1][0].where).toMatchObject({
-      request: { subjectUserId: 'subject-id' },
+      request: {
+        OR: [
+          { subjectUserId: 'subject-id', subject: { deletedAt: null } },
+          {
+            subjectRegistration: {
+              personUsers: {
+                some: {
+                  id: 'subject-id',
+                  companyId: 'company-id',
+                  deletedAt: null,
+                },
+              },
+            },
+          },
+        ],
+      },
     });
   });
 

@@ -14,6 +14,8 @@ import ExcelJS, { type Worksheet } from 'exceljs';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { DocumentManagementUseCase } from '../src/application/use-cases/documents/document-management.use-case';
+import type { AuthenticatedPrincipal } from '../src/application/presenters/user.presenter';
 import { AccessTokenService } from '../src/application/contracts/cryptography';
 import {
   CommercialQuoteRepository,
@@ -774,6 +776,58 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     });
     expect(persisted.subjectUserId).toBeNull();
     expect(persisted.subjectRegistrationId).toBe(created.body.id);
+    const portalName = 'docs-' + randomUUID().slice(0, 8);
+    const portalUser = await prisma.user.create({
+      data: {
+        companyId: persisted.companyId,
+        name: 'Titular documental',
+        username: portalName,
+        usernameNormalized: portalName,
+        email: portalName + '@example.com',
+        emailNormalized: portalName + '@example.com',
+        passwordHash: 'unused-test-account',
+        personRegistrationId: created.body.id,
+      },
+    });
+    const portal = {
+      id: portalUser.id,
+      companyId: persisted.companyId,
+      isAdministrator: false,
+      departments: [],
+      permissions: ['documents:view'],
+    } as unknown as AuthenticatedPrincipal;
+    const documents = app.get(DocumentManagementUseCase);
+    const own = await documents.listRequests(portal, {
+      page: 1,
+      pageSize: 20,
+      subjectUserId: randomUUID(),
+    });
+    expect(own.data.map((row) => row.id)).toContain(persisted.id);
+    await expect(
+      documents.getRequest(portal, persisted.id),
+    ).resolves.toBeDefined();
+    await expect(
+      documents.getRequest(
+        {
+          ...portal,
+          id: randomUUID(),
+        },
+        persisted.id,
+      ),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await prisma.user.update({
+      where: { id: portalUser.id },
+      data: { personRegistrationId: null, routingCompanyId: created.body.id },
+    });
+    const unrelated = await documents.listRequests(portal, {
+      page: 1,
+      pageSize: 20,
+    });
+    expect(unrelated.data.map((row) => row.id)).not.toContain(persisted.id);
+    await expect(
+      documents.getRequest(portal, persisted.id),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
     await request(app.getHttpServer())
       .get('/api/v1/document-management/requests/' + persisted.id)
       .set('authorization', auth)
