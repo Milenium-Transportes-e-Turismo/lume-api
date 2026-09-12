@@ -55,8 +55,8 @@ describe('matriz MVP de conversas WhatsApp', () => {
       requestStatus: 'collecting-information',
     });
     expect(confirmed).toMatchObject({
-      conversationState: 'bot-active',
-      flowStep: 'commercial-follow-up-menu',
+      conversationState: 'sent-to-human',
+      flowStep: 'human-service',
       requestStatus: 'under-review',
     });
     expect(confirmed.conversationState).not.toBe('closed');
@@ -99,8 +99,8 @@ describe('matriz MVP de conversas WhatsApp', () => {
       resumeState: null,
     });
     expect(transition(resumed, 'confirm-quote')).toMatchObject({
-      conversationState: 'bot-active',
-      flowStep: 'commercial-follow-up-menu',
+      conversationState: 'sent-to-human',
+      flowStep: 'human-service',
     });
   });
 
@@ -157,9 +157,10 @@ describe('matriz MVP de conversas WhatsApp', () => {
     expect(() => transition(initial, 'confirm-quote')).toThrow(
       'resumo de orçamento',
     );
-    expect(() => transition(initial, 'new-quote-request')).toThrow(
-      'menu comercial de acompanhamento',
-    );
+    expect(transition(initial, 'new-quote-request')).toMatchObject({
+      requestStatus: 'collecting-information',
+      flowStep: 'quote-data-collection',
+    });
   });
 
   it('registra a coleta de dados antes do encaminhamento de um departamento', () => {

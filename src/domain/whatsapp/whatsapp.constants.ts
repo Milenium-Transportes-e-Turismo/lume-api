@@ -66,6 +66,7 @@ export const TRANSITION_NAMES = [
   'proposal-delivery-confirmed',
   'proposal-response-received',
   'new-quote-request',
+  'start-assisted-quote',
   'return-to-main-menu',
   'take-over',
   'request-transfer',

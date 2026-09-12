@@ -1,3 +1,4 @@
+import { assertTransportSupplierChange } from '../prisma/assert-transport-supplier-change';
 import { createHash, randomUUID } from 'node:crypto';
 
 import { Injectable } from '@nestjs/common';
@@ -1943,6 +1944,15 @@ export class PrismaConversationRegistrationRepository extends ConversationRegist
               'Este campo organizacional ainda não possui aplicação segura no Cadastro.',
             );
         }
+        await assertTransportSupplierChange(transaction, {
+          companyId: input.companyId,
+          registrationId: review.registrationId,
+          actorUserId: input.actorUserId,
+          beforeCnpj: before.cnpj,
+          cnpj: updates.cnpj as string | undefined,
+          beforeType: before.clientType,
+          beforeStatus: before.status,
+        });
         const changed = await transaction.routingCompany.updateMany({
           where: {
             id: review.registrationId,

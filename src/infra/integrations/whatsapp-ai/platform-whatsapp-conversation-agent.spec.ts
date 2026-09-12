@@ -1,3 +1,4 @@
+import type { TourismIntakeReviewService } from './tourism-intake-review.service';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { RunAgentExecutionUseCase } from '../../../application/use-cases/agents/run-agent-execution.use-case';
@@ -85,11 +86,21 @@ function createSubject(
       findFirst: vi.fn().mockResolvedValue(null),
     },
     agentExecution: { findFirst: vi.fn().mockResolvedValue(null) },
+    quoteRequest: { findFirst: vi.fn().mockResolvedValue(null) },
   };
   return {
     subject: new PlatformWhatsAppConversationAgent(
       prisma as unknown as PrismaService,
       { execute } as unknown as RunAgentExecutionUseCase,
+      {
+        fleetContext: vi.fn().mockResolvedValue({
+          maximumPassengers: 46,
+          source: 'default',
+          capacities: [],
+        }),
+        prompt: vi.fn().mockReturnValue('Validar turismo antes de encaminhar.'),
+        review: vi.fn().mockImplementation(async (_input, output) => output),
+      } as unknown as TourismIntakeReviewService,
     ),
     prisma,
   };
@@ -550,4 +561,295 @@ it('envia o resumo anterior e a confirmação curta aos agentes sem reiniciar o 
       }),
     }),
   );
+});
+
+it('runs classifier and orchestrator silently and never invokes Milena or specialists under human control', async () => {
+  const execute = vi
+    .fn()
+    .mockResolvedValueOnce({
+      ...completed,
+      executionId: 'continuity-execution',
+      outputText: JSON.stringify({
+        classification: 'NEW_SUBJECT',
+        confidence: 0.95,
+        reason: 'Novo orçamento solicitado',
+        targetDepartmentCode: 'commercial',
+      }),
+    })
+    .mockResolvedValueOnce({
+      ...completed,
+      executionId: 'orchestrator-execution',
+      outputText: JSON.stringify({
+        intent: 'new-quote',
+        priority: 'normal',
+        targetDepartment: 'commercial',
+        reason: 'Pedido de nova coleta',
+      }),
+    });
+  const { subject, prisma } = createSubject(execute);
+  prisma.lumeAgent.findFirst
+    .mockResolvedValueOnce({ id: 'agent-continuity' })
+    .mockResolvedValueOnce({ id: 'agent-orchestrator' });
+  const result = await subject.observeHumanConversation(continuityInput);
+  expect(result.continuity.classification).toBe('new-subject');
+  expect(execute).toHaveBeenCalledTimes(2);
+  for (const [command] of execute.mock.calls) {
+    expect(command.observationOnly).toBe(true);
+    expect(['agent-continuity', 'agent-orchestrator']).toContain(
+      command.agentId,
+    );
+  }
+});
+
+describe('financial handoff regression after a pending quote', () => {
+  const message =
+    'Não consigo consultar as parcelas pendentes por aqui. Vou encaminhar sua solicitação ao time responsável para verificarem o pagamento da sua última viagem.';
+  it.each(['under-review', 'approved', 'rejected'] as const)(
+    'routes the actual completed/undecided reply without inheriting the %s quote department',
+    async (status) => {
+      const execute = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ...completed,
+          executionId: 'classification',
+          outputText: JSON.stringify({
+            intent: 'payment_installment_inquiry',
+            priority: 'normal',
+            humanRequested: false,
+            reason: 'Dúvida financeira sobre parcelas de viagem.',
+          }),
+        })
+        .mockResolvedValueOnce({
+          ...completed,
+          executionId: 'service',
+          outputText: JSON.stringify({
+            ...JSON.parse(customerJson(message)),
+            collectionStatus: 'completed',
+          }),
+        })
+        .mockResolvedValueOnce({
+          ...completed,
+          executionId: 'routing',
+          outputText: JSON.stringify({ targetDepartment: 'financial' }),
+        });
+      const { subject } = createSubject(execute);
+      const quote = {
+        id: 'existing-quote',
+        version: 3,
+        sequence: 1,
+        status,
+        origin: 'Uberlândia',
+        destination: 'Jataí',
+      };
+      const result = await subject.complete({
+        ...input,
+        userMessage: 'Quantas parcelas faltam para pagar minha última viagem?',
+        currentConversation: {
+          id: input.conversationId,
+          department: 'commercial',
+          version: 9,
+          conversationState: 'bot-active',
+          flowStep: 'main-menu',
+          requestStatus: status,
+          resumeState: null,
+          currentQuoteRequest: quote,
+        },
+      });
+      expect(result.output).toMatchObject({
+        message,
+        collectionStatus: 'human-handoff',
+        customerDecision: 'human-requested',
+        targetDepartment: 'financial',
+        priority: 'normal',
+      });
+      expect(execute).toHaveBeenCalledTimes(3);
+      expect(execute.mock.calls[2][0]).toMatchObject({
+        agentId: 'agent-orchestrator',
+        parentExecutionId: 'classification',
+        input: expect.stringContaining('Quantas parcelas faltam'),
+      });
+    },
+  );
+  it.each([undefined, 'unknown-department'])(
+    'rejects an unstructured promise if routing has no valid destination: %s',
+    async (targetDepartment) => {
+      const execute = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ...completed,
+          executionId: 'classification',
+          outputText: '{}',
+        })
+        .mockResolvedValueOnce({
+          ...completed,
+          executionId: 'service',
+          outputText: JSON.stringify({
+            ...JSON.parse(customerJson(message)),
+            collectionStatus: 'completed',
+          }),
+        })
+        .mockResolvedValueOnce({
+          ...completed,
+          executionId: 'routing',
+          outputText: JSON.stringify({ targetDepartment }),
+        });
+      await expect(
+        createSubject(execute).subject.complete(input),
+      ).rejects.toThrow('departamento válido');
+    },
+  );
+});
+
+describe('continuing a new quote without restarting the relationship', () => {
+  const currentConversation = {
+    id: input.conversationId,
+    department: 'commercial' as const,
+    version: 12,
+    conversationState: 'bot-active' as const,
+    flowStep: 'quote-data-collection' as const,
+    requestStatus: 'collecting-information' as const,
+    resumeState: null,
+    currentQuoteRequest: {
+      id: 'new-quote',
+      sequence: 2,
+      version: 1,
+      status: 'collecting-information' as const,
+      contactName: null as string | null,
+      structuredData: { intakeStartedAt: '2026-09-11T06:22:21Z' },
+    },
+  };
+  it.each([null, 'Taiane'])(
+    'uses known responsibility without exposing a prior trip (stored name %s)',
+    async (contactName) => {
+      const execute = vi.fn().mockResolvedValue({
+        ...completed,
+        executionId: 'continuation',
+        outputText: JSON.stringify({
+          ...JSON.parse(
+            customerJson(
+              'Vamos preparar outro orçamento. Para qual data será a viagem?',
+            ),
+          ),
+          missingFields: ['contactName', 'departureAt'],
+        }),
+      });
+      const { subject, prisma } = createSubject(execute);
+      prisma.quoteRequest.findFirst.mockResolvedValue({
+        contactName: 'Taiane',
+      });
+      const result = await subject.complete({
+        ...input,
+        aiMode: 'eventual-quote',
+        userMessage: 'Quero outro orçamento',
+        currentConversation: {
+          ...currentConversation,
+          currentQuoteRequest: {
+            ...currentConversation.currentQuoteRequest,
+            contactName,
+          },
+        },
+      });
+      const serviceCall = execute.mock.calls.find(
+        ([call]) => call.agentId === 'agent-service',
+      )![0];
+      expect(serviceCall.input).toContain('Não é primeiro contato');
+      expect(serviceCall.input).toContain('não pergunte novamente o nome');
+      expect(serviceCall.input).toContain('"contactName":"Taiane"');
+      expect(result.output.missingFields).not.toContain('contactName');
+      if (contactName)
+        expect(prisma.quoteRequest.findFirst).not.toHaveBeenCalled();
+      else {
+        expect(result.output.extractedDataPatch.contactName).toBe('Taiane');
+        expect(prisma.quoteRequest.findFirst).toHaveBeenCalledWith({
+          where: {
+            companyId: input.companyId,
+            conversationId: input.conversationId,
+            sequence: { lt: 2 },
+            contactName: { not: null },
+          },
+          orderBy: { sequence: 'desc' },
+          select: { contactName: true },
+        });
+      }
+      expect(prisma.whatsAppMessage.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            companyId: input.companyId,
+            conversationId: input.conversationId,
+            serviceSessionId: input.serviceSessionId,
+            occurredAt: { gte: new Date('2026-09-11T06:22:21Z') },
+          }),
+        }),
+      );
+    },
+  );
+  it('does not invent a responsible name or treat a first quote as a return', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      ...completed,
+      executionId: 'first-quote',
+      outputText: customerJson(),
+    });
+    const { subject, prisma } = createSubject(execute);
+    const result = await subject.complete({
+      ...input,
+      aiMode: 'eventual-quote',
+      currentConversation: {
+        ...currentConversation,
+        currentQuoteRequest: {
+          ...currentConversation.currentQuoteRequest,
+          sequence: 1,
+        },
+      },
+    });
+    expect(prisma.quoteRequest.findFirst).not.toHaveBeenCalled();
+    expect(result.output.extractedDataPatch.contactName).toBeUndefined();
+    expect(
+      execute.mock.calls.find(([call]) => call.agentId === 'agent-service')![0]
+        .input,
+    ).not.toContain('Não é primeiro contato');
+  });
+  it('does not restart collection while discussing another subject after a second quote', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      ...completed,
+      executionId: 'financial-topic',
+      outputText: customerJson(),
+    });
+    const { subject, prisma } = createSubject(execute);
+    await subject.complete({
+      ...input,
+      aiMode: 'natural-service',
+      userMessage: 'Tenho uma dúvida financeira',
+      currentConversation: {
+        ...currentConversation,
+        currentQuoteRequest: {
+          ...currentConversation.currentQuoteRequest,
+          status: 'under-review',
+        },
+      },
+    });
+    expect(prisma.quoteRequest.findFirst).not.toHaveBeenCalled();
+    expect(
+      execute.mock.calls.find(([call]) => call.agentId === 'agent-service')![0]
+        .input,
+    ).not.toContain('Não é primeiro contato');
+  });
+  it('preserves an explicit change of responsible person', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      ...completed,
+      executionId: 'new-responsible',
+      outputText: JSON.stringify({
+        ...JSON.parse(customerJson()),
+        extractedDataPatch: { contactName: 'Marina' },
+      }),
+    });
+    const { subject, prisma } = createSubject(execute);
+    prisma.quoteRequest.findFirst.mockResolvedValue({ contactName: 'Taiane' });
+    const result = await subject.complete({
+      ...input,
+      aiMode: 'eventual-quote',
+      userMessage: 'Meu nome é Marina, sou a nova responsável.',
+      currentConversation,
+    });
+    expect(result.output.extractedDataPatch.contactName).toBe('Marina');
+  });
 });

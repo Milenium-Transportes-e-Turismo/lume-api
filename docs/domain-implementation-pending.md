@@ -73,7 +73,9 @@ concorrência otimista, histórico e auditoria na mesma transação.
 
 O endpoint público apenas valida o token e apresenta o escopo solicitado. Ele
 não recebe arquivos e responde `uploadAvailable=false`, porque o legado ainda
-obriga `subjectUserId`, `submittedByUserId` e `uploadedByUserId`. A próxima
+depende de autoria e autorização do upload vinculadas ao usuário. Solicitações
+por `subjectRegistrationId` já permitem titular PF/PJ sem conta; isso não libera
+a ingestão pública de arquivos por link de pré-admissão. A próxima
 etapa deve conectar o Titular Principal genérico ao fluxo e ao armazenamento
 documental existentes, sem criar `User` temporário e sem persistir bytes em uma
 esteira paralela.
@@ -166,8 +168,11 @@ acesso é migrado, sem transformar Plano de Rota na fonte da operação.
 ## Atendimento e transferências
 
 **Estado**: fluxo explícito de solicitação/aceite e política de atendimento
-transversal implementados na API; a integração correspondente no Tenant Web
-ainda precisa consumir o contrato publicado.
+transversal implementados na API. A Web atual já usa os comandos nativos de
+`/api/v1/service/sessions`, o snapshot de capacidades e sugestões privadas.
+A solicitação/aceite descrita abaixo permanece como contrato de compatibilidade;
+não substitui o comando nativo de transferência de sessão. Consulte
+[contratos atuais](tenant-web-contract-readiness.md).
 
 Uma transferência registra destino e motivo, mas mantém o atendimento ativo e
 o departamento de origem até o aceite. A pendência aparece na fila do destino e
@@ -252,3 +257,11 @@ chave. Falhas ambíguas continuam preservando o blob para não apagar uma mídia
 que possa ter sido confirmada. Antes de produção com alto volume, falta o job
 de reconciliação/quota para remover somente blobs comprovadamente órfãos de
 comandos distintos, sem depender de limpeza síncrona insegura.
+
+## Titular cadastral e classificação genérica
+
+Solicitações documentais já aceitam `subjectRegistrationId` para PF/PJ e preservam
+`subjectUserId` como compatibilidade. A associação pessoal autorizada também é
+considerada em Meus documentos. Isso é distinto da classificação genérica por
+envio descrita acima: titularidade de veículo, contrato, orçamento e viagem,
+relações secundárias e ingestão pública de pré-admissão ainda exigem evolução.

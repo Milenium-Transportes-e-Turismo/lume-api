@@ -54,6 +54,7 @@ export interface WhatsAppContinuityClassificationInput {
   readonly previousMessages: readonly WhatsAppContinuityMessageContext[];
   readonly userMessage: string;
   readonly allowedTargetDepartments: readonly WhatsAppContinuityTargetDepartment[];
+  readonly observationOnly?: boolean;
 }
 
 export interface WhatsAppContinuityClassificationResult {
@@ -63,6 +64,18 @@ export interface WhatsAppContinuityClassificationResult {
   readonly targetDepartmentId: string | null;
   readonly agentId: string;
   readonly agentExecutionId: string;
+}
+
+export interface WhatsAppHumanObservationResult {
+  readonly continuity: WhatsAppContinuityClassificationResult;
+  readonly orchestration: {
+    readonly intent: string;
+    readonly priority: 'low' | 'normal' | 'high' | 'urgent';
+    readonly targetDepartmentId: string | null;
+    readonly reason: string;
+    readonly agentId: string;
+    readonly agentExecutionId: string;
+  };
 }
 
 export class WhatsAppContinuityClassificationError extends Error {
@@ -77,6 +90,15 @@ export class WhatsAppContinuityClassificationError extends Error {
 }
 
 export abstract class WhatsAppConversationAgent {
+  observeHumanConversation(
+    input: WhatsAppContinuityClassificationInput,
+  ): Promise<WhatsAppHumanObservationResult> {
+    void input;
+    return Promise.reject(
+      new Error('Este adaptador não suporta observação silenciosa.'),
+    );
+  }
+
   classifyContinuity(
     input: WhatsAppContinuityClassificationInput,
   ): Promise<WhatsAppContinuityClassificationResult> {

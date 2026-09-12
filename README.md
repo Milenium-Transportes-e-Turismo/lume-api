@@ -1,5 +1,8 @@
 # Lume Tenant API
 
+Consulte o [índice da documentação](docs/README.md) para contratos, guias atuais,
+implantação e registros históricos.
+
 O vocabulário canônico e as relações entre os contextos estão em
 [`CONTEXT-MAP.md`](CONTEXT-MAP.md). Decisões arquiteturais aprovadas ficam em
 [`docs/adr`](docs/adr).
@@ -459,7 +462,7 @@ em [data-exchange.md](docs/data-exchange.md). A carga silenciosa de atendimentos
 WhatsApp atuais pela interface ou por CLI está em
 [whatsapp-conversation-import.md](docs/whatsapp-conversation-import.md). O
 runbook da migração controlada da automação está em
-[whatsapp-automation-migration.md](docs/whatsapp-automation-migration.md).
+[fluxo atual de atendimento e assistência](docs/whatsapp-human-assistance.md).
 O ciclo completo da Knowledge Base está em
 [knowledge-base.md](docs/knowledge-base.md).
 
@@ -536,3 +539,30 @@ de até 3.000 cadastros. Consulta exige clients:view; exportação exige também
 documents:view ou documents:manage. Geração, limites e persistência temporária
 reutilizam DataExchange. Não requer migration ou novas variáveis; atualizar API
 antes do Web. A importação no Google é feita manualmente com o CSV baixado.
+
+## Transportes e conferência Avic
+
+Cadastros canônicos, frota e vínculos com vigência: [guia](docs/transport-catalogs.md).
+Importação independente, odômetros, pendências e KM contratado: [operação e ativação](docs/transport-imports.md).
+A integração inicia desativada e corrige-se KM somente na origem.
+
+A integração Avic também oferece login servidor-servidor e renovação por nova autenticação,
+com credenciais privadas AVIC_API_USER_ID/AVIC_API_ACCESS_KEY. Consulte a seção de
+[configuração e login automático](docs/transport-imports.md#login-automático).
+
+## CNPJs do tenant e perfis de Cadastro
+
+As empresas do próprio tenant possuem CNPJ, razão social, nome fantasia,
+situação e versão independentes do Cadastro de clientes e funcionários.
+Criar uma dessas empresas não cria uma pessoa jurídica no Cadastro.
+A migração 20260910000100_tenant_legal_entities preserva os identificadores
+e referências existentes; identidades antigas ficam retidas para histórico,
+fora das listas gerais. Consulte docs/transport-imports.md.
+
+Vínculos e contratos são consultados por registrationId no perfil do Cadastro.
+A API aplica esse filtro, junto ao tenant autenticado, antes da busca,
+contagem e paginação, inclusive na seleção de contratos existentes.
+
+### Assistência durante o atendimento humano
+
+A confirmação do resumo encaminha à fila humana do Comercial. Durante o atendimento, os agentes silenciosos podem sugerir uma nova coleta ou um departamento no painel, sujeitos à decisão do atendente. A política de inatividade aguarda 3 horas para um lembrete contextual e mais 1 hora após o envio para encerrar, somente quando a pendência é do cliente. Veja [o fluxo e o contrato de sugestões internas](docs/whatsapp-human-assistance.md).

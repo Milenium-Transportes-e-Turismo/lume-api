@@ -107,6 +107,8 @@ function createSubject(input?: {
   const calls: string[] = [];
   const repository = {
     findWebhookChannel: vi.fn().mockResolvedValue({ agentsEnabled: true }),
+    getHumanObservationContext: vi.fn(async () => null),
+    recordHumanObservation: vi.fn(async () => undefined),
     getPendingContinuityClassification: vi.fn(async () => null),
     applyContinuityClassification: vi.fn(async () => ({
       serviceSessionId: '00000000-0000-4000-8000-000000000010',
@@ -175,6 +177,7 @@ function createSubject(input?: {
   };
   const agent = {
     classifyContinuity: vi.fn(),
+    observeHumanConversation: vi.fn(),
     complete: vi.fn(async (): Promise<WhatsAppConversationAgentResult> => ({
       provider: 'openai',
       model: 'gpt-5.6-terra',
@@ -483,80 +486,86 @@ describe('ApiWhatsAppAutomationProvider', () => {
     );
   });
 
-  it('analisa pagamento após orçamento e encaminha ao Financeiro sem emitir menu ou reiniciar coleta', async () => {
-    const text =
-      'Quero falar sobre o pagamento de uma viagem de quinze dias atrás';
-    const current = conversation({
-      mainMenuPresentedAt: '2026-08-06T11:00:00.000Z',
-      flowStep: 'commercial-follow-up-menu',
-      requestStatus: 'under-review',
-      currentQuoteRequest: {
-        id: '00000000-0000-4000-8000-000000000095',
-        version: 3,
-        status: 'under-review',
-        sequence: 1,
-        origin: 'Uberlândia',
-        destination: 'Goiânia',
-      },
-    });
-    const { subject, repository, agent, evolution } = createSubject({
-      repository: {
-        getAutomationBatch: vi.fn(async () => ({
+  it.each(['human-handoff', 'completed'] as const)(
+    'encaminha pagamento após orçamento mesmo com sinal contraditório %s',
+    async (collectionStatus) => {
+      const text =
+        'Quero falar sobre o pagamento de uma viagem de quinze dias atrás';
+      const current = conversation({
+        mainMenuPresentedAt: '2026-08-06T11:00:00.000Z',
+        flowStep: 'commercial-follow-up-menu',
+        requestStatus: 'under-review',
+        currentQuoteRequest: {
+          id: '00000000-0000-4000-8000-000000000095',
+          version: 3,
+          status: 'under-review',
+          sequence: 1,
+          origin: 'Uberlândia',
+          destination: 'Goiânia',
+        },
+      });
+      const { subject, repository, agent, evolution } = createSubject({
+        repository: {
+          getAutomationBatch: vi.fn(async () => ({
+            conversation: current,
+            batch: {
+              messages: [
+                {
+                  sourceEventId: 'evolution:source-1',
+                  messageId: ids.message,
+                  occurredAt: '2026-08-06T12:00:00.000Z',
+                  persistedAt: '2026-08-06T12:00:00.000Z',
+                  kind: 'text',
+                  text,
+                },
+              ],
+            },
+          })),
+        },
+      });
+      agent.complete.mockResolvedValueOnce({
+        provider: 'openai',
+        model: 'test',
+        attempt: 1,
+        output: {
+          message: 'Vou encaminhar seu atendimento ao Financeiro.',
+          collectionStatus,
+          customerDecision:
+            collectionStatus === 'human-handoff'
+              ? 'human-requested'
+              : 'undecided',
+          targetDepartment: 'financial',
+          extractedDataPatch: {},
+          missingFields: [],
+          summaryPresented: false,
+        },
+      });
+      await subject.execute(
+        event('whatsapp.inbound.persisted', {
+          isFirstContact: false,
           conversation: current,
-          batch: {
-            messages: [
-              {
-                sourceEventId: 'evolution:source-1',
-                messageId: ids.message,
-                occurredAt: '2026-08-06T12:00:00.000Z',
-                persistedAt: '2026-08-06T12:00:00.000Z',
-                kind: 'text',
-                text,
-              },
-            ],
-          },
-        })),
-      },
-    });
-    agent.complete.mockResolvedValueOnce({
-      provider: 'openai',
-      model: 'test',
-      attempt: 1,
-      output: {
-        message: 'Vou encaminhar seu atendimento ao Financeiro.',
-        collectionStatus: 'human-handoff',
-        customerDecision: 'human-requested',
-        targetDepartment: 'financial',
-        extractedDataPatch: {},
-        missingFields: [],
-        summaryPresented: false,
-      },
-    });
-    await subject.execute(
-      event('whatsapp.inbound.persisted', {
-        isFirstContact: false,
-        conversation: current,
-      }),
-    );
-    expect(agent.complete).toHaveBeenCalledWith(
-      expect.objectContaining({
-        aiMode: 'natural-service',
-        userMessage: text,
-        currentConversation: expect.objectContaining({
-          currentQuoteRequest: current.currentQuoteRequest,
         }),
-      }),
-    );
-    expect(repository.transition).toHaveBeenCalledTimes(1);
-    expect(repository.transition).toHaveBeenCalledWith(
-      expect.objectContaining({
-        name: 'forward',
-        metadata: expect.objectContaining({ targetDepartment: 'financial' }),
-      }),
-    );
-    expect(repository.createOutbound).not.toHaveBeenCalled();
-    expect(evolution.send).not.toHaveBeenCalled();
-  });
+      );
+      expect(agent.complete).toHaveBeenCalledWith(
+        expect.objectContaining({
+          aiMode: 'natural-service',
+          userMessage: text,
+          currentConversation: expect.objectContaining({
+            currentQuoteRequest: current.currentQuoteRequest,
+          }),
+        }),
+      );
+      expect(repository.transition).toHaveBeenCalledTimes(1);
+      expect(repository.transition).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'forward',
+          metadata: expect.objectContaining({ targetDepartment: 'financial' }),
+        }),
+      );
+      expect(repository.createOutbound).not.toHaveBeenCalled();
+      expect(evolution.send).not.toHaveBeenCalled();
+    },
+  );
 
   it('persists the structured natural-service completion for the formal lifecycle', async () => {
     const { subject, repository, agent } = createSubject();
@@ -611,26 +620,34 @@ describe('ApiWhatsAppAutomationProvider', () => {
     );
   });
 
-  it('blocks a handoff without a department before announcing or persisting a transfer', async () => {
-    const { subject, repository, evolution, agent } = createSubject();
-    agent.complete.mockResolvedValueOnce({
-      provider: 'openai',
-      model: 'test',
-      attempt: 1,
-      output: {
-        message: 'Vou encaminhar.',
-        collectionStatus: 'human-handoff',
-        customerDecision: 'human-requested',
-        extractedDataPatch: {},
-        missingFields: [],
-        summaryPresented: false,
-      },
-    });
-    await expect(subject.execute(event())).rejects.toThrow('targetDepartment');
-    expect(repository.transition).not.toHaveBeenCalled();
-    expect(repository.createOutbound).not.toHaveBeenCalled();
-    expect(evolution.send).not.toHaveBeenCalled();
-  });
+  it.each(['human-handoff', 'completed'] as const)(
+    'blocks a handoff without a department before announcing or persisting it (%s)',
+    async (collectionStatus) => {
+      const { subject, repository, evolution, agent } = createSubject();
+      agent.complete.mockResolvedValueOnce({
+        provider: 'openai',
+        model: 'test',
+        attempt: 1,
+        output: {
+          message: 'Vou encaminhar.',
+          collectionStatus,
+          customerDecision:
+            collectionStatus === 'human-handoff'
+              ? 'human-requested'
+              : 'undecided',
+          extractedDataPatch: {},
+          missingFields: [],
+          summaryPresented: false,
+        },
+      });
+      await expect(subject.execute(event())).rejects.toThrow(
+        'targetDepartment',
+      );
+      expect(repository.transition).not.toHaveBeenCalled();
+      expect(repository.createOutbound).not.toHaveBeenCalled();
+      expect(evolution.send).not.toHaveBeenCalled();
+    },
+  );
 
   it('delega o envio do handoff ao outbox transacional e interrompe o envio direto', async () => {
     const { subject, repository, evolution, agent, calls } = createSubject();
@@ -1243,4 +1260,59 @@ it('suprime eventos já enfileirados quando os agentes do canal estão desabilit
   expect(agent.classifyContinuity).not.toHaveBeenCalled();
   expect(repository.createOutbound).not.toHaveBeenCalled();
   expect(repository.completeOutboxExecution).toHaveBeenCalled();
+});
+
+it('observes human inbound without creating or sending an automatic customer response', async () => {
+  const context = {
+    sourceServiceSessionId: 'session-human',
+    expectedVersion: 2,
+    currentDepartmentId: null,
+    previousMessages: [],
+    userMessage: 'Quero outro orçamento',
+    allowedTargetDepartments: [],
+  };
+  const test = createSubject({
+    repository: { getHumanObservationContext: vi.fn(async () => context) },
+  });
+  test.agent.observeHumanConversation.mockResolvedValue({
+    continuity: {},
+    orchestration: {},
+  });
+  await test.subject.execute(
+    event('whatsapp.inbound.human-notification', {
+      automationAllowed: false,
+      canGenerateReply: false,
+      canSendReply: false,
+    }),
+  );
+  expect(test.agent.observeHumanConversation).toHaveBeenCalledOnce();
+  expect(test.repository.recordHumanObservation).toHaveBeenCalledOnce();
+  expect(test.agent.complete).not.toHaveBeenCalled();
+  expect(test.repository.createOutbound).not.toHaveBeenCalled();
+  expect(test.evolution.send).not.toHaveBeenCalled();
+});
+
+it('does not hold the human event queue when silent classification is unavailable', async () => {
+  const test = createSubject({
+    repository: {
+      getHumanObservationContext: vi.fn(async () => ({
+        sourceServiceSessionId: 'session-human',
+        expectedVersion: 2,
+      })),
+    },
+  });
+  test.agent.observeHumanConversation.mockRejectedValue(
+    new Error('unavailable'),
+  );
+  await expect(
+    test.subject.execute(
+      event('whatsapp.inbound.human-notification', {
+        automationAllowed: false,
+        canGenerateReply: false,
+        canSendReply: false,
+      }),
+    ),
+  ).resolves.toBeUndefined();
+  expect(test.repository.completeOutboxExecution).toHaveBeenCalledOnce();
+  expect(test.repository.createOutbound).not.toHaveBeenCalled();
 });

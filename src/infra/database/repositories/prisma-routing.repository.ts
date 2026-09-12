@@ -1,3 +1,4 @@
+import { assertTransportSupplierChange } from '../prisma/assert-transport-supplier-change';
 import { Injectable } from '@nestjs/common';
 
 import {
@@ -159,6 +160,7 @@ export class PrismaRoutingRepository extends RoutingRepository {
     const search = query.search?.trim();
     const where = {
       companyId,
+      transportSupplier: { is: null },
       ...(query.status ? { status: toPrismaStatus(query.status) } : {}),
       ...(query.clientType
         ? {
@@ -216,6 +218,7 @@ export class PrismaRoutingRepository extends RoutingRepository {
     const row = await this.prisma.routingCompany.findUnique({
       where: {
         id_companyId: { id: routingCompanyId, companyId },
+        transportSupplier: { is: null },
       },
     });
     return row ? mapCompany(row) : null;
@@ -282,16 +285,36 @@ export class PrismaRoutingRepository extends RoutingRepository {
         if (repeated) {
           if (repeated.routingCompanyId !== routingCompanyId) return null;
           const existing = await transaction.routingCompany.findUnique({
-            where: { id_companyId: { id: routingCompanyId, companyId } },
+            where: {
+              id_companyId: { id: routingCompanyId, companyId },
+              transportSupplier: { is: null },
+            },
           });
           return existing ? mapCompany(existing) : null;
         }
         const before = await transaction.routingCompany.findUnique({
-          where: { id_companyId: { id: routingCompanyId, companyId } },
+          where: {
+            id_companyId: { id: routingCompanyId, companyId },
+            transportSupplier: { is: null },
+          },
         });
         if (!before || before.version !== input.expectedVersion) return null;
+        await assertTransportSupplierChange(transaction, {
+          companyId,
+          registrationId: routingCompanyId,
+          actorUserId: input.actorUserId,
+          beforeCnpj: before.cnpj,
+          cnpj: input.cnpj,
+          beforeType: before.clientType,
+          clientType: input.clientType,
+          beforeStatus: before.status,
+          status: input.status,
+        });
         const row = await transaction.routingCompany.update({
-          where: { id_companyId: { id: routingCompanyId, companyId } },
+          where: {
+            id_companyId: { id: routingCompanyId, companyId },
+            transportSupplier: { is: null },
+          },
           data: {
             ...(input.taxId === undefined ? {} : { taxId: input.taxId }),
             ...(input.legalName === undefined

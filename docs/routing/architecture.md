@@ -29,8 +29,10 @@ fronteiras futuras de Matrix/OR-Tools sem implementar um otimizador falso.
 
 O cálculo não é persistido nesta fase, mas sempre recebe a identidade autenticada
 e devolve `tenant.companyId`. Um futuro `RoutePlan` deverá guardar esse campo.
-Veículos continuam sendo informados manualmente porque não há entidade `Vehicle`
-no código atual; nenhuma tabela duplicada foi criada.
+O cálculo recebe parâmetros de veículo informados manualmente. Existe o cadastro
+`TransportFleet`, mas sua existência não implica seleção automática ou reserva de
+veículo pelo planejador. A validação de capacidade na coleta de orçamento pertence
+ao fluxo de atendimento, descrito em [coleta de turismo](../tourism-intake-validation.md).
 
 Rodovias, concessionárias, concessões, pontos e tarifas são dados públicos globais.
 `TollPoint.location` é `geography(Point,4326)`: a distância do corredor é expressa

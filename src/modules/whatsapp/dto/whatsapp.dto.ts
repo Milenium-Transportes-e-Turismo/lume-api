@@ -877,3 +877,15 @@ export class SendQuoteProposalDto extends VersionedCommandDto {
   @IsUUID('4', { each: true })
   batchDocumentIds!: string[];
 }
+
+export class ResolveAssistantSuggestionDto extends VersionedCommandDto {
+  @ApiProperty({ minimum: 1 })
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  expectedSessionVersion!: number;
+
+  @ApiProperty({ enum: ['accept', 'dismiss'] })
+  @IsIn(['accept', 'dismiss'])
+  decision!: 'accept' | 'dismiss';
+}

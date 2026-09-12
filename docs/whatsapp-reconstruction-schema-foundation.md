@@ -1,5 +1,10 @@
 # Fundação de dados da reconstrução de atendimento
 
+> Registro da fundação e de sua evolução inicial. As descrições de menus e do
+> prazo fixo de 30 minutos abaixo são históricas. O lifecycle atual usa a migração
+> `20260911000100_whatsapp_customer_wait_window` e as regras de
+> [atendimento humano e espera do cliente](whatsapp-human-assistance.md).
+
 Este documento descreve a fundação **aditiva** introduzida pela migration
 `20260829000100_whatsapp_reconstruction_foundation`. Ela não troca ainda os
 controllers do atendimento. O fluxo legado continua sendo a fachada de
@@ -161,7 +166,7 @@ O ledger `ServiceSessionEvent` registra criação e mudanças feitas pelo
 dual-write com `commandId`, fingerprint, expected/resulting version, ator e
 snapshots. A fachada, menus, outbox e tabelas legadas permanecem operacionais.
 
-## Encerramento e continuidade
+## Encerramento e continuidade na versão inicial
 
 O fechamento automático não é inferido do texto ou do estado do quote. O
 worker `ServiceSessionLifecycleWorker` considera somente sessão foreground em

@@ -108,6 +108,7 @@ enum PassengerImportAction {
 }
 
 enum RoutingRouteType {
+  UNSPECIFIED    @map("unspecified")
   MUNICIPAL      @map("municipal")
   INTERMUNICIPAL @map("intermunicipal")
 }
@@ -141,10 +142,11 @@ enum RoutingContractStatus {
 }
 
 enum RoutingContractPeriodicity {
-  MONTHLY   @map("monthly")
-  WEEKLY    @map("weekly")
-  DAILY     @map("daily")
-  PER_ROUTE @map("per-route")
+  UNSPECIFIED @map("unspecified")
+  MONTHLY     @map("monthly")
+  WEEKLY      @map("weekly")
+  DAILY       @map("daily")
+  PER_ROUTE   @map("per-route")
 }
 
 enum TollPointType {
@@ -249,7 +251,7 @@ enum CommercialServiceRequirementKind {
 }
 
 enum CommercialServiceRequirementOutcome {
-  SATISFIED       @map("satisfied")
+  SATISFIED      @map("satisfied")
   NOT_APPLICABLE @map("not-applicable")
 }
 
@@ -725,6 +727,16 @@ enum CustomerProfileSuggestionStatus {
 }
 
 model Company {
+  tenantLegalEntities     TransportSupplierProfile[]
+  transportIntegrations   TransportIntegration[]
+  transportImports        TransportImport[]
+  transportRecords        TransportRecord[]
+  transportAnalyses       TransportAnalysis[]
+  transportImportCommands TransportImportCommand[]
+  transportCatalogs       TransportCatalogItem[]
+  transportRoutes         TransportExternalRoute[]
+  transportCommands       TransportCatalogCommand[]
+
   id                     String        @id @db.Uuid
   legalName              String        @map("legal_name") @db.VarChar(160)
   tradeName              String?       @map("trade_name") @db.VarChar(120)
@@ -735,248 +747,248 @@ model Company {
   createdAt              DateTime      @default(now()) @map("created_at")
   updatedAt              DateTime      @updatedAt @map("updated_at")
 
-  users                           User[]
-  auditLogs                       TenantAuditLog[]
-  departments                     TenantDepartment[]
-  whatsappProviders               WhatsAppProvider[]
-  whatsappChannels                WhatsAppChannel[]
-  whatsappContacts                WhatsAppContact[]
-  whatsappConversations           WhatsAppConversation[]
-  whatsappMessages                WhatsAppMessage[]
-  whatsappMessageAttempts         WhatsAppMessageAttempt[]
-  whatsappTransitions             WhatsAppConversationTransition[]
-  quoteRequests                   QuoteRequest[]
-  quoteProposalDocuments          QuoteProposalDocument[]
-  quoteNotificationReads          QuoteNotificationRead[]
-  confirmedServices               ConfirmedService[]
-  confirmedServiceHistory         ConfirmedServiceHistory[]
+  users                                    User[]
+  auditLogs                                TenantAuditLog[]
+  departments                              TenantDepartment[]
+  whatsappProviders                        WhatsAppProvider[]
+  whatsappChannels                         WhatsAppChannel[]
+  whatsappContacts                         WhatsAppContact[]
+  whatsappConversations                    WhatsAppConversation[]
+  whatsappMessages                         WhatsAppMessage[]
+  whatsappMessageAttempts                  WhatsAppMessageAttempt[]
+  whatsappTransitions                      WhatsAppConversationTransition[]
+  quoteRequests                            QuoteRequest[]
+  quoteProposalDocuments                   QuoteProposalDocument[]
+  quoteNotificationReads                   QuoteNotificationRead[]
+  confirmedServices                        ConfirmedService[]
+  confirmedServiceHistory                  ConfirmedServiceHistory[]
   commercialServiceRequirementAttestations CommercialServiceRequirementAttestation[]
-  integrationInbox                IntegrationInbox[]
-  integrationOutbox               IntegrationOutbox[]
-  whatsappAutomationExecutions    WhatsAppAutomationExecution[]
-  whatsappAutomationDecisions     WhatsAppAutomationDecision[]
-  whatsappAutomationCheckpoints   WhatsAppAutomationCheckpoint[]
-  serviceIdentities               ServiceIdentity[]
-  passwordChangeChallenges        PasswordChangeChallenge[]
-  passwordHistory                 UserPasswordHistory[]
-  whatsappImportBatches           WhatsAppImportBatch[]
-  whatsappImportRecords           WhatsAppImportRecord[]
-  whatsappImportExternalRefs      WhatsAppImportExternalRef[]
-  dataExchangeArtifacts           DataExchangeArtifact[]
-  documentTypes                   DocumentType[]
-  documentChecklistTemplates      DocumentChecklistTemplate[]
-  documentChecklistItems          DocumentChecklistItem[]
-  documentRequests                DocumentRequest[]
-  documentRequestItems            DocumentRequestItem[]
-  documentSubmissions             DocumentSubmission[]
-  documentFiles                   DocumentFile[]
-  documentValidations             DocumentValidation[]
-  documentReviews                 DocumentReview[]
-  documentStatusHistory           DocumentStatusHistory[]
-  apiRequestMetrics               ApiRequestMetric[]
-  routingCompanies                RoutingCompany[]
-  routingCompanyHistoryEntries    RoutingCompanyHistory[]
-  routingCompanyComments          RoutingCompanyComment[]
-  passengers                      Passenger[]
-  passengerHistoryEntries         PassengerHistory[]
-  passengerIssues                 PassengerIssue[]
-  passengerDocumentData           PassengerDocumentData[]
-  passengerImportBatches          PassengerImportBatch[]
-  passengerImportRecords          PassengerImportRecord[]
-  routingRoutes                   RoutingRoute[]
-  routingRoutePoints              RoutingRoutePoint[]
-  routingRouteAssignments         RoutingRoutePassenger[]
-  routingRouteHistoryEntries      RoutingRouteHistory[]
-  routingRouteVersions            RoutingRouteVersion[]
-  routingRouteApprovals           RoutingRouteApproval[]
-  routingNavigationLinks          RoutingNavigationLink[]
-  routingExecutions               RoutingRouteExecution[]
-  routingContracts                RoutingContract[]
-  routingContractCostCenters      RoutingContractCostCenter[]
-  routingContractShifts           RoutingContractShift[]
-  routingContractHistoryEntries   RoutingContractHistory[]
-  routingFixedPoints              RoutingFixedPoint[]
-  registrationRoles               RegistrationRole[]
-  registrationRoleAssignments     RegistrationRoleAssignment[]
-  registrationTags                RegistrationTag[]
-  registrationTagAssignments      RegistrationTagAssignment[]
-  registrationPhones              RegistrationPhone[]
-  registrationEmails              RegistrationEmail[]
-  registrationRelationships       RegistrationRelationship[]
-  registrationExternalReferences  RegistrationExternalReference[]
-  registrationImportBatches       RegistrationImportBatch[]
-  registrationExternalRecords     RegistrationExternalRecord[]
-  registrationCandidates          RegistrationCandidate[]
-  registrationCandidateSources    RegistrationCandidateSource[]
-  registrationReviewDecisions     RegistrationReviewDecision[]
-  operationalTrips                OperationalTrip[]
-  operationalTripLegs             OperationalTripLeg[]
-  operationalTripVersions         OperationalTripVersion[]
-  operationalTripOccurrences      OperationalTripOccurrence[]
-  operationalTripHistory          OperationalTripHistory[]
-  operationalTripRoutePlans       OperationalTripRoutePlanSelection[]
-  userPersonAssociationHistory    UserPersonAssociationHistory[]
-  userUpdateHistory               UserUpdateHistory[]
-  preAdmissionAccesses            PreAdmissionAccess[]
-  preAdmissionAccessItems         PreAdmissionAccessItem[]
-  preAdmissionAccessHistory       PreAdmissionAccessHistory[]
-  whatsappChannelAutomaticTargets WhatsAppChannelAutomaticTargetDepartment[]
-  whatsappThreads                 WhatsAppThread[]
-  serviceSessions                 ServiceSession[]
-  serviceQueues                   ServiceQueue[]
-  serviceSessionAssignments       ServiceSessionAssignment[]
-  conversationParticipants        ConversationParticipant[]
-  serviceCases                    ServiceCase[]
-  serviceSessionCases             ServiceSessionCase[]
-  continuityDecisions             ServiceSessionContinuityDecision[]
-  lumeAgents                      LumeAgent[]
-  agentPromptVersions             AgentPromptVersion[]
-  agentRuntimeConfigVersions      AgentRuntimeConfigVersion[]
-  agentCapabilities               AgentCapability[]
-  agentTools                      AgentTool[]
-  lumeAgentCapabilities           LumeAgentCapability[]
-  lumeAgentTools                  LumeAgentTool[]
-  agentExecutions                 AgentExecution[]
-  agentExecutionAttempts          AgentExecutionAttempt[]
-  agentToolCalls                  AgentToolCall[]
-  mediaAssets                     MediaAsset[]
-  mediaInterpretations            MediaInterpretation[]
-  mediaInterpretationChunks       MediaInterpretationChunk[]
-  mediaInterpretationCorrections  MediaInterpretationCorrection[]
-  knowledgeBases                  KnowledgeBase[]
-  knowledgeDocuments              KnowledgeDocument[]
-  knowledgeDocumentDepartments    KnowledgeDocumentDepartment[]
-  knowledgeDocumentVersions       KnowledgeDocumentVersion[]
-  knowledgeChunks                 KnowledgeChunk[]
-  knowledgeSuggestions            KnowledgeSuggestion[]
-  knowledgeGaps                   KnowledgeGap[]
-  agentExecutionKnowledgeSources  AgentExecutionKnowledgeSource[]
-  agentExecutionMediaSources      AgentExecutionMediaSource[]
-  registrationDataReviews         RegistrationDataReview[]
-  whatsappGroups                  WhatsAppGroup[]
-  whatsappGroupParticipants       WhatsAppGroupParticipant[]
-  whatsappGroupMessages           WhatsAppGroupMessage[]
-  whatsappChannelEvents           WhatsAppChannelEvent[]
-  serviceSessionEvents            ServiceSessionEvent[]
-  customerProfileSuggestions      CustomerProfileSuggestion[]
+  integrationInbox                         IntegrationInbox[]
+  integrationOutbox                        IntegrationOutbox[]
+  whatsappAutomationExecutions             WhatsAppAutomationExecution[]
+  whatsappAutomationDecisions              WhatsAppAutomationDecision[]
+  whatsappAutomationCheckpoints            WhatsAppAutomationCheckpoint[]
+  serviceIdentities                        ServiceIdentity[]
+  passwordChangeChallenges                 PasswordChangeChallenge[]
+  passwordHistory                          UserPasswordHistory[]
+  whatsappImportBatches                    WhatsAppImportBatch[]
+  whatsappImportRecords                    WhatsAppImportRecord[]
+  whatsappImportExternalRefs               WhatsAppImportExternalRef[]
+  dataExchangeArtifacts                    DataExchangeArtifact[]
+  documentTypes                            DocumentType[]
+  documentChecklistTemplates               DocumentChecklistTemplate[]
+  documentChecklistItems                   DocumentChecklistItem[]
+  documentRequests                         DocumentRequest[]
+  documentRequestItems                     DocumentRequestItem[]
+  documentSubmissions                      DocumentSubmission[]
+  documentFiles                            DocumentFile[]
+  documentValidations                      DocumentValidation[]
+  documentReviews                          DocumentReview[]
+  documentStatusHistory                    DocumentStatusHistory[]
+  apiRequestMetrics                        ApiRequestMetric[]
+  routingCompanies                         RoutingCompany[]
+  routingCompanyHistoryEntries             RoutingCompanyHistory[]
+  routingCompanyComments                   RoutingCompanyComment[]
+  passengers                               Passenger[]
+  passengerHistoryEntries                  PassengerHistory[]
+  passengerIssues                          PassengerIssue[]
+  passengerDocumentData                    PassengerDocumentData[]
+  passengerImportBatches                   PassengerImportBatch[]
+  passengerImportRecords                   PassengerImportRecord[]
+  routingRoutes                            RoutingRoute[]
+  routingRoutePoints                       RoutingRoutePoint[]
+  routingRouteAssignments                  RoutingRoutePassenger[]
+  routingRouteHistoryEntries               RoutingRouteHistory[]
+  routingRouteVersions                     RoutingRouteVersion[]
+  routingRouteApprovals                    RoutingRouteApproval[]
+  routingNavigationLinks                   RoutingNavigationLink[]
+  routingExecutions                        RoutingRouteExecution[]
+  routingContracts                         RoutingContract[]
+  routingContractCostCenters               RoutingContractCostCenter[]
+  routingContractShifts                    RoutingContractShift[]
+  routingContractHistoryEntries            RoutingContractHistory[]
+  routingFixedPoints                       RoutingFixedPoint[]
+  registrationRoles                        RegistrationRole[]
+  registrationRoleAssignments              RegistrationRoleAssignment[]
+  registrationTags                         RegistrationTag[]
+  registrationTagAssignments               RegistrationTagAssignment[]
+  registrationPhones                       RegistrationPhone[]
+  registrationEmails                       RegistrationEmail[]
+  registrationRelationships                RegistrationRelationship[]
+  registrationExternalReferences           RegistrationExternalReference[]
+  registrationImportBatches                RegistrationImportBatch[]
+  registrationExternalRecords              RegistrationExternalRecord[]
+  registrationCandidates                   RegistrationCandidate[]
+  registrationCandidateSources             RegistrationCandidateSource[]
+  registrationReviewDecisions              RegistrationReviewDecision[]
+  operationalTrips                         OperationalTrip[]
+  operationalTripLegs                      OperationalTripLeg[]
+  operationalTripVersions                  OperationalTripVersion[]
+  operationalTripOccurrences               OperationalTripOccurrence[]
+  operationalTripHistory                   OperationalTripHistory[]
+  operationalTripRoutePlans                OperationalTripRoutePlanSelection[]
+  userPersonAssociationHistory             UserPersonAssociationHistory[]
+  userUpdateHistory                        UserUpdateHistory[]
+  preAdmissionAccesses                     PreAdmissionAccess[]
+  preAdmissionAccessItems                  PreAdmissionAccessItem[]
+  preAdmissionAccessHistory                PreAdmissionAccessHistory[]
+  whatsappChannelAutomaticTargets          WhatsAppChannelAutomaticTargetDepartment[]
+  whatsappThreads                          WhatsAppThread[]
+  serviceSessions                          ServiceSession[]
+  serviceQueues                            ServiceQueue[]
+  serviceSessionAssignments                ServiceSessionAssignment[]
+  conversationParticipants                 ConversationParticipant[]
+  serviceCases                             ServiceCase[]
+  serviceSessionCases                      ServiceSessionCase[]
+  continuityDecisions                      ServiceSessionContinuityDecision[]
+  lumeAgents                               LumeAgent[]
+  agentPromptVersions                      AgentPromptVersion[]
+  agentRuntimeConfigVersions               AgentRuntimeConfigVersion[]
+  agentCapabilities                        AgentCapability[]
+  agentTools                               AgentTool[]
+  lumeAgentCapabilities                    LumeAgentCapability[]
+  lumeAgentTools                           LumeAgentTool[]
+  agentExecutions                          AgentExecution[]
+  agentExecutionAttempts                   AgentExecutionAttempt[]
+  agentToolCalls                           AgentToolCall[]
+  mediaAssets                              MediaAsset[]
+  mediaInterpretations                     MediaInterpretation[]
+  mediaInterpretationChunks                MediaInterpretationChunk[]
+  mediaInterpretationCorrections           MediaInterpretationCorrection[]
+  knowledgeBases                           KnowledgeBase[]
+  knowledgeDocuments                       KnowledgeDocument[]
+  knowledgeDocumentDepartments             KnowledgeDocumentDepartment[]
+  knowledgeDocumentVersions                KnowledgeDocumentVersion[]
+  knowledgeChunks                          KnowledgeChunk[]
+  knowledgeSuggestions                     KnowledgeSuggestion[]
+  knowledgeGaps                            KnowledgeGap[]
+  agentExecutionKnowledgeSources           AgentExecutionKnowledgeSource[]
+  agentExecutionMediaSources               AgentExecutionMediaSource[]
+  registrationDataReviews                  RegistrationDataReview[]
+  whatsappGroups                           WhatsAppGroup[]
+  whatsappGroupParticipants                WhatsAppGroupParticipant[]
+  whatsappGroupMessages                    WhatsAppGroupMessage[]
+  whatsappChannelEvents                    WhatsAppChannelEvent[]
+  serviceSessionEvents                     ServiceSessionEvent[]
+  customerProfileSuggestions               CustomerProfileSuggestion[]
 
   @@map("companies")
 }
 
 model User {
-  id                     String              @id @default(uuid()) @db.Uuid
-  companyId              String              @map("company_id") @db.Uuid
-  routingCompanyId       String?             @map("routing_company_id") @db.Uuid
-  personRegistrationId   String?             @map("person_registration_id") @db.Uuid
-  personAssociationVersion Int               @default(1) @map("person_association_version")
-  name                   String              @db.VarChar(120)
-  username               String              @db.VarChar(40)
-  usernameNormalized     String              @unique @map("username_normalized") @db.VarChar(40)
-  email                  String              @db.VarChar(254)
-  emailNormalized        String              @unique @map("email_normalized") @db.VarChar(254)
-  cpfNormalized          String?             @unique @map("cpf_normalized") @db.VarChar(11)
-  passwordHash           String              @map("password_hash") @db.VarChar(100)
-  mustChangePassword     Boolean             @default(false) @map("must_change_password")
-  profilePicture         Bytes?              @map("profile_picture")
-  profilePictureMime     String?             @map("profile_picture_mime") @db.VarChar(40)
-  isAdministrator        Boolean             @default(false) @map("is_administrator")
-  documentAccessMode     DocumentAccessMode  @default(STANDARD) @map("document_access_mode")
-  clientCategory         UserClientCategory? @map("client_category")
-  jobTitle               String?             @map("job_title") @db.VarChar(120)
-  maritalStatus          String?             @map("marital_status") @db.VarChar(30)
-  militaryDocumentStatus String              @default("pending-confirmation") @map("military_document_status") @db.VarChar(30)
-  dependents             Json                @default("[]") @db.JsonB
-  departments            String[]            @default([])
-  permissionCodes        String[]            @default([]) @map("permission_codes")
-  status                 UserAccountStatus   @default(ACTIVE)
-  suspendedUntil         DateTime?           @map("suspended_until")
-  suspensionReason       String?             @map("suspension_reason") @db.VarChar(500)
-  isActive               Boolean             @default(true) @map("is_active")
-  version                Int                 @default(1)
-  deletedAt              DateTime?           @map("deleted_at") @db.Timestamptz(3)
-  tokenVersion           Int                 @default(1) @map("token_version")
-  lastLoginAt            DateTime?           @map("last_login_at")
-  createdAt              DateTime            @default(now()) @map("created_at")
-  updatedAt              DateTime            @updatedAt @map("updated_at")
+  id                       String              @id @default(uuid()) @db.Uuid
+  companyId                String              @map("company_id") @db.Uuid
+  routingCompanyId         String?             @map("routing_company_id") @db.Uuid
+  personRegistrationId     String?             @map("person_registration_id") @db.Uuid
+  personAssociationVersion Int                 @default(1) @map("person_association_version")
+  name                     String              @db.VarChar(120)
+  username                 String              @db.VarChar(40)
+  usernameNormalized       String              @unique @map("username_normalized") @db.VarChar(40)
+  email                    String              @db.VarChar(254)
+  emailNormalized          String              @unique @map("email_normalized") @db.VarChar(254)
+  cpfNormalized            String?             @unique @map("cpf_normalized") @db.VarChar(11)
+  passwordHash             String              @map("password_hash") @db.VarChar(100)
+  mustChangePassword       Boolean             @default(false) @map("must_change_password")
+  profilePicture           Bytes?              @map("profile_picture")
+  profilePictureMime       String?             @map("profile_picture_mime") @db.VarChar(40)
+  isAdministrator          Boolean             @default(false) @map("is_administrator")
+  documentAccessMode       DocumentAccessMode  @default(STANDARD) @map("document_access_mode")
+  clientCategory           UserClientCategory? @map("client_category")
+  jobTitle                 String?             @map("job_title") @db.VarChar(120)
+  maritalStatus            String?             @map("marital_status") @db.VarChar(30)
+  militaryDocumentStatus   String              @default("pending-confirmation") @map("military_document_status") @db.VarChar(30)
+  dependents               Json                @default("[]") @db.JsonB
+  departments              String[]            @default([])
+  permissionCodes          String[]            @default([]) @map("permission_codes")
+  status                   UserAccountStatus   @default(ACTIVE)
+  suspendedUntil           DateTime?           @map("suspended_until")
+  suspensionReason         String?             @map("suspension_reason") @db.VarChar(500)
+  isActive                 Boolean             @default(true) @map("is_active")
+  version                  Int                 @default(1)
+  deletedAt                DateTime?           @map("deleted_at") @db.Timestamptz(3)
+  tokenVersion             Int                 @default(1) @map("token_version")
+  lastLoginAt              DateTime?           @map("last_login_at")
+  createdAt                DateTime            @default(now()) @map("created_at")
+  updatedAt                DateTime            @updatedAt @map("updated_at")
 
-  company                            Company                          @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  routingCompany                     RoutingCompany?                  @relation("RoutingCompanyUsers", fields: [routingCompanyId, companyId], references: [id, companyId], onDelete: NoAction)
-  personRegistration                 RoutingCompany?                  @relation("UserPersonRegistration", fields: [personRegistrationId, companyId], references: [id, companyId], onDelete: NoAction)
-  createdRoutingCompanies            RoutingCompany[]                 @relation("RoutingCompanyCreator")
-  responsibleTemporaryRegistrations RoutingCompany[]                 @relation("TemporaryRegistrationResponsible")
-  routingCompanyHistoryEntries       RoutingCompanyHistory[]          @relation("RoutingCompanyHistoryActor")
-  createdRoutingCompanyComments      RoutingCompanyComment[]          @relation("RoutingCompanyCommentCreator")
-  updatedRoutingCompanyComments      RoutingCompanyComment[]          @relation("RoutingCompanyCommentUpdater")
-  createdPassengers                  Passenger[]                      @relation("PassengerCreator")
-  passengerHistoryEntries            PassengerHistory[]               @relation("PassengerHistoryActor")
-  passengerImportBatches             PassengerImportBatch[]           @relation("PassengerImportActor")
-  createdRoutingRoutes               RoutingRoute[]                   @relation("RoutingRouteCreator")
-  routingRouteHistoryEntries         RoutingRouteHistory[]            @relation("RoutingRouteHistoryActor")
-  routingRouteApprovals              RoutingRouteApproval[]           @relation("RoutingRouteApprover")
-  publishedRoutingRoutes             RoutingRoute[]                   @relation("RoutingRoutePublisher")
-  createdRoutingContracts            RoutingContract[]                @relation("RoutingContractCreator")
-  routingContractHistoryEntries      RoutingContractHistory[]         @relation("RoutingContractHistoryActor")
-  createdOperationalTrips            OperationalTrip[]                @relation("OperationalTripCreator")
-  createdOperationalTripVersions     OperationalTripVersion[]         @relation("OperationalTripVersionCreator")
-  operationalTripOccurrences         OperationalTripOccurrence[]      @relation("OperationalTripOccurrenceActor")
-  operationalTripHistoryEntries      OperationalTripHistory[]         @relation("OperationalTripHistoryActor")
-  selectedOperationalTripRoutePlans  OperationalTripRoutePlanSelection[] @relation("OperationalTripRoutePlanSelector")
-  createdRoutingFixedPoints          RoutingFixedPoint[]              @relation("RoutingFixedPointCreator")
-  refreshTokens                      RefreshToken[]
-  auditLogs                          TenantAuditLog[]
-  assignedWhatsappConversations      WhatsAppConversation[]           @relation("ConversationAssignee")
-  requestedWhatsappConversationTransfers WhatsAppConversation[]       @relation("ConversationPendingTransferRequester")
-  uploadedQuoteProposals             QuoteProposalDocument[]          @relation("QuoteProposalUploader")
-  requestedQuoteProposals            QuoteRequest[]                   @relation("QuoteProposalRequester")
-  decidedQuoteProposals              QuoteRequest[]                   @relation("QuoteProposalDecider")
-  sentQuoteProposals                 QuoteProposalDocument[]          @relation("QuoteProposalSender")
-  sentWhatsappMessages               WhatsAppMessage[]                @relation("WhatsAppMessageActor")
-  quoteNotificationReads             QuoteNotificationRead[]
-  whatsappTransitions                WhatsAppConversationTransition[] @relation("TransitionActorUser")
-  passwordChangeChallenges           PasswordChangeChallenge[]
-  passwordHistory                    UserPasswordHistory[]
-  whatsappImportBatches              WhatsAppImportBatch[]            @relation("WhatsAppImportActor")
-  dataExchangeArtifacts              DataExchangeArtifact[]           @relation("DataExchangeArtifactUploader")
-  subjectDocumentRequests            DocumentRequest[]                @relation("DocumentRequestSubject")
-  createdDocumentRequests            DocumentRequest[]                @relation("DocumentRequestCreator")
-  createdChecklistTemplates          DocumentChecklistTemplate[]      @relation("DocumentChecklistCreator")
-  submittedDocuments                 DocumentSubmission[]             @relation("DocumentSubmissionAuthor")
-  uploadedDocumentFiles              DocumentFile[]                   @relation("DocumentFileUploader")
-  documentReviews                    DocumentReview[]                 @relation("DocumentReviewer")
-  documentStatusChanges              DocumentStatusHistory[]          @relation("DocumentStatusActor")
-  apiRequestMetrics                  ApiRequestMetric[]
-  registrationImportBatches          RegistrationImportBatch[]        @relation("RegistrationImportActor")
-  reviewedRegistrationCandidates     RegistrationCandidate[]          @relation("RegistrationCandidateReviewer")
-  registrationReviewDecisions        RegistrationReviewDecision[]     @relation("RegistrationDecisionActor")
-  personAssociationHistory           UserPersonAssociationHistory[]   @relation("UserPersonAssociationSubject")
-  actedPersonAssociationHistory      UserPersonAssociationHistory[]   @relation("UserPersonAssociationActor")
-  userUpdateHistory                  UserUpdateHistory[]               @relation("UserUpdateSubject")
-  actedUserUpdateHistory             UserUpdateHistory[]               @relation("UserUpdateActor")
-  createdPreAdmissionAccesses        PreAdmissionAccess[]             @relation("PreAdmissionAccessCreator")
-  preAdmissionAccessHistory          PreAdmissionAccessHistory[]      @relation("PreAdmissionAccessHistoryActor")
-  confirmedServices                  ConfirmedService[]               @relation("ConfirmedServiceConfirmer")
-  confirmedServiceHistory            ConfirmedServiceHistory[]        @relation("ConfirmedServiceHistoryActor")
+  company                                  Company                                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  routingCompany                           RoutingCompany?                           @relation("RoutingCompanyUsers", fields: [routingCompanyId, companyId], references: [id, companyId], onDelete: NoAction)
+  personRegistration                       RoutingCompany?                           @relation("UserPersonRegistration", fields: [personRegistrationId, companyId], references: [id, companyId], onDelete: NoAction)
+  createdRoutingCompanies                  RoutingCompany[]                          @relation("RoutingCompanyCreator")
+  responsibleTemporaryRegistrations        RoutingCompany[]                          @relation("TemporaryRegistrationResponsible")
+  routingCompanyHistoryEntries             RoutingCompanyHistory[]                   @relation("RoutingCompanyHistoryActor")
+  createdRoutingCompanyComments            RoutingCompanyComment[]                   @relation("RoutingCompanyCommentCreator")
+  updatedRoutingCompanyComments            RoutingCompanyComment[]                   @relation("RoutingCompanyCommentUpdater")
+  createdPassengers                        Passenger[]                               @relation("PassengerCreator")
+  passengerHistoryEntries                  PassengerHistory[]                        @relation("PassengerHistoryActor")
+  passengerImportBatches                   PassengerImportBatch[]                    @relation("PassengerImportActor")
+  createdRoutingRoutes                     RoutingRoute[]                            @relation("RoutingRouteCreator")
+  routingRouteHistoryEntries               RoutingRouteHistory[]                     @relation("RoutingRouteHistoryActor")
+  routingRouteApprovals                    RoutingRouteApproval[]                    @relation("RoutingRouteApprover")
+  publishedRoutingRoutes                   RoutingRoute[]                            @relation("RoutingRoutePublisher")
+  createdRoutingContracts                  RoutingContract[]                         @relation("RoutingContractCreator")
+  routingContractHistoryEntries            RoutingContractHistory[]                  @relation("RoutingContractHistoryActor")
+  createdOperationalTrips                  OperationalTrip[]                         @relation("OperationalTripCreator")
+  createdOperationalTripVersions           OperationalTripVersion[]                  @relation("OperationalTripVersionCreator")
+  operationalTripOccurrences               OperationalTripOccurrence[]               @relation("OperationalTripOccurrenceActor")
+  operationalTripHistoryEntries            OperationalTripHistory[]                  @relation("OperationalTripHistoryActor")
+  selectedOperationalTripRoutePlans        OperationalTripRoutePlanSelection[]       @relation("OperationalTripRoutePlanSelector")
+  createdRoutingFixedPoints                RoutingFixedPoint[]                       @relation("RoutingFixedPointCreator")
+  refreshTokens                            RefreshToken[]
+  auditLogs                                TenantAuditLog[]
+  assignedWhatsappConversations            WhatsAppConversation[]                    @relation("ConversationAssignee")
+  requestedWhatsappConversationTransfers   WhatsAppConversation[]                    @relation("ConversationPendingTransferRequester")
+  uploadedQuoteProposals                   QuoteProposalDocument[]                   @relation("QuoteProposalUploader")
+  requestedQuoteProposals                  QuoteRequest[]                            @relation("QuoteProposalRequester")
+  decidedQuoteProposals                    QuoteRequest[]                            @relation("QuoteProposalDecider")
+  sentQuoteProposals                       QuoteProposalDocument[]                   @relation("QuoteProposalSender")
+  sentWhatsappMessages                     WhatsAppMessage[]                         @relation("WhatsAppMessageActor")
+  quoteNotificationReads                   QuoteNotificationRead[]
+  whatsappTransitions                      WhatsAppConversationTransition[]          @relation("TransitionActorUser")
+  passwordChangeChallenges                 PasswordChangeChallenge[]
+  passwordHistory                          UserPasswordHistory[]
+  whatsappImportBatches                    WhatsAppImportBatch[]                     @relation("WhatsAppImportActor")
+  dataExchangeArtifacts                    DataExchangeArtifact[]                    @relation("DataExchangeArtifactUploader")
+  subjectDocumentRequests                  DocumentRequest[]                         @relation("DocumentRequestSubject")
+  createdDocumentRequests                  DocumentRequest[]                         @relation("DocumentRequestCreator")
+  createdChecklistTemplates                DocumentChecklistTemplate[]               @relation("DocumentChecklistCreator")
+  submittedDocuments                       DocumentSubmission[]                      @relation("DocumentSubmissionAuthor")
+  uploadedDocumentFiles                    DocumentFile[]                            @relation("DocumentFileUploader")
+  documentReviews                          DocumentReview[]                          @relation("DocumentReviewer")
+  documentStatusChanges                    DocumentStatusHistory[]                   @relation("DocumentStatusActor")
+  apiRequestMetrics                        ApiRequestMetric[]
+  registrationImportBatches                RegistrationImportBatch[]                 @relation("RegistrationImportActor")
+  reviewedRegistrationCandidates           RegistrationCandidate[]                   @relation("RegistrationCandidateReviewer")
+  registrationReviewDecisions              RegistrationReviewDecision[]              @relation("RegistrationDecisionActor")
+  personAssociationHistory                 UserPersonAssociationHistory[]            @relation("UserPersonAssociationSubject")
+  actedPersonAssociationHistory            UserPersonAssociationHistory[]            @relation("UserPersonAssociationActor")
+  userUpdateHistory                        UserUpdateHistory[]                       @relation("UserUpdateSubject")
+  actedUserUpdateHistory                   UserUpdateHistory[]                       @relation("UserUpdateActor")
+  createdPreAdmissionAccesses              PreAdmissionAccess[]                      @relation("PreAdmissionAccessCreator")
+  preAdmissionAccessHistory                PreAdmissionAccessHistory[]               @relation("PreAdmissionAccessHistoryActor")
+  confirmedServices                        ConfirmedService[]                        @relation("ConfirmedServiceConfirmer")
+  confirmedServiceHistory                  ConfirmedServiceHistory[]                 @relation("ConfirmedServiceHistoryActor")
   commercialServiceRequirementAttestations CommercialServiceRequirementAttestation[] @relation("CommercialServiceRequirementAttestor")
-  createdWhatsappChannels            WhatsAppChannel[]                @relation("WhatsAppChannelCreator")
-  responsibleServiceSessions         ServiceSession[]                 @relation("ServiceSessionResponsibleUser")
-  createdServiceQueues               ServiceQueue[]                   @relation("ServiceQueueCreator")
-  assignedServiceSessions            ServiceSessionAssignment[]       @relation("ServiceAssignmentUser")
-  createdServiceAssignments          ServiceSessionAssignment[]       @relation("ServiceAssignmentActor")
-  confirmedConversationParticipants  ConversationParticipant[]        @relation("ConversationParticipantConfirmer")
-  createdServiceCases                ServiceCase[]                    @relation("ServiceCaseCreator")
-  createdLumeAgents                  LumeAgent[]                      @relation("LumeAgentCreator")
-  createdAgentPromptVersions         AgentPromptVersion[]             @relation("AgentPromptVersionCreator")
-  createdAgentRuntimeConfigs         AgentRuntimeConfigVersion[]      @relation("AgentRuntimeConfigCreator")
-  correctedMediaInterpretations      MediaInterpretationCorrection[]  @relation("MediaInterpretationCorrector")
-  createdKnowledgeBases              KnowledgeBase[]                  @relation("KnowledgeBaseCreator")
-  createdKnowledgeDocuments          KnowledgeDocument[]              @relation("KnowledgeDocumentCreator")
-  createdKnowledgeVersions           KnowledgeDocumentVersion[]       @relation("KnowledgeVersionCreator")
-  publishedKnowledgeVersions         KnowledgeDocumentVersion[]       @relation("KnowledgeVersionPublisher")
-  reviewedKnowledgeSuggestions       KnowledgeSuggestion[]            @relation("KnowledgeSuggestionReviewer")
-  reviewedRegistrationData           RegistrationDataReview[]         @relation("RegistrationDataReviewReviewer")
-  whatsappChannelEvents              WhatsAppChannelEvent[]           @relation("WhatsAppChannelEventActorUser")
-  serviceSessionEvents               ServiceSessionEvent[]            @relation("ServiceSessionEventActorUser")
-  reviewedCustomerProfileSuggestions CustomerProfileSuggestion[]      @relation("CustomerProfileSuggestionReviewer")
+  createdWhatsappChannels                  WhatsAppChannel[]                         @relation("WhatsAppChannelCreator")
+  responsibleServiceSessions               ServiceSession[]                          @relation("ServiceSessionResponsibleUser")
+  createdServiceQueues                     ServiceQueue[]                            @relation("ServiceQueueCreator")
+  assignedServiceSessions                  ServiceSessionAssignment[]                @relation("ServiceAssignmentUser")
+  createdServiceAssignments                ServiceSessionAssignment[]                @relation("ServiceAssignmentActor")
+  confirmedConversationParticipants        ConversationParticipant[]                 @relation("ConversationParticipantConfirmer")
+  createdServiceCases                      ServiceCase[]                             @relation("ServiceCaseCreator")
+  createdLumeAgents                        LumeAgent[]                               @relation("LumeAgentCreator")
+  createdAgentPromptVersions               AgentPromptVersion[]                      @relation("AgentPromptVersionCreator")
+  createdAgentRuntimeConfigs               AgentRuntimeConfigVersion[]               @relation("AgentRuntimeConfigCreator")
+  correctedMediaInterpretations            MediaInterpretationCorrection[]           @relation("MediaInterpretationCorrector")
+  createdKnowledgeBases                    KnowledgeBase[]                           @relation("KnowledgeBaseCreator")
+  createdKnowledgeDocuments                KnowledgeDocument[]                       @relation("KnowledgeDocumentCreator")
+  createdKnowledgeVersions                 KnowledgeDocumentVersion[]                @relation("KnowledgeVersionCreator")
+  publishedKnowledgeVersions               KnowledgeDocumentVersion[]                @relation("KnowledgeVersionPublisher")
+  reviewedKnowledgeSuggestions             KnowledgeSuggestion[]                     @relation("KnowledgeSuggestionReviewer")
+  reviewedRegistrationData                 RegistrationDataReview[]                  @relation("RegistrationDataReviewReviewer")
+  whatsappChannelEvents                    WhatsAppChannelEvent[]                    @relation("WhatsAppChannelEventActorUser")
+  serviceSessionEvents                     ServiceSessionEvent[]                     @relation("ServiceSessionEventActorUser")
+  reviewedCustomerProfileSuggestions       CustomerProfileSuggestion[]               @relation("CustomerProfileSuggestionReviewer")
 
   @@unique([id, companyId])
   @@index([companyId])
@@ -990,39 +1002,42 @@ model User {
 }
 
 model RoutingCompany {
-  id                 String               @id @default(uuid()) @db.Uuid
-  companyId          String               @map("company_id") @db.Uuid
-  taxId              String               @map("tax_id") @db.VarChar(14)
-  legalName          String               @map("legal_name") @db.VarChar(160)
-  tradeName          String?              @map("trade_name") @db.VarChar(120)
-  costCenter         String?              @map("cost_center") @db.VarChar(120)
-  clientType         RoutingClientType    @default(PJ) @map("client_type")
-  firstName          String?              @map("first_name") @db.VarChar(80)
-  lastName           String?              @map("last_name") @db.VarChar(120)
-  individualName     String?              @map("individual_name") @db.VarChar(160)
-  cpf                String?              @db.VarChar(11)
-  individualEmail    String?              @map("individual_email") @db.VarChar(254)
-  individualWhatsapp String?              @map("individual_whatsapp") @db.VarChar(20)
-  individualPhones   Json                 @default("[]") @map("individual_phones") @db.JsonB
-  cnpj               String?              @db.VarChar(14)
-  legalEmail         String?              @map("legal_email") @db.VarChar(254)
-  legalWhatsapp      String?              @map("legal_whatsapp") @db.VarChar(20)
-  legalPhones        Json                 @default("[]") @map("legal_phones") @db.JsonB
-  status             RoutingCompanyStatus @default(ACTIVE)
-  documentProfile Json? @map("document_profile") @db.JsonB
-  serviceInstructions String? @map("service_instructions") @db.VarChar(4000)
-  avicExternalId     String?              @map("avic_external_id") @db.VarChar(160)
-  avicLastSyncedAt   DateTime?            @map("avic_last_synced_at") @db.Timestamptz(3)
-  isTemporary        Boolean              @default(false) @map("is_temporary")
-  temporaryReason    String?              @map("temporary_reason") @db.VarChar(500)
-  regularizationDueAt DateTime?           @map("regularization_due_at") @db.Timestamptz(3)
-  regularizedAt      DateTime?            @map("regularized_at") @db.Timestamptz(3)
-  regularizationRequirements String[]     @default([]) @map("regularization_requirements")
-  temporaryResponsibleUserId String?      @map("temporary_responsible_user_id") @db.Uuid
-  version            Int                  @default(1)
-  createdByUserId    String?              @map("created_by_user_id") @db.Uuid
-  createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt          DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  transportSupplier     TransportSupplierProfile?
+  transportAffiliations TransportAffiliation[]
+
+  id                         String               @id @default(uuid()) @db.Uuid
+  companyId                  String               @map("company_id") @db.Uuid
+  taxId                      String               @map("tax_id") @db.VarChar(14)
+  legalName                  String               @map("legal_name") @db.VarChar(160)
+  tradeName                  String?              @map("trade_name") @db.VarChar(120)
+  costCenter                 String?              @map("cost_center") @db.VarChar(120)
+  clientType                 RoutingClientType    @default(PJ) @map("client_type")
+  firstName                  String?              @map("first_name") @db.VarChar(80)
+  lastName                   String?              @map("last_name") @db.VarChar(120)
+  individualName             String?              @map("individual_name") @db.VarChar(160)
+  cpf                        String?              @db.VarChar(11)
+  individualEmail            String?              @map("individual_email") @db.VarChar(254)
+  individualWhatsapp         String?              @map("individual_whatsapp") @db.VarChar(20)
+  individualPhones           Json                 @default("[]") @map("individual_phones") @db.JsonB
+  cnpj                       String?              @db.VarChar(14)
+  legalEmail                 String?              @map("legal_email") @db.VarChar(254)
+  legalWhatsapp              String?              @map("legal_whatsapp") @db.VarChar(20)
+  legalPhones                Json                 @default("[]") @map("legal_phones") @db.JsonB
+  status                     RoutingCompanyStatus @default(ACTIVE)
+  documentProfile            Json?                @map("document_profile") @db.JsonB
+  serviceInstructions        String?              @map("service_instructions") @db.VarChar(4000)
+  avicExternalId             String?              @map("avic_external_id") @db.VarChar(160)
+  avicLastSyncedAt           DateTime?            @map("avic_last_synced_at") @db.Timestamptz(3)
+  isTemporary                Boolean              @default(false) @map("is_temporary")
+  temporaryReason            String?              @map("temporary_reason") @db.VarChar(500)
+  regularizationDueAt        DateTime?            @map("regularization_due_at") @db.Timestamptz(3)
+  regularizedAt              DateTime?            @map("regularized_at") @db.Timestamptz(3)
+  regularizationRequirements String[]             @default([]) @map("regularization_requirements")
+  temporaryResponsibleUserId String?              @map("temporary_responsible_user_id") @db.Uuid
+  version                    Int                  @default(1)
+  createdByUserId            String?              @map("created_by_user_id") @db.Uuid
+  createdAt                  DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt                  DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   company                           Company                         @relation(fields: [companyId], references: [id], onDelete: Cascade)
   createdBy                         User?                           @relation("RoutingCompanyCreator", fields: [createdByUserId, companyId], references: [id, companyId], onDelete: NoAction)
@@ -1050,7 +1065,7 @@ model RoutingCompany {
   groupParticipants                 WhatsAppGroupParticipant[]
   dataReviews                       RegistrationDataReview[]
   customerProfileSuggestions        CustomerProfileSuggestion[]
-  documentRequests DocumentRequest[]
+  documentRequests                  DocumentRequest[]
 
   @@unique([id, companyId])
   @@unique([companyId, taxId])
@@ -1169,24 +1184,24 @@ model UserPersonAssociationHistory {
 }
 
 model UserUpdateHistory {
-  id                       String    @id @default(uuid()) @db.Uuid
-  companyId                String    @map("company_id") @db.Uuid
-  userId                   String    @map("user_id") @db.Uuid
-  actorUserId              String    @map("actor_user_id") @db.Uuid
-  commandId                String    @map("command_id") @db.Uuid
-  commandFingerprint       String    @map("command_fingerprint") @db.Char(64)
-  action                   String    @db.VarChar(40)
-  expectedVersion          Int       @map("expected_version")
-  resultingVersion         Int       @map("resulting_version")
-  changedFields            String[]  @map("changed_fields")
-  beforeSnapshot           Json      @map("before_snapshot") @db.JsonB
-  resultSnapshot           Json      @map("result_snapshot") @db.JsonB
-  documentSyncFingerprint  String?   @map("document_sync_fingerprint") @db.Char(64)
-  documentSynchronizedAt   DateTime? @map("document_synchronized_at") @db.Timestamptz(3)
-  documentRequestId        String?   @map("document_request_id") @db.Uuid
-  documentSyncResult       Json?     @map("document_sync_result") @db.JsonB
-  occurredAt               DateTime  @map("occurred_at") @db.Timestamptz(3)
-  createdAt                DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  id                      String    @id @default(uuid()) @db.Uuid
+  companyId               String    @map("company_id") @db.Uuid
+  userId                  String    @map("user_id") @db.Uuid
+  actorUserId             String    @map("actor_user_id") @db.Uuid
+  commandId               String    @map("command_id") @db.Uuid
+  commandFingerprint      String    @map("command_fingerprint") @db.Char(64)
+  action                  String    @db.VarChar(40)
+  expectedVersion         Int       @map("expected_version")
+  resultingVersion        Int       @map("resulting_version")
+  changedFields           String[]  @map("changed_fields")
+  beforeSnapshot          Json      @map("before_snapshot") @db.JsonB
+  resultSnapshot          Json      @map("result_snapshot") @db.JsonB
+  documentSyncFingerprint String?   @map("document_sync_fingerprint") @db.Char(64)
+  documentSynchronizedAt  DateTime? @map("document_synchronized_at") @db.Timestamptz(3)
+  documentRequestId       String?   @map("document_request_id") @db.Uuid
+  documentSyncResult      Json?     @map("document_sync_result") @db.JsonB
+  occurredAt              DateTime  @map("occurred_at") @db.Timestamptz(3)
+  createdAt               DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
 
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
   user    User    @relation("UserUpdateSubject", fields: [userId, companyId], references: [id, companyId], onDelete: Cascade)
@@ -1684,6 +1699,9 @@ model PassengerImportRecord {
 }
 
 model RoutingContract {
+  transportPeriodStates TransportPeriodState[]
+  transportProfile      TransportContractProfile?
+
   id                        String                     @id @default(uuid()) @db.Uuid
   companyId                 String                     @map("company_id") @db.Uuid
   routingCompanyId          String                     @map("routing_company_id") @db.Uuid
@@ -2409,49 +2427,49 @@ model WhatsAppContact {
 }
 
 model WhatsAppConversation {
-  id                      String             @id @default(uuid()) @db.Uuid
-  companyId               String             @map("company_id") @db.Uuid
-  channelId               String             @map("channel_id") @db.Uuid
-  contactId               String             @map("contact_id") @db.Uuid
-  threadId                String?            @map("thread_id") @db.Uuid
-  department              DepartmentCode     @default(COMMERCIAL)
-  conversationState       ConversationState  @default(BOT_ACTIVE) @map("conversation_state")
-  flowStep                FlowStep           @default(MAIN_MENU) @map("flow_step")
-  requestStatus           RequestStatus      @default(NOT_STARTED) @map("request_status")
-  resumeState             ConversationState? @map("resume_state")
-  resumeFlowStep          FlowStep?          @map("resume_flow_step")
-  assignedToUserId        String?            @map("assigned_to_user_id") @db.Uuid
-  pendingTransferDepartment DepartmentCode?  @map("pending_transfer_department")
-  pendingTransferReason   String?            @map("pending_transfer_reason") @db.VarChar(500)
-  pendingTransferRequestedByUserId String?   @map("pending_transfer_requested_by_user_id") @db.Uuid
-  pendingTransferRequestedAt DateTime?       @map("pending_transfer_requested_at") @db.Timestamptz(3)
-  unreadCount             Int                @default(0) @map("unread_count")
-  version                 Int                @default(1)
-  mainMenuPresentedAt     DateTime?          @map("main_menu_presented_at")
-  followUpMenuPresentedAt DateTime?          @map("follow_up_menu_presented_at")
-  contextualFollowUpAt    DateTime?          @map("contextual_follow_up_at")
-  departmentContactOption String?            @map("department_contact_option") @db.VarChar(2)
-  lastInboundAt           DateTime?          @map("last_inbound_at")
-  lastOutboundAt          DateTime?          @map("last_outbound_at")
-  lastMessagePreview      String?            @map("last_message_preview") @db.VarChar(240)
-  closedAt                DateTime?          @map("closed_at")
-  archivedAt              DateTime?          @map("archived_at")
-  archiveReason           String?            @map("archive_reason") @db.VarChar(40)
-  archivedByUserId        String?            @map("archived_by_user_id") @db.Uuid
-  archiveExemptedAt       DateTime?          @map("archive_exempted_at")
-  createdAt               DateTime           @default(now()) @map("created_at")
-  updatedAt               DateTime           @updatedAt @map("updated_at")
+  id                               String             @id @default(uuid()) @db.Uuid
+  companyId                        String             @map("company_id") @db.Uuid
+  channelId                        String             @map("channel_id") @db.Uuid
+  contactId                        String             @map("contact_id") @db.Uuid
+  threadId                         String?            @map("thread_id") @db.Uuid
+  department                       DepartmentCode     @default(COMMERCIAL)
+  conversationState                ConversationState  @default(BOT_ACTIVE) @map("conversation_state")
+  flowStep                         FlowStep           @default(MAIN_MENU) @map("flow_step")
+  requestStatus                    RequestStatus      @default(NOT_STARTED) @map("request_status")
+  resumeState                      ConversationState? @map("resume_state")
+  resumeFlowStep                   FlowStep?          @map("resume_flow_step")
+  assignedToUserId                 String?            @map("assigned_to_user_id") @db.Uuid
+  pendingTransferDepartment        DepartmentCode?    @map("pending_transfer_department")
+  pendingTransferReason            String?            @map("pending_transfer_reason") @db.VarChar(500)
+  pendingTransferRequestedByUserId String?            @map("pending_transfer_requested_by_user_id") @db.Uuid
+  pendingTransferRequestedAt       DateTime?          @map("pending_transfer_requested_at") @db.Timestamptz(3)
+  unreadCount                      Int                @default(0) @map("unread_count")
+  version                          Int                @default(1)
+  mainMenuPresentedAt              DateTime?          @map("main_menu_presented_at")
+  followUpMenuPresentedAt          DateTime?          @map("follow_up_menu_presented_at")
+  contextualFollowUpAt             DateTime?          @map("contextual_follow_up_at")
+  departmentContactOption          String?            @map("department_contact_option") @db.VarChar(2)
+  lastInboundAt                    DateTime?          @map("last_inbound_at")
+  lastOutboundAt                   DateTime?          @map("last_outbound_at")
+  lastMessagePreview               String?            @map("last_message_preview") @db.VarChar(240)
+  closedAt                         DateTime?          @map("closed_at")
+  archivedAt                       DateTime?          @map("archived_at")
+  archiveReason                    String?            @map("archive_reason") @db.VarChar(40)
+  archivedByUserId                 String?            @map("archived_by_user_id") @db.Uuid
+  archiveExemptedAt                DateTime?          @map("archive_exempted_at")
+  createdAt                        DateTime           @default(now()) @map("created_at")
+  updatedAt                        DateTime           @updatedAt @map("updated_at")
 
-  company           Company                          @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  channel           WhatsAppChannel                  @relation(fields: [channelId, companyId], references: [id, companyId], onDelete: Restrict)
-  contact           WhatsAppContact                  @relation(fields: [contactId, companyId], references: [id, companyId], onDelete: Restrict)
-  thread            WhatsAppThread?                  @relation(fields: [threadId, companyId], references: [id, companyId], onDelete: Restrict)
-  assignedTo        User?                            @relation("ConversationAssignee", fields: [assignedToUserId, companyId], references: [id, companyId], onDelete: Restrict)
-  pendingTransferRequestedBy User?                   @relation("ConversationPendingTransferRequester", fields: [pendingTransferRequestedByUserId, companyId], references: [id, companyId], onDelete: Restrict)
-  messages          WhatsAppMessage[]
-  transitions       WhatsAppConversationTransition[]
-  quoteRequests     QuoteRequest[]
-  proposalDocuments QuoteProposalDocument[]
+  company                    Company                          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  channel                    WhatsAppChannel                  @relation(fields: [channelId, companyId], references: [id, companyId], onDelete: Restrict)
+  contact                    WhatsAppContact                  @relation(fields: [contactId, companyId], references: [id, companyId], onDelete: Restrict)
+  thread                     WhatsAppThread?                  @relation(fields: [threadId, companyId], references: [id, companyId], onDelete: Restrict)
+  assignedTo                 User?                            @relation("ConversationAssignee", fields: [assignedToUserId, companyId], references: [id, companyId], onDelete: Restrict)
+  pendingTransferRequestedBy User?                            @relation("ConversationPendingTransferRequester", fields: [pendingTransferRequestedByUserId, companyId], references: [id, companyId], onDelete: Restrict)
+  messages                   WhatsAppMessage[]
+  transitions                WhatsAppConversationTransition[]
+  quoteRequests              QuoteRequest[]
+  proposalDocuments          QuoteProposalDocument[]
 
   @@unique([id, companyId])
   @@unique([companyId, channelId, contactId], map: "whatsapp_conversations_company_channel_contact_key")
@@ -2599,54 +2617,54 @@ model WhatsAppConversationTransition {
 }
 
 model QuoteRequest {
-  id                        String        @id @default(uuid()) @db.Uuid
-  companyId                 String        @map("company_id") @db.Uuid
-  conversationId            String        @map("conversation_id") @db.Uuid
-  threadId                  String?       @map("thread_id") @db.Uuid
-  serviceSessionId          String?       @map("service_session_id") @db.Uuid
-  caseId                    String?       @map("case_id") @db.Uuid
-  createdByAgentExecutionId String?       @map("created_by_agent_execution_id") @db.Uuid
+  id                        String                           @id @default(uuid()) @db.Uuid
+  companyId                 String                           @map("company_id") @db.Uuid
+  conversationId            String                           @map("conversation_id") @db.Uuid
+  threadId                  String?                          @map("thread_id") @db.Uuid
+  serviceSessionId          String?                          @map("service_session_id") @db.Uuid
+  caseId                    String?                          @map("case_id") @db.Uuid
+  createdByAgentExecutionId String?                          @map("created_by_agent_execution_id") @db.Uuid
   sequence                  Int
-  status                    RequestStatus @default(COLLECTING_INFORMATION)
-  contactName               String?       @map("contact_name") @db.VarChar(160)
-  document                  String?       @db.VarChar(20)
-  email                     String?       @db.VarChar(254)
-  serviceType               String?       @map("service_type") @db.VarChar(120)
-  origin                    String?       @db.VarChar(300)
-  destination               String?       @db.VarChar(300)
-  departureDate             DateTime?     @map("departure_date") @db.Date
-  departureAt               DateTime?     @map("departure_at")
-  returnDate                DateTime?     @map("return_date") @db.Date
-  returnAt                  DateTime?     @map("return_at")
-  passengerCount            Int?          @map("passenger_count")
-  vehicleType               String?       @map("vehicle_type") @db.VarChar(120)
-  vehicleAtDisposal         Boolean?      @map("vehicle_at_disposal")
-  localTransfers            Boolean?      @map("local_transfers")
-  notes                     String?       @db.Text
-  structuredData            Json          @default("{}") @map("structured_data") @db.JsonB
-  confirmedAt               DateTime?     @map("confirmed_at")
-  confirmedSummary          Json?         @map("confirmed_summary") @db.JsonB
-  confirmedVersion          Int?          @map("confirmed_version")
-  requestedByUserId         String?       @map("requested_by_user_id") @db.Uuid
+  status                    RequestStatus                    @default(COLLECTING_INFORMATION)
+  contactName               String?                          @map("contact_name") @db.VarChar(160)
+  document                  String?                          @db.VarChar(20)
+  email                     String?                          @db.VarChar(254)
+  serviceType               String?                          @map("service_type") @db.VarChar(120)
+  origin                    String?                          @db.VarChar(300)
+  destination               String?                          @db.VarChar(300)
+  departureDate             DateTime?                        @map("departure_date") @db.Date
+  departureAt               DateTime?                        @map("departure_at")
+  returnDate                DateTime?                        @map("return_date") @db.Date
+  returnAt                  DateTime?                        @map("return_at")
+  passengerCount            Int?                             @map("passenger_count")
+  vehicleType               String?                          @map("vehicle_type") @db.VarChar(120)
+  vehicleAtDisposal         Boolean?                         @map("vehicle_at_disposal")
+  localTransfers            Boolean?                         @map("local_transfers")
+  notes                     String?                          @db.Text
+  structuredData            Json                             @default("{}") @map("structured_data") @db.JsonB
+  confirmedAt               DateTime?                        @map("confirmed_at")
+  confirmedSummary          Json?                            @map("confirmed_summary") @db.JsonB
+  confirmedVersion          Int?                             @map("confirmed_version")
+  requestedByUserId         String?                          @map("requested_by_user_id") @db.Uuid
   closureClassification     CommercialClosureClassification? @map("closure_classification")
-  decisionReason            String?       @map("decision_reason") @db.VarChar(500)
-  decidedAt                 DateTime?     @map("decided_at")
-  decidedByUserId           String?       @map("decided_by_user_id") @db.Uuid
-  version                   Int           @default(1)
-  createdAt                 DateTime      @default(now()) @map("created_at")
-  updatedAt                 DateTime      @updatedAt @map("updated_at")
+  decisionReason            String?                          @map("decision_reason") @db.VarChar(500)
+  decidedAt                 DateTime?                        @map("decided_at")
+  decidedByUserId           String?                          @map("decided_by_user_id") @db.Uuid
+  version                   Int                              @default(1)
+  createdAt                 DateTime                         @default(now()) @map("created_at")
+  updatedAt                 DateTime                         @updatedAt @map("updated_at")
 
-  company                 Company                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  conversation            WhatsAppConversation    @relation(fields: [conversationId, companyId], references: [id, companyId], onDelete: Cascade)
-  thread                  WhatsAppThread?         @relation(fields: [threadId, companyId], references: [id, companyId], onDelete: Restrict)
-  serviceSession          ServiceSession?         @relation(fields: [serviceSessionId, companyId], references: [id, companyId], onDelete: Restrict)
-  serviceCase             ServiceCase?            @relation(fields: [caseId, companyId], references: [id, companyId], onDelete: Restrict)
-  createdByAgentExecution AgentExecution?         @relation("QuoteRequestAgentExecution", fields: [createdByAgentExecutionId, companyId], references: [id, companyId], onDelete: Restrict)
-  requestedByUser         User?                   @relation("QuoteProposalRequester", fields: [requestedByUserId, companyId], references: [id, companyId], onDelete: Restrict)
-  decidedByUser           User?                   @relation("QuoteProposalDecider", fields: [decidedByUserId, companyId], references: [id, companyId], onDelete: Restrict)
-  proposalDocuments       QuoteProposalDocument[]
-  notificationReads       QuoteNotificationRead[]
-  confirmedServices       ConfirmedService[]
+  company                                  Company                                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  conversation                             WhatsAppConversation                      @relation(fields: [conversationId, companyId], references: [id, companyId], onDelete: Cascade)
+  thread                                   WhatsAppThread?                           @relation(fields: [threadId, companyId], references: [id, companyId], onDelete: Restrict)
+  serviceSession                           ServiceSession?                           @relation(fields: [serviceSessionId, companyId], references: [id, companyId], onDelete: Restrict)
+  serviceCase                              ServiceCase?                              @relation(fields: [caseId, companyId], references: [id, companyId], onDelete: Restrict)
+  createdByAgentExecution                  AgentExecution?                           @relation("QuoteRequestAgentExecution", fields: [createdByAgentExecutionId, companyId], references: [id, companyId], onDelete: Restrict)
+  requestedByUser                          User?                                     @relation("QuoteProposalRequester", fields: [requestedByUserId, companyId], references: [id, companyId], onDelete: Restrict)
+  decidedByUser                            User?                                     @relation("QuoteProposalDecider", fields: [decidedByUserId, companyId], references: [id, companyId], onDelete: Restrict)
+  proposalDocuments                        QuoteProposalDocument[]
+  notificationReads                        QuoteNotificationRead[]
+  confirmedServices                        ConfirmedService[]
   commercialServiceRequirementAttestations CommercialServiceRequirementAttestation[]
 
   @@unique([companyId, conversationId, sequence])
@@ -2665,20 +2683,20 @@ model QuoteRequest {
 }
 
 model CommercialServiceRequirementAttestation {
-  id                   String                           @id @default(uuid()) @db.Uuid
-  companyId            String                           @map("company_id") @db.Uuid
-  sourceQuoteRequestId String                           @map("source_quote_request_id") @db.Uuid
-  sourceQuoteVersion   Int                              @map("source_quote_version")
-  sourceItemKey        String                           @map("source_item_key") @db.VarChar(80)
+  id                   String                              @id @default(uuid()) @db.Uuid
+  companyId            String                              @map("company_id") @db.Uuid
+  sourceQuoteRequestId String                              @map("source_quote_request_id") @db.Uuid
+  sourceQuoteVersion   Int                                 @map("source_quote_version")
+  sourceItemKey        String                              @map("source_item_key") @db.VarChar(80)
   kind                 CommercialServiceRequirementKind
   outcome              CommercialServiceRequirementOutcome @default(SATISFIED)
-  reason               String?                          @db.VarChar(500)
-  evidence             String                           @db.VarChar(500)
-  actorUserId          String                           @map("actor_user_id") @db.Uuid
-  commandId            String                           @map("command_id") @db.Uuid
-  commandFingerprint   String                           @map("command_fingerprint") @db.Char(64)
-  attestedAt           DateTime                         @map("attested_at") @db.Timestamptz(3)
-  createdAt            DateTime                         @default(now()) @map("created_at") @db.Timestamptz(3)
+  reason               String?                             @db.VarChar(500)
+  evidence             String                              @db.VarChar(500)
+  actorUserId          String                              @map("actor_user_id") @db.Uuid
+  commandId            String                              @map("command_id") @db.Uuid
+  commandFingerprint   String                              @map("command_fingerprint") @db.Char(64)
+  attestedAt           DateTime                            @map("attested_at") @db.Timestamptz(3)
+  createdAt            DateTime                            @default(now()) @map("created_at") @db.Timestamptz(3)
 
   company             Company            @relation(fields: [companyId], references: [id], onDelete: Cascade, map: "commercial_service_attestations_company_fkey")
   sourceQuoteRequest  QuoteRequest       @relation(fields: [sourceQuoteRequestId, companyId], references: [id, companyId], onDelete: Restrict, map: "commercial_service_attestations_quote_company_fkey")
@@ -4111,30 +4129,30 @@ model DocumentChecklistItem {
 }
 
 model DocumentRequest {
-  id              String                 @id @default(uuid()) @db.Uuid
-  companyId       String                 @map("company_id") @db.Uuid
-  subjectRegistrationId String? @map("subject_registration_id") @db.Uuid
-  subjectUserId   String?                 @map("subject_user_id") @db.Uuid
-  createdByUserId String                 @map("created_by_user_id") @db.Uuid
-  checklistId     String                 @map("checklist_id") @db.Uuid
-  context         DocumentRequestContext
-  department      DepartmentCode         @default(PERSONNEL_DEPARTMENT)
-  status          DocumentRequestStatus  @default(DRAFT)
-  deadline        DateTime?
-  notes           String?                @db.VarChar(2000)
-  commandId       String                 @map("command_id") @db.Uuid
-  version         Int                    @default(1)
-  completedAt     DateTime?              @map("completed_at")
-  createdAt       DateTime               @default(now()) @map("created_at")
-  updatedAt       DateTime               @updatedAt @map("updated_at")
+  id                    String                 @id @default(uuid()) @db.Uuid
+  companyId             String                 @map("company_id") @db.Uuid
+  subjectRegistrationId String?                @map("subject_registration_id") @db.Uuid
+  subjectUserId         String?                @map("subject_user_id") @db.Uuid
+  createdByUserId       String                 @map("created_by_user_id") @db.Uuid
+  checklistId           String                 @map("checklist_id") @db.Uuid
+  context               DocumentRequestContext
+  department            DepartmentCode         @default(PERSONNEL_DEPARTMENT)
+  status                DocumentRequestStatus  @default(DRAFT)
+  deadline              DateTime?
+  notes                 String?                @db.VarChar(2000)
+  commandId             String                 @map("command_id") @db.Uuid
+  version               Int                    @default(1)
+  completedAt           DateTime?              @map("completed_at")
+  createdAt             DateTime               @default(now()) @map("created_at")
+  updatedAt             DateTime               @updatedAt @map("updated_at")
 
-  company   Company                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  subjectRegistration RoutingCompany? @relation(fields: [subjectRegistrationId, companyId], references: [id, companyId], onDelete: Restrict)
-  subject   User?                      @relation("DocumentRequestSubject", fields: [subjectUserId, companyId], references: [id, companyId], onDelete: Restrict)
-  createdBy User                      @relation("DocumentRequestCreator", fields: [createdByUserId, companyId], references: [id, companyId], onDelete: Restrict)
-  checklist DocumentChecklistTemplate @relation(fields: [checklistId, companyId], references: [id, companyId], onDelete: Restrict)
-  items     DocumentRequestItem[]
-  history   DocumentStatusHistory[]
+  company             Company                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  subjectRegistration RoutingCompany?           @relation(fields: [subjectRegistrationId, companyId], references: [id, companyId], onDelete: Restrict)
+  subject             User?                     @relation("DocumentRequestSubject", fields: [subjectUserId, companyId], references: [id, companyId], onDelete: Restrict)
+  createdBy           User                      @relation("DocumentRequestCreator", fields: [createdByUserId, companyId], references: [id, companyId], onDelete: Restrict)
+  checklist           DocumentChecklistTemplate @relation(fields: [checklistId, companyId], references: [id, companyId], onDelete: Restrict)
+  items               DocumentRequestItem[]
+  history             DocumentStatusHistory[]
 
   @@unique([id, companyId])
   @@unique([companyId, commandId])
@@ -4777,4 +4795,415 @@ model TollTariff {
   @@index([tollPointId, validFrom, validUntil])
   @@index([vehicleCategoryId, axles, validFrom])
   @@map("toll_tariffs")
+}
+
+/// Contextual supplier role; the registration remains the sole legal identity.
+model TransportSupplierProfile {
+  fleetOwnerships      TransportFleetOwnership[]
+  registrationId       String                     @id @map("registration_id") @db.Uuid
+  companyId            String                     @map("company_id") @db.Uuid
+  active               Boolean                    @default(true)
+  version              Int                        @default(1)
+  createdAt            DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime                   @updatedAt @map("updated_at") @db.Timestamptz(3)
+  cnpj                 String                     @db.VarChar(14)
+  legalName            String                     @map("legal_name") @db.VarChar(160)
+  tradeName            String?                    @map("trade_name") @db.VarChar(120)
+  legacyRegistrationId String?                    @unique @map("legacy_registration_id") @db.Uuid
+  legacyRegistration   RoutingCompany?            @relation(fields: [legacyRegistrationId, companyId], references: [id, companyId], onDelete: Restrict, map: "transport_supplier_profiles_legacy_registration_fkey")
+  tenant               Company                    @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  fleet                TransportFleet[]
+  affiliations         TransportAffiliation[]
+  contracts            TransportContractProfile[]
+
+  @@unique([registrationId, companyId])
+  @@unique([companyId, cnpj])
+  @@unique([legacyRegistrationId, companyId], map: "transport_supplier_profiles_legacy_tenant_key")
+  @@index([companyId, active])
+  @@map("transport_supplier_profiles")
+}
+
+model TransportCatalogItem {
+  id            String           @id @default(uuid()) @db.Uuid
+  companyId     String           @map("company_id") @db.Uuid
+  kind          String           @db.VarChar(24)
+  code          String           @default(dbgenerated("nextval('transport_catalog_code_seq'::regclass)::text")) @db.VarChar(60)
+  legacyCode    String?          @map("legacy_code") @db.VarChar(60)
+  seedKey       String?          @map("seed_key") @db.VarChar(60)
+  name          String           @db.VarChar(120)
+  active        Boolean          @default(true)
+  version       Int              @default(1)
+  company       Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  serviceFleet  TransportFleet[] @relation("TransportServiceType")
+  vehicleFleet  TransportFleet[] @relation("TransportVehicleType")
+  categoryFleet TransportFleet[] @relation("TransportVehicleCategory")
+
+  @@unique([id, companyId])
+  @@unique([companyId, kind, code])
+  @@unique([companyId, kind, seedKey])
+  @@index([companyId, kind, active])
+  @@map("transport_catalog_items")
+}
+
+model TransportFleet {
+  ownerships             TransportFleetOwnership[]
+  provider               String?                   @db.VarChar(40)
+  externalVehicleId      String?                   @map("external_vehicle_id") @db.VarChar(200)
+  id                     String                    @id @default(uuid()) @db.Uuid
+  companyId              String                    @map("company_id") @db.Uuid
+  fleetCode              String                    @map("fleet_code") @db.VarChar(80)
+  supplierRegistrationId String                    @map("supplier_registration_id") @db.Uuid
+  plate                  String?                   @db.VarChar(20)
+  serviceTypeId          String?                   @map("service_type_id") @db.Uuid
+  vehicleTypeId          String?                   @map("vehicle_type_id") @db.Uuid
+  categoryId             String?                   @map("category_id") @db.Uuid
+  axles                  Int?
+  passengers             Int?
+  model                  String?                   @db.VarChar(160)
+  active                 Boolean                   @default(true)
+  version                Int                       @default(1)
+  createdAt              DateTime                  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt              DateTime                  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  supplier               TransportSupplierProfile  @relation(fields: [supplierRegistrationId, companyId], references: [registrationId, companyId], onDelete: Restrict)
+  serviceType            TransportCatalogItem?     @relation("TransportServiceType", fields: [serviceTypeId, companyId], references: [id, companyId], onDelete: Restrict)
+  vehicleType            TransportCatalogItem?     @relation("TransportVehicleType", fields: [vehicleTypeId, companyId], references: [id, companyId], onDelete: Restrict)
+  category               TransportCatalogItem?     @relation("TransportVehicleCategory", fields: [categoryId, companyId], references: [id, companyId], onDelete: Restrict)
+
+  @@unique([id, companyId])
+  @@unique([companyId, fleetCode])
+  @@unique([companyId, provider, externalVehicleId])
+  @@index([companyId, active, fleetCode])
+  @@map("transport_fleet")
+}
+
+/// Employment/customer links are explicit and time bounded, never inferred from Avic.
+model TransportAffiliation {
+  id                     String                   @id @default(uuid()) @db.Uuid
+  companyId              String                   @map("company_id") @db.Uuid
+  registrationId         String                   @map("registration_id") @db.Uuid
+  supplierRegistrationId String                   @map("supplier_registration_id") @db.Uuid
+  role                   String                   @db.VarChar(16)
+  validFrom              DateTime                 @map("valid_from") @db.Date
+  validUntil             DateTime?                @map("valid_until") @db.Date
+  version                Int                      @default(1)
+  registration           RoutingCompany           @relation(fields: [registrationId, companyId], references: [id, companyId], onDelete: Restrict)
+  supplier               TransportSupplierProfile @relation(fields: [supplierRegistrationId, companyId], references: [registrationId, companyId], onDelete: Restrict)
+
+  @@unique([id, companyId])
+  @@index([companyId, registrationId, role, validFrom])
+  @@map("transport_affiliations")
+}
+
+/// Commercial transport profile of the existing canonical contract.
+model TransportContractProfile {
+  contractId             String                       @id @map("contract_id") @db.Uuid
+  companyId              String                       @map("company_id") @db.Uuid
+  supplierRegistrationId String                       @map("supplier_registration_id") @db.Uuid
+  modality               String                       @db.VarChar(24)
+  contract               RoutingContract              @relation(fields: [contractId, companyId], references: [id, companyId], onDelete: Restrict)
+  supplier               TransportSupplierProfile     @relation(fields: [supplierRegistrationId, companyId], references: [registrationId, companyId], onDelete: Restrict)
+  conditions             TransportContractCondition[]
+  routeAssignments       TransportRouteAssignment[]
+
+  @@unique([contractId, companyId])
+  @@index([companyId, supplierRegistrationId])
+  @@map("transport_contract_profiles")
+}
+
+model TransportContractCondition {
+  id                    String                   @id @default(uuid()) @db.Uuid
+  companyId             String                   @map("company_id") @db.Uuid
+  contractId            String                   @map("contract_id") @db.Uuid
+  validFrom             DateTime                 @map("valid_from") @db.Date
+  validUntil            DateTime?                @map("valid_until") @db.Date
+  period                String                   @db.VarChar(12)
+  allowanceKm           Decimal?                 @map("allowance_km") @db.Decimal(16, 3)
+  includeGarage         Boolean                  @map("include_garage")
+  transitionMonth       String?                  @map("transition_month") @db.VarChar(7)
+  transitionAllowanceKm Decimal?                 @map("transition_allowance_km") @db.Decimal(16, 3)
+  version               Int                      @default(1)
+  createdAt             DateTime                 @default(now()) @map("created_at") @db.Timestamptz(3)
+  contract              TransportContractProfile @relation(fields: [contractId, companyId], references: [contractId, companyId], onDelete: Restrict)
+
+  @@unique([id, companyId])
+  @@index([companyId, contractId, validFrom])
+  @@map("transport_contract_conditions")
+}
+
+/// External route identity, deliberately distinct from a routing plan.
+model TransportExternalRoute {
+  id          String                     @id @default(uuid()) @db.Uuid
+  companyId   String                     @map("company_id") @db.Uuid
+  provider    String                     @db.VarChar(40)
+  externalId  String?                    @map("external_id") @db.VarChar(200)
+  name        String                     @db.VarChar(200)
+  version     Int                        @default(1)
+  company     Company                    @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  assignments TransportRouteAssignment[]
+
+  @@unique([id, companyId])
+  @@unique([companyId, provider, externalId])
+  @@index([companyId, provider, name])
+  @@map("transport_external_routes")
+}
+
+model TransportRouteAssignment {
+  id         String                   @id @default(uuid()) @db.Uuid
+  companyId  String                   @map("company_id") @db.Uuid
+  routeId    String                   @map("route_id") @db.Uuid
+  contractId String                   @map("contract_id") @db.Uuid
+  validFrom  DateTime                 @map("valid_from") @db.Date
+  validUntil DateTime?                @map("valid_until") @db.Date
+  version    Int                      @default(1)
+  route      TransportExternalRoute   @relation(fields: [routeId, companyId], references: [id, companyId], onDelete: Restrict)
+  contract   TransportContractProfile @relation(fields: [contractId, companyId], references: [contractId, companyId], onDelete: Restrict)
+
+  @@unique([id, companyId])
+  @@index([companyId, routeId, validFrom])
+  @@index([companyId, contractId, validFrom])
+  @@map("transport_route_assignments")
+}
+
+/// Atomic idempotency receipt and original response for catalog commands.
+model TransportCatalogCommand {
+  id          String   @id @default(uuid()) @db.Uuid
+  companyId   String   @map("company_id") @db.Uuid
+  commandId   String   @map("command_id") @db.Uuid
+  requestHash String   @map("request_hash") @db.VarChar(64)
+  response    Json     @db.JsonB
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Restrict)
+
+  @@unique([companyId, commandId])
+  @@map("transport_catalog_commands")
+}
+
+model TransportIntegration {
+  id               String    @id @default(uuid()) @db.Uuid
+  companyId        String    @map("company_id") @db.Uuid
+  provider         String    @default("avic") @db.VarChar(40)
+  enabled          Boolean   @default(false)
+  settings         Json      @default("{}") @db.JsonB
+  version          Int       @default(1)
+  leaseUntil       DateTime? @map("lease_until") @db.Timestamptz(3)
+  lastScheduledDay String?   @map("last_scheduled_day") @db.VarChar(10)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  company          Company   @relation(fields: [companyId], references: [id], onDelete: NoAction)
+
+  @@unique([companyId, provider])
+  @@map("transport_integrations")
+}
+
+model TransportImport {
+  supersededByImportId String?                    @map("superseded_by_import_id") @db.Uuid
+  supersededBy         TransportImport?           @relation("TransportImportSupersession", fields: [supersededByImportId, companyId], references: [id, companyId], onDelete: NoAction, onUpdate: NoAction, map: "transport_imports_superseded_tenant_fkey")
+  supersededImports    TransportImport[]          @relation("TransportImportSupersession")
+  rejected             Int                        @default(0)
+  rejections           TransportImportRejection[]
+  id                   String                     @id @default(uuid()) @db.Uuid
+  companyId            String                     @map("company_id") @db.Uuid
+  provider             String                     @default("avic") @db.VarChar(40)
+  from                 DateTime                   @db.Date
+  to                   DateTime                   @db.Date
+  vehicleIds           String[]                   @map("vehicle_ids")
+  vehicleIndex         Int                        @default(0) @map("vehicle_index")
+  skip                 Int                        @default(0)
+  imported             Int                        @default(0)
+  status               String                     @default("QUEUED") @db.VarChar(20)
+  lastError            String?                    @map("last_error") @db.VarChar(500)
+  nextAttemptAt        DateTime                   @default(now()) @map("next_attempt_at") @db.Timestamptz(3)
+  attemptCount         Int                        @default(0) @map("attempt_count")
+  version              Int                        @default(1)
+  scheduleKey          String?                    @map("schedule_key") @db.VarChar(160)
+  verificationIssueId  String?                    @map("verification_issue_id") @db.Uuid
+  createdAt            DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime                   @updatedAt @map("updated_at") @db.Timestamptz(3)
+  company              Company                    @relation(fields: [companyId], references: [id], onDelete: NoAction)
+
+  @@unique([id, companyId])
+  @@unique([companyId, provider, scheduleKey])
+  @@index([companyId, status, nextAttemptAt])
+  @@map("transport_imports")
+}
+
+model TransportRecord {
+  driverExternalId   String?                  @map("driver_external_id") @db.VarChar(160)
+  driverName         String?                  @map("driver_name") @db.VarChar(200)
+  customerExternalId String?                  @map("customer_external_id") @db.VarChar(160)
+  customerName       String?                  @map("customer_name") @db.VarChar(200)
+  id                 String                   @id @default(uuid()) @db.Uuid
+  companyId          String                   @map("company_id") @db.Uuid
+  provider           String                   @default("avic") @db.VarChar(40)
+  externalId         String                   @map("external_id") @db.VarChar(160)
+  vehicleExternalId  String                   @map("vehicle_external_id") @db.VarChar(160)
+  fleet              String?                  @db.VarChar(160)
+  routeExternalId    String?                  @map("route_external_id") @db.VarChar(160)
+  routeName          String?                  @map("route_name") @db.VarChar(1000)
+  startedAt          DateTime?                @map("started_at") @db.Timestamptz(3)
+  endedAt            DateTime?                @map("ended_at") @db.Timestamptz(3)
+  sortAt             DateTime                 @map("sort_at") @db.Timestamptz(3)
+  startKm            Decimal?                 @map("start_km") @db.Decimal(16, 3)
+  endKm              Decimal?                 @map("end_km") @db.Decimal(16, 3)
+  reportedKm         Decimal?                 @map("reported_km") @db.Decimal(16, 3)
+  serviceKm          Decimal?                 @map("service_km") @db.Decimal(16, 3)
+  source             String                   @default("DRIVER_REPORTED") @db.VarChar(30)
+  sourceUpdatedAt    DateTime?                @map("source_updated_at") @db.Timestamptz(3)
+  raw                Json                     @db.JsonB
+  fingerprint        String                   @db.VarChar(64)
+  version            Int                      @default(1)
+  verifiedAt         DateTime                 @default(now()) @map("verified_at") @db.Timestamptz(3)
+  createdAt          DateTime                 @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime                 @updatedAt @map("updated_at") @db.Timestamptz(3)
+  company            Company                  @relation(fields: [companyId], references: [id], onDelete: NoAction)
+  history            TransportRecordHistory[]
+  issues             TransportIssue[]
+
+  @@unique([id, companyId])
+  @@unique([companyId, provider, externalId])
+  @@index([companyId, provider, vehicleExternalId, sortAt, id])
+  @@index([companyId, provider, routeExternalId, sortAt])
+  @@index([companyId, vehicleExternalId, sortAt, id], map: "transport_record_vehicle_sequence_idx")
+  @@index([companyId, sortAt, id], map: "transport_record_date_idx")
+  @@map("transport_records")
+}
+
+model TransportRecordHistory {
+  id        String          @id @default(uuid()) @db.Uuid
+  companyId String          @map("company_id") @db.Uuid
+  recordId  String          @map("record_id") @db.Uuid
+  version   Int
+  before    Json?           @db.JsonB
+  after     Json            @db.JsonB
+  createdAt DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  record    TransportRecord @relation(fields: [recordId, companyId], references: [id, companyId], onDelete: NoAction)
+
+  @@unique([companyId, recordId, version])
+  @@map("transport_record_history")
+}
+
+model TransportIssue {
+  verificationUnavailableAt DateTime?               @map("verification_unavailable_at") @db.Timestamptz(3)
+  id                        String                  @id @default(uuid()) @db.Uuid
+  companyId                 String                  @map("company_id") @db.Uuid
+  provider                  String                  @default("avic") @db.VarChar(40)
+  recordId                  String                  @map("record_id") @db.Uuid
+  vehicleExternalId         String                  @map("vehicle_external_id") @db.VarChar(160)
+  code                      String                  @db.VarChar(80)
+  status                    String                  @default("OPEN") @db.VarChar(20)
+  verificationState         String                  @default("PENDING") @map("verification_state") @db.VarChar(20)
+  context                   Json                    @default("{}") @db.JsonB
+  guidance                  String                  @default("Corrija a quilometragem no sistema Avic. O Lume verificará novamente a origem e manterá o histórico.") @db.VarChar(500)
+  version                   Int                     @default(1)
+  detectedAt                DateTime                @default(now()) @map("detected_at") @db.Timestamptz(3)
+  lastVerifiedAt            DateTime?               @map("last_verified_at") @db.Timestamptz(3)
+  nextVerificationAt        DateTime                @default(now()) @map("next_verification_at") @db.Timestamptz(3)
+  createdAt                 DateTime                @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt                 DateTime                @updatedAt @map("updated_at") @db.Timestamptz(3)
+  record                    TransportRecord         @relation(fields: [recordId, companyId], references: [id, companyId], onDelete: NoAction)
+  history                   TransportIssueHistory[]
+
+  @@unique([id, companyId])
+  @@unique([companyId, provider, recordId, code])
+  @@index([companyId, status, nextVerificationAt])
+  @@index([companyId, vehicleExternalId, status, id])
+  @@index([companyId, status, id], map: "transport_issue_status_page_idx")
+  @@map("transport_issues")
+}
+
+model TransportIssueHistory {
+  id          String         @id @default(uuid()) @db.Uuid
+  companyId   String         @map("company_id") @db.Uuid
+  issueId     String         @map("issue_id") @db.Uuid
+  kind        String         @db.VarChar(40)
+  actorUserId String?        @map("actor_user_id") @db.Uuid
+  before      Json?          @db.JsonB
+  after       Json?          @db.JsonB
+  text        String?        @db.VarChar(4000)
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  issue       TransportIssue @relation(fields: [issueId, companyId], references: [id, companyId], onDelete: NoAction)
+
+  @@index([companyId, issueId, createdAt])
+  @@map("transport_issue_history")
+}
+
+model TransportAnalysis {
+  id        String    @id @default(uuid()) @db.Uuid
+  companyId String    @map("company_id") @db.Uuid
+  vehicleId String    @map("vehicle_id") @db.VarChar(160)
+  from      DateTime  @db.Date
+  to        DateTime  @db.Date
+  status    String    @default("QUEUED") @db.VarChar(20)
+  cursorAt  DateTime? @map("cursor_at") @db.Timestamptz(3)
+  cursorId  String?   @map("cursor_id") @db.Uuid
+  processed Int       @default(0)
+  lastError String?   @map("last_error") @db.VarChar(500)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  company   Company   @relation(fields: [companyId], references: [id], onDelete: NoAction)
+
+  @@unique([id, companyId])
+  @@index([companyId, status, createdAt])
+  @@map("transport_analyses")
+}
+
+model TransportImportCommand {
+  id          String   @id @default(uuid()) @db.Uuid
+  companyId   String   @map("company_id") @db.Uuid
+  commandId   String   @map("command_id") @db.Uuid
+  fingerprint String   @db.VarChar(64)
+  result      Json     @db.JsonB
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: NoAction)
+
+  @@unique([companyId, commandId])
+  @@map("transport_import_commands")
+}
+
+/// Time bounded ownership; imported records resolve by date instead of current fleet configuration.
+model TransportFleetOwnership {
+  id                     String                   @id @default(uuid()) @db.Uuid
+  companyId              String                   @map("company_id") @db.Uuid
+  fleetId                String                   @map("fleet_id") @db.Uuid
+  supplierRegistrationId String                   @map("supplier_registration_id") @db.Uuid
+  validFrom              DateTime                 @map("valid_from") @db.Date
+  validUntil             DateTime?                @map("valid_until") @db.Date
+  version                Int                      @default(1)
+  fleet                  TransportFleet           @relation(fields: [fleetId, companyId], references: [id, companyId], onDelete: Restrict)
+  supplier               TransportSupplierProfile @relation(fields: [supplierRegistrationId, companyId], references: [registrationId, companyId], onDelete: Restrict)
+
+  @@unique([id, companyId])
+  @@index([companyId, fleetId, validFrom])
+  @@map("transport_fleet_ownerships")
+}
+
+model TransportPeriodState {
+  id         String          @id @default(uuid()) @db.Uuid
+  companyId  String          @map("company_id") @db.Uuid
+  contractId String          @map("contract_id") @db.Uuid
+  period     String          @db.VarChar(10)
+  state      String          @default("OPEN") @db.VarChar(16)
+  version    Int             @default(1)
+  updatedAt  DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  contract   RoutingContract @relation(fields: [contractId, companyId], references: [id, companyId], onDelete: NoAction)
+
+  @@unique([companyId, contractId, period])
+  @@map("transport_period_states")
+}
+
+model TransportImportRejection {
+  id           String          @id @default(uuid()) @db.Uuid
+  companyId    String          @map("company_id") @db.Uuid
+  importId     String          @map("import_id") @db.Uuid
+  vehicleIndex Int             @map("vehicle_index")
+  pageSkip     Int             @map("page_skip")
+  position     Int
+  raw          Json            @db.JsonB
+  reason       String          @db.VarChar(400)
+  createdAt    DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  batch        TransportImport @relation(fields: [importId, companyId], references: [id, companyId], onDelete: NoAction)
+
+  @@unique([importId, vehicleIndex, pageSkip, position])
+  @@index([companyId, importId, id])
+  @@map("transport_import_rejections")
 }

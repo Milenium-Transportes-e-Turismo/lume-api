@@ -146,6 +146,27 @@ describe('ServiceSession', () => {
     expect(() => assertAiCustomerFacingDispatchAllowed(transferred)).toThrow();
   });
 
+  it('clears an erroneous resolution when a pending request is transferred', () => {
+    const result = evolveServiceSession(
+      session({
+        conversationResolved: true,
+        resolutionConfirmedByCustomer: true,
+      }),
+      {
+        type: 'transfer',
+        departmentId: 'financial',
+        queueId: 'financial-queue',
+      },
+    );
+    expect(result).toMatchObject({
+      status: 'waiting-human',
+      controlMode: 'human',
+      conversationResolved: false,
+      resolutionConfirmedByCustomer: false,
+      version: 2,
+    });
+  });
+
   it('supports priority interruption without changing who controls the session', () => {
     const human = session({
       controlMode: 'human',

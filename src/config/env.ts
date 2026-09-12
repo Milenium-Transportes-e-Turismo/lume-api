@@ -302,6 +302,49 @@ const departmentPhoneShape = {
 
 const baseEnvSchema = z
   .object({
+    TRANSPORT_WORKER_ENABLED: booleanSchema('TRANSPORT_WORKER_ENABLED', false),
+    AVIC_API_BASE_URL: optionalStringSchema('AVIC_API_BASE_URL').refine((v) => {
+      if (!v) return true;
+      try {
+        const u = new URL(v);
+        return (
+          ['http:', 'https:'].includes(u.protocol) &&
+          !u.username &&
+          !u.password &&
+          !u.search &&
+          !u.hash
+        );
+      } catch {
+        return false;
+      }
+    }, 'AVIC_API_BASE_URL deve ser HTTP(S), sem credenciais ou query.'),
+    AVIC_API_HEADERS_JSON: optionalStringSchema('AVIC_API_HEADERS_JSON').refine(
+      (v) => {
+        if (!v) return true;
+        try {
+          const parsed: unknown = JSON.parse(v);
+          return (
+            !!parsed &&
+            typeof parsed === 'object' &&
+            !Array.isArray(parsed) &&
+            Object.values(parsed).every((value) => typeof value === 'string')
+          );
+        } catch {
+          return false;
+        }
+      },
+      'AVIC_API_HEADERS_JSON deve ser um objeto de headers.',
+    ),
+    AVIC_API_USER_ID: optionalStringSchema('AVIC_API_USER_ID'),
+    // Preserve the exact secret; trim only when checking whether it is configured.
+    AVIC_API_ACCESS_KEY: z.preprocess(
+      (value) => value ?? '',
+      z.string({ error: 'AVIC_API_ACCESS_KEY deve ser uma string.' }),
+    ),
+    AVIC_AUTH_UTC_OFFSET: optionalStringSchema('AVIC_AUTH_UTC_OFFSET').refine(
+      (value) => !value || /^[+-](?:(?:0\d|1[0-3]):[0-5]\d|14:00)$/.test(value),
+      'AVIC_AUTH_UTC_OFFSET deve ser um offset explicito como -03:00.',
+    ),
     NODE_ENV: z
       .enum(NODE_ENVIRONMENTS, {
         error: 'NODE_ENV deve ser development, test ou production.',
@@ -713,6 +756,14 @@ const baseEnvSchema = z
       'WHATSAPP_FOLLOW_UP_INACTIVITY_MS',
       1_800_000,
     ),
+    WHATSAPP_CUSTOMER_REMINDER_DELAY_MS: positiveIntegerSchema(
+      'WHATSAPP_CUSTOMER_REMINDER_DELAY_MS',
+      10_800_000,
+    ),
+    WHATSAPP_CUSTOMER_CLOSURE_DELAY_MS: positiveIntegerSchema(
+      'WHATSAPP_CUSTOMER_CLOSURE_DELAY_MS',
+      3_600_000,
+    ),
     WHATSAPP_PREVENT_CLOSE_WITH_APPROVED_QUOTE: booleanSchema(
       'WHATSAPP_PREVENT_CLOSE_WITH_APPROVED_QUOTE',
       false,
@@ -769,6 +820,42 @@ export function parseCorsOrigins(value: string): string[] {
 
 export const envSchema = baseEnvSchema
   .superRefine((config, context) => {
+    const avicLogin =
+      !!config.AVIC_API_USER_ID || !!config.AVIC_API_ACCESS_KEY.trim();
+    if (avicLogin) {
+      if (
+        !config.AVIC_API_USER_ID ||
+        !config.AVIC_API_ACCESS_KEY.trim() ||
+        !config.AVIC_API_BASE_URL
+      ) {
+        addIssue(
+          context,
+          'Login Avic exige AVIC_API_BASE_URL, AVIC_API_USER_ID e AVIC_API_ACCESS_KEY.',
+          ['AVIC_API_USER_ID'],
+        );
+      }
+      if (config.AVIC_API_HEADERS_JSON) {
+        let headers: unknown;
+        try {
+          headers = JSON.parse(config.AVIC_API_HEADERS_JSON) as unknown;
+        } catch {
+          headers = undefined;
+        }
+        if (
+          headers &&
+          typeof headers === 'object' &&
+          Object.keys(headers).some(
+            (key) => key.toLowerCase() === 'authorization',
+          )
+        ) {
+          addIssue(
+            context,
+            'Remova Authorization de AVIC_API_HEADERS_JSON ao configurar login automatico.',
+            ['AVIC_API_HEADERS_JSON'],
+          );
+        }
+      }
+    }
     let databaseUrl: URL | undefined;
     try {
       databaseUrl = new URL(config.DATABASE_URL);

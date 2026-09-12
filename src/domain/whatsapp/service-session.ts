@@ -206,6 +206,8 @@ export function evolveServiceSession(
         responsibleUserId: userId,
         queueId,
         aiClosingStartedAt: null,
+        conversationResolved: false,
+        resolutionConfirmedByCustomer: false,
       });
     }
 

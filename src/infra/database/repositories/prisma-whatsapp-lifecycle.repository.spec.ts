@@ -1,10 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 import { describe, expect, it, vi } from 'vitest';
 
-import {
-  AI_CLOSING_WAIT_MS,
-  PUBLIC_CONTINUATION_CODE_TTL_MS,
-} from '../../../domain/whatsapp/service-session';
+import { PUBLIC_CONTINUATION_CODE_TTL_MS } from '../../../domain/whatsapp/service-session';
 import {
   ContinuityClassification,
   ContinuityFallbackAction,
@@ -30,6 +27,20 @@ const sessionId = '00000000-0000-4000-8000-000000000006';
 const messageId = '00000000-0000-4000-8000-000000000007';
 const attemptId = '00000000-0000-4000-8000-000000000008';
 const now = new Date('2026-08-29T12:00:00.000Z');
+const CUSTOMER_CLOSE_DELAY = 3_600_000;
+const CUSTOMER_REMINDER_DELAY = 10_800_000;
+function lifecycleMessage(patch: Record<string, unknown> = {}) {
+  return {
+    id: messageId,
+    text: 'Qual é a data de saída?',
+    direction: MessageDirection.OUTBOUND,
+    deliveryStatus: DeliveryStatus.DELIVERED,
+    automationPurpose: 'customer-information-reminder',
+    createdAt: new Date(now.getTime() - CUSTOMER_CLOSE_DELAY),
+    attempts: [],
+    ...patch,
+  };
+}
 
 function session(
   patch: Readonly<Record<string, unknown>> = {},
@@ -223,12 +234,12 @@ describe('PrismaWhatsAppRepository service-session lifecycle', () => {
     );
   });
 
-  it('starts the formal 30-minute closing only after persisted resolution and completed deliveries', async () => {
+  it('reinforces the pending question after three hours and starts a one-hour customer deadline', async () => {
     const closing = session({
       status: ServiceSessionStatus.CLOSING,
       version: 2,
       closingStartedAt: now,
-      closingDeadlineAt: new Date(now.getTime() + AI_CLOSING_WAIT_MS),
+      closingDeadlineAt: new Date(now.getTime() + CUSTOMER_CLOSE_DELAY),
     });
     const messageCreate = vi.fn(async ({ data }) => ({
       id: messageId,
@@ -248,9 +259,16 @@ describe('PrismaWhatsAppRepository service-session lifecycle', () => {
         findUniqueOrThrow: vi.fn(async () => closing),
       },
       whatsAppMessage: {
+        findFirst: vi.fn(async () =>
+          lifecycleMessage({
+            automationPurpose: 'customer-information-request',
+            createdAt: new Date(now.getTime() - CUSTOMER_REMINDER_DELAY),
+          }),
+        ),
         count: vi.fn(async () => 0),
         create: messageCreate,
       },
+      quoteRequest: { count: vi.fn(async () => 0) },
       quoteProposalDocument: { count: vi.fn(async () => 0) },
       serviceSessionEvent: { create: vi.fn(async () => ({})) },
       whatsAppMessageAttempt: {
@@ -262,12 +280,8 @@ describe('PrismaWhatsAppRepository service-session lifecycle', () => {
       },
     };
     const prisma = {
-      serviceSession: {
-        findMany: vi
-          .fn()
-          .mockResolvedValueOnce([])
-          .mockResolvedValueOnce([{ id: sessionId, companyId, threadId }]),
-      },
+      $queryRaw: vi.fn(async () => [{ id: sessionId, companyId, threadId }]),
+      serviceSession: { findMany: vi.fn(async () => []) },
     };
     const repository = repositoryWithTransaction(prisma, transaction);
 
@@ -279,12 +293,11 @@ describe('PrismaWhatsAppRepository service-session lifecycle', () => {
         where: expect.objectContaining({
           companyId,
           version: 1,
-          conversationResolved: true,
         }),
         data: expect.objectContaining({
           status: ServiceSessionStatus.CLOSING,
           closingStartedAt: now,
-          closingDeadlineAt: new Date(now.getTime() + AI_CLOSING_WAIT_MS),
+          closingDeadlineAt: new Date(now.getTime() + CUSTOMER_CLOSE_DELAY),
         }),
       }),
     );
@@ -292,8 +305,8 @@ describe('PrismaWhatsAppRepository service-session lifecycle', () => {
       expect.objectContaining({
         data: expect.objectContaining({
           serviceSessionId: sessionId,
-          text: 'Precisa de mais alguma coisa?',
-          automationPurpose: 'service-session-closing-question',
+          text: 'Quando puder, me responda para continuarmos:\n\nQual é a data de saída?',
+          automationPurpose: 'customer-information-reminder',
           deliveryStatus: DeliveryStatus.PENDING,
         }),
       }),
@@ -306,7 +319,7 @@ describe('PrismaWhatsAppRepository service-session lifecycle', () => {
   it('closes a due session with a tenant-scoped three-digit code valid for exactly seven days', async () => {
     const due = session({
       status: ServiceSessionStatus.CLOSING,
-      closingStartedAt: new Date(now.getTime() - AI_CLOSING_WAIT_MS),
+      closingStartedAt: new Date(now.getTime() - CUSTOMER_CLOSE_DELAY),
       closingDeadlineAt: now,
       version: 4,
     });
@@ -360,10 +373,11 @@ describe('PrismaWhatsAppRepository service-session lifecycle', () => {
       },
       whatsAppMessage: {
         findFirst: vi.fn(async () => ({
-          deliveryStatus: DeliveryStatus.DELIVERED,
+          ...lifecycleMessage(),
         })),
         create: messageCreate,
       },
+      quoteRequest: { count: vi.fn(async () => 0) },
       quoteProposalDocument: { count: vi.fn(async () => 0) },
       serviceSessionEvent: { create: vi.fn(async () => ({})) },
       whatsAppConversationTransition: { create: vi.fn(async () => ({})) },
@@ -409,7 +423,7 @@ describe('PrismaWhatsAppRepository service-session lifecycle', () => {
     const due = session({
       status: ServiceSessionStatus.CLOSING,
       priority: ServiceSessionPriority.URGENT,
-      closingStartedAt: new Date(now.getTime() - AI_CLOSING_WAIT_MS),
+      closingStartedAt: new Date(now.getTime() - CUSTOMER_CLOSE_DELAY),
       closingDeadlineAt: now,
       version: 4,
     });
@@ -503,10 +517,11 @@ describe('PrismaWhatsAppRepository service-session lifecycle', () => {
       },
       whatsAppMessage: {
         findFirst: vi.fn(async () => ({
-          deliveryStatus: DeliveryStatus.DELIVERED,
+          ...lifecycleMessage(),
         })),
         create: messageCreate,
       },
+      quoteRequest: { count: vi.fn(async () => 0) },
       quoteProposalDocument: { count: vi.fn(async () => 0) },
       tenantDepartment: {
         findFirst: vi.fn(async () => ({ code: DepartmentCode.FINANCIAL })),

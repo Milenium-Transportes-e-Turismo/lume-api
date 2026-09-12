@@ -140,6 +140,7 @@ export class WhatsAppAutomationEventStore {
           WHERE candidate."topic" IN (
             'whatsapp.inbound.persisted',
             'whatsapp.inbound.human-notification',
+            'whatsapp.assistant-collection.requested',
             'whatsapp.outbound.requested'
           )
           AND candidate."available_at" <= ${now}

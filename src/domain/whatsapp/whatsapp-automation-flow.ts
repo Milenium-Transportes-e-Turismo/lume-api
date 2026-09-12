@@ -13,11 +13,12 @@ import {
 } from './whatsapp.constants';
 
 export const QUOTE_CONFIRMATION_MESSAGE =
-  'Dados do orçamento confirmados. Sua solicitação foi encaminhada ao time Comercial. Pode continuar a conversa por aqui sempre que precisar.';
+  'Tudo certo com os dados! Seu pedido está na fila do Comercial para preparar o orçamento. Você pode continuar falando por aqui.';
 
 export type AutomationTopic =
   | 'whatsapp.inbound.persisted'
   | 'whatsapp.inbound.human-notification'
+  | 'whatsapp.assistant-collection.requested'
   | 'whatsapp.outbound.requested';
 
 export interface QuoteRequestSnapshot {
@@ -168,6 +169,21 @@ export interface BufferedMessage {
   readonly isFirstContact: boolean;
 }
 
+export function isExplicitNewQuoteRequest(message: string): boolean {
+  const text = message.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+  if (/\b(?:nao|nem)\b[^,.!?]{0,30}\b(?:novo|outro|nova|outra)\b/u.test(text))
+    return false;
+  return (
+    /\b(?:quero|queria|preciso|gostaria|desejo|vamos|pode|posso|faz|faca|fazer|solicitar|pedir|criar)\b.{0,60}\b(?:nov[oa]|outr[oa])\s+(?:orcamento|cotacao)\b/u.test(
+      text,
+    ) ||
+    /\b(?:quero|queria|preciso|gostaria|desejo|solicitar|pedir)\b.{0,50}\borcamento\b.{0,30}\b(?:outra|nova)\s+viagem\b/u.test(
+      text,
+    ) ||
+    /^\s*(?:nov[oa]|outr[oa]) (?:orcamento|cotacao)[.!?\s]*$/u.test(text)
+  );
+}
+
 export function decideAutomationPlan(input: {
   readonly envelope: WhatsAppAutomationEnvelope;
   readonly conversation?: AutomationConversation;
@@ -214,6 +230,17 @@ export function decideAutomationPlan(input: {
     currentConversation.conversationState !== 'bot-active'
   ) {
     return suppressed('tenant-api-did-not-authorize-automatic-reply');
+  }
+
+  if (
+    currentConversation.currentQuoteRequest &&
+    isExplicitNewQuoteRequest(messageText)
+  ) {
+    return aiPlan(
+      'eventual-quote',
+      'new-quote-request',
+      'explicit-new-quote-request',
+    );
   }
 
   const initialMenuRequired =
@@ -433,6 +460,35 @@ export function validateAiProviderOutput(value: unknown): AiValidationResult {
   };
 }
 
+/** A delivery commitment is not a resolution. This guard only examines the
+ * generated reply; customer text never selects a department or a transition. */
+export function announcesHumanHandoff(message: string): boolean {
+  const normalized = message
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase();
+  return normalized.split(/(?<=[.!?;])\s+|\n+/u).some((sentence) => {
+    if (sentence.includes('?') || /\b(?:se|caso|quando)\b/u.test(sentence))
+      return false;
+    const commitment =
+      /^(?:(?:tudo certo|certo|entendi|perfeito|obrigad[oa]),?\s+)?(?:eu\s+)?(?:vou\s+(?:encaminhar|transferir|conectar|direcionar)|vamos\s+(?:encaminhar|transferir|conectar|direcionar)|estou\s+(?:encaminhando|transferindo|conectando|direcionando)|encaminharei|transferirei|encaminhei|transferi)\b/u.test(
+        sentence.trim(),
+      ) ||
+      /^(?:(?:o|a|seu|sua)\s+)*(?:atendimento|solicitacao|pedido)\s+(?:ja\s+)?(?:foi|esta sendo)\s+(?:encaminhad[oa]|transferid[oa]|direcionad[oa])\b/u.test(
+        sentence.trim(),
+      );
+    return (
+      commitment &&
+      (/\b(?:atendimento|solicitacao|pedido|voce|equipe|time|departamento|setor|responsavel)\b/u.test(
+        sentence,
+      ) ||
+        /^(?:vou|vamos)\s+(?:encaminhar|transferir)[.!]?$/u.test(
+          sentence.trim(),
+        ))
+    );
+  });
+}
+
 /**
  * Converts only the provider's structured natural-service completion signal
  * into a lifecycle resolution. Quote completion and handoff still have
@@ -445,6 +501,7 @@ export function aiOutputResolvesConversation(
   return (
     aiMode === 'natural-service' &&
     output.collectionStatus === 'completed' &&
+    !announcesHumanHandoff(output.message) &&
     output.missingFields.length === 0 &&
     (output.customerDecision === 'undecided' ||
       output.customerDecision === 'confirmed')
@@ -463,7 +520,8 @@ export function deriveAiActions(
   if (aiMode === 'natural-service') {
     const humanRequested =
       output.customerDecision === 'human-requested' ||
-      output.collectionStatus === 'human-handoff';
+      output.collectionStatus === 'human-handoff' ||
+      announcesHumanHandoff(output.message);
     return {
       sendMessage: true,
       transitionBeforeSend: null,

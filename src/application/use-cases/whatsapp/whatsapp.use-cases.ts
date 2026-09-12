@@ -23,6 +23,12 @@ export class PersistWebhookWhatsAppMessageUseCase {
 }
 
 export class TransitionWhatsAppConversationUseCase {
+  resolveAssistantSuggestion(
+    input: Parameters<WhatsAppRepository['resolveAssistantSuggestion']>[0],
+  ) {
+    return this.repository.resolveAssistantSuggestion(input);
+  }
+
   constructor(private readonly repository: WhatsAppRepository) {}
   execute(input: TransitionCommand) {
     return this.repository.transition(input);

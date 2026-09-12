@@ -630,4 +630,65 @@ describe('PrismaAgentExecutionRepository', () => {
       transaction.agentExecutionMediaSource.createMany,
     ).not.toHaveBeenCalled();
   });
+  it.each([LumeAgentType.CUSTOMER_SERVICE, LumeAgentType.SPECIALIST])(
+    'keeps %s blocked during human control',
+    async (type) => {
+      const prisma = configurationPrisma();
+      prisma.lumeAgent.findFirst.mockResolvedValue({
+        id: 'agent-a',
+        companyId: 'tenant-a',
+        type,
+        customerFacing: type === LumeAgentType.CUSTOMER_SERVICE,
+      });
+      prisma.serviceSession.findFirst.mockResolvedValue({
+        id: 'session-a',
+        companyId: 'tenant-a',
+        currentDepartmentId: 'department-a',
+        status: ServiceSessionStatus.OPEN,
+        controlMode: ServiceSessionControlMode.HUMAN,
+        version: 7,
+      });
+      const repository = new PrismaAgentExecutionRepository(
+        prisma as unknown as PrismaService,
+      );
+      await expect(
+        repository.loadActiveForSession({
+          companyId: 'tenant-a',
+          serviceSessionId: 'session-a',
+          agentId: 'agent-a',
+        }),
+      ).resolves.toBeNull();
+    },
+  );
+
+  it.each([LumeAgentType.ORCHESTRATOR, LumeAgentType.SILENT_CLASSIFIER])(
+    'allows only internal %s observation during human control',
+    async (type) => {
+      const prisma = configurationPrisma();
+      prisma.lumeAgent.findFirst.mockResolvedValue({
+        id: 'agent-a',
+        companyId: 'tenant-a',
+        type,
+        customerFacing: false,
+      });
+      prisma.serviceSession.findFirst.mockResolvedValue({
+        id: 'session-a',
+        companyId: 'tenant-a',
+        currentDepartmentId: 'department-a',
+        status: ServiceSessionStatus.OPEN,
+        controlMode: ServiceSessionControlMode.HUMAN,
+        version: 7,
+      });
+      const repository = new PrismaAgentExecutionRepository(
+        prisma as unknown as PrismaService,
+      );
+      await expect(
+        repository.loadActiveForSession({
+          companyId: 'tenant-a',
+          serviceSessionId: 'session-a',
+          agentId: 'agent-a',
+        }),
+      ).resolves.toMatchObject({ session: { customerFacing: false } });
+    },
+  );
 });

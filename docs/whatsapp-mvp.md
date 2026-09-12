@@ -34,12 +34,12 @@ isoladas para análise. Um evento nunca é encaminhado para dois consumidores.
 - `waiting-for-customer`: aguarda resposta do cliente mantendo o contexto.
 
 “Devolver ao bot” preserva o contexto comercial. “Encerrar atendimento” encerra
-somente a sessão humana, remove a atribuição e volta ao menu inicial. A conversa
+a sessão atual e remove a atribuição, sem retornar a um menu obrigatório. A conversa
 canônica e todo o histórico são preservados para o próximo contato.
 
 O responsável é a referência corrente, não uma trava exclusiva. Qualquer
 usuário interno com `whatsapp-conversations:attend` pode atuar, substituir a
-referência ou devolver a conversa ao bot; `client-company` é excluído. A
+referência ou devolver a conversa ao bot; `client-company` é excluído. Na fachada legada, a
 transferência entre departamentos é solicitada com destino e motivo. Até o
 aceite, o atendimento permanece ativo no departamento de origem, enquanto a
 pendência aparece para o destino. O aceite autorizado altera departamento e
@@ -57,3 +57,11 @@ Mídias recebidas permanecem referenciadas pelo identificador da mensagem. Quand
 um usuário autorizado abre uma prévia, a API recupera o conteúdo pela Evolution,
 valida MIME, tamanho e tipo e o transmite com cache desabilitado. PDFs enviados
 pela aplicação são lidos diretamente do banco.
+
+O fluxo de fila humana, sugestões privadas e espera por resposta está em
+[Atendimento assistido](whatsapp-human-assistance.md).
+
+O painel atual também consome sessões nativas e capacidades `service:*`. A
+transferência nativa de sessão e a solicitação/aceite legada são contratos distintos.
+Consulte [o contrato atual](whatsapp-api.md) e
+[assistência e espera do cliente](whatsapp-human-assistance.md).

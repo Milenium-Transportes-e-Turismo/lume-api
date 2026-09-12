@@ -67,6 +67,8 @@ export interface RunAgentExecutionInput {
   readonly input: string;
   readonly mediaInterpretations?: readonly AgentMediaInterpretationReference[];
   readonly safetyIdentifier: string;
+  /** Server-only observation: no identity mutation, tools, or customer response. */
+  readonly observationOnly?: boolean;
 }
 
 export interface RunAgentExecutionResult {
@@ -496,26 +498,41 @@ export class RunAgentExecutionUseCase {
     const requested = { companyId, serviceSessionId, agentId };
     // Identity resolution is deliberately the first durable-domain read. A
     // shared phone remains ambiguous and contributes only non-PII context.
-    const identity = await this.identityResolver?.resolveBeforeResponse({
-      companyId,
-      serviceSessionId,
-    });
-    const customerContext = await this.customerContextResolver?.resolveForAgent(
-      {
-        companyId,
-        serviceSessionId,
-      },
-    );
+    const identity = input.observationOnly
+      ? undefined
+      : await this.identityResolver?.resolveBeforeResponse({
+          companyId,
+          serviceSessionId,
+        });
+    const customerContext = input.observationOnly
+      ? undefined
+      : await this.customerContextResolver?.resolveForAgent({
+          companyId,
+          serviceSessionId,
+        });
     const configuration =
       await this.configurations.loadActiveForSession(requested);
     if (!configuration) throw notFound('Agente ativo para a sessão');
+    if (
+      input.observationOnly &&
+      (configuration.session.customerFacing ||
+        !['orchestrator', 'silent-classifier'].includes(
+          configuration.agent.type,
+        ))
+    ) {
+      throw forbidden(
+        'Observação silenciosa exige classificador ou orquestrador sem resposta ao cliente.',
+      );
+    }
     const runtimes = validateConfiguration(requested, configuration);
     const prompt = compilePrompt(configuration);
     const knowledge = prepareKnowledge(configuration);
 
     // This is the only source for tools offered to the model. It deliberately
     // runs before both execution creation and any provider request.
-    const catalogTools = await this.toolCatalog.authorizeForModel(requested);
+    const catalogTools = input.observationOnly
+      ? []
+      : await this.toolCatalog.authorizeForModel(requested);
     const tools = prepareAuthorizedTools(catalogTools);
     const combinedInput = [
       ...(identity ? [identity.modelContext] : []),

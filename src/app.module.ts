@@ -1,3 +1,5 @@
+import { TransportImportModule } from './modules/transport-import/transport-import.module';
+import { TransportCatalogModule } from './modules/transport/transport-catalog.module';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
@@ -70,6 +72,8 @@ import { PreAdmissionModule } from './modules/pre-admission/pre-admission.module
     OperationalTripsModule,
     IdentityModule,
     PreAdmissionModule,
+    TransportImportModule,
+    TransportCatalogModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AppErrorFilter },

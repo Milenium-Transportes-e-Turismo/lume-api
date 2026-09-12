@@ -715,4 +715,35 @@ describe('RunAgentExecutionUseCase', () => {
     expect(JSON.stringify(test.attempts)).not.toContain(ECHOED_KEY);
     expect(JSON.stringify(test.failures)).not.toContain(ECHOED_KEY);
   });
+  it('runs silent observation without tools, identity writes, or customer-facing permission', async () => {
+    const base = configuration('orchestrator');
+    const events: string[] = [];
+    const test = harness({
+      events,
+      resolveIdentity: true,
+      resolveCustomerContext: true,
+      configuration: {
+        ...base,
+        session: { ...base.session, customerFacing: false },
+      },
+    });
+    const result = await test.subject.execute({
+      ...executionInput,
+      observationOnly: true,
+    });
+    expect(result.customerFacing).toBe(false);
+    expect(test.authorizeForModel).not.toHaveBeenCalled();
+    expect(test.executeTool).not.toHaveBeenCalled();
+    expect(events).not.toContain('resolve-identity');
+    expect(events).not.toContain('resolve-customer-context');
+    expect(test.generate.mock.calls[0]?.[0].tools).toEqual([]);
+  });
+
+  it('rejects the customer-service agent in observation-only mode before any model call', async () => {
+    const test = harness();
+    await expect(
+      test.subject.execute({ ...executionInput, observationOnly: true }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(test.generate).not.toHaveBeenCalled();
+  });
 });

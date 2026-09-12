@@ -355,7 +355,6 @@ export class PrismaAgentExecutionRepository
         where: {
           id: input.serviceSessionId,
           companyId: input.companyId,
-          controlMode: ServiceSessionControlMode.AI,
           sourceChannel: { agentsEnabled: true },
           status: {
             in: [
@@ -378,6 +377,15 @@ export class PrismaAgentExecutionRepository
       }),
     ]);
     if (!agent || !session) return null;
+    if (
+      session.controlMode === ServiceSessionControlMode.HUMAN &&
+      (agent.customerFacing ||
+        ![
+          PrismaLumeAgentType.ORCHESTRATOR,
+          PrismaLumeAgentType.SILENT_CLASSIFIER,
+        ].includes(agent.type as never))
+    )
+      return null;
 
     const [prompts, runtimeRows, knowledgeRows] = await Promise.all([
       this.prisma.agentPromptVersion.findMany({

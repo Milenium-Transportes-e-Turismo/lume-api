@@ -62,3 +62,6 @@ pids
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Generated synthetic API/Web contract verification
+/artifacts/transport-web-contracts.json

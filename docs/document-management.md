@@ -50,7 +50,8 @@ pública contém apenas nome da pessoa, validade e snapshots dos tipos
 documentais solicitados. Nenhum arquivo pode ser lido publicamente por ID.
 
 Esta fatia ainda **não recebe arquivos**. O fluxo documental legado exige
-`subjectUserId`, `submittedByUserId` e `uploadedByUserId`; ligar o upload agora
+autoria autenticada (`submittedByUserId` e `uploadedByUserId`); solicitações por
+`subjectRegistrationId` já existem, mas ligar o upload público agora
 exigiria fabricar um usuário ou criar uma segunda fonte de arquivos, ambos
 proibidos. O endpoint público informa `uploadAvailable=false`. A próxima fatia
 deve adaptar o Titular Principal genérico ao `DocumentManagementUseCase` e ao

@@ -3,6 +3,7 @@ export type WhatsAppAutomationProviderName = 'api';
 export type WhatsAppAutomationTopic =
   | 'whatsapp.inbound.persisted'
   | 'whatsapp.inbound.human-notification'
+  | 'whatsapp.assistant-collection.requested'
   | 'whatsapp.outbound.requested';
 
 export interface ClaimedWhatsAppAutomationEvent {

@@ -1,3 +1,4 @@
+import { assertTransportSupplierChange } from '../../../infra/database/prisma/assert-transport-supplier-change';
 import { createHash, randomUUID } from 'node:crypto';
 
 import { Injectable } from '@nestjs/common';
@@ -835,6 +836,7 @@ export class RegistrationsService {
     const tagCodes = query.tagCodes?.map(normalizeCatalogCode).filter(Boolean);
     const where: Prisma.RoutingCompanyWhereInput = {
       companyId: current.companyId,
+      transportSupplier: { is: null },
       ...(current.routingCompanyId ? { id: current.routingCompanyId } : {}),
       ...(query.status
         ? { status: query.status.toUpperCase() as RoutingCompanyStatus }
@@ -974,6 +976,7 @@ export class RegistrationsService {
     const row = await this.prisma.routingCompany.findUnique({
       where: {
         id_companyId: { id: registrationId, companyId: current.companyId },
+        transportSupplier: { is: null },
       },
       include: registrationInclude,
     });
@@ -1325,6 +1328,7 @@ export class RegistrationsService {
         const before = await transaction.routingCompany.findUnique({
           where: {
             id_companyId: { id: registrationId, companyId: current.companyId },
+            transportSupplier: { is: null },
           },
           include: registrationInclude,
         });
@@ -1403,6 +1407,17 @@ export class RegistrationsService {
             'Um dos Marcadores selecionados não existe ou está inativo.',
           );
         }
+        await assertTransportSupplierChange(transaction, {
+          companyId: current.companyId,
+          registrationId,
+          actorUserId: current.id,
+          beforeCnpj: before.cnpj,
+          cnpj: normalized.cnpj,
+          beforeType: before.clientType,
+          clientType: normalized.type,
+          beforeStatus: before.status,
+          status: normalized.status,
+        });
         const update = await transaction.routingCompany.updateMany({
           where: {
             id: registrationId,

@@ -58,6 +58,7 @@ import {
   StartHumanConversationDto,
   TransitionListQueryDto,
   VersionedCommandDto,
+  ResolveAssistantSuggestionDto,
 } from './dto/whatsapp.dto';
 
 function contentDisposition(fileName: string): string {
@@ -111,6 +112,23 @@ export class WhatsAppPanelController {
     private readonly mediaStorage: WhatsAppMediaStorage,
     private readonly config: ConfigService,
   ) {}
+
+  @Post(':conversationId/assistant-suggestions/:suggestionId/resolve')
+  @RequireAnyPermission('service:transfer', 'service:respond')
+  resolveAssistantSuggestion(
+    @CurrentUser() current: AuthenticatedPrincipal,
+    @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
+    @Param('suggestionId', new ParseUUIDPipe()) suggestionId: string,
+    @Body() body: ResolveAssistantSuggestionDto,
+  ) {
+    return this.transition.resolveAssistantSuggestion({
+      ...body,
+      companyId: current.companyId,
+      actorUserId: current.id,
+      conversationId,
+      suggestionId,
+    });
+  }
 
   @Post()
   @RequireAnyPermission(

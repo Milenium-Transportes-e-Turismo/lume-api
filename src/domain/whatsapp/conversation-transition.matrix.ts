@@ -30,6 +30,7 @@ const actorsByTransition: Readonly<
   'start-department-contact': ['system'],
   'start-quote': ['system'],
   'new-quote-request': ['system'],
+  'start-assisted-quote': ['user'],
   'present-quote-summary': ['system'],
   'correct-quote': ['system'],
   'confirm-quote': ['system'],
@@ -203,21 +204,23 @@ export function resolveConversationTransition(
         resumeFlowStep: null,
       };
 
+    case 'start-assisted-quote':
+      assertState(
+        current,
+        ['sent-to-human', 'human-active', 'waiting-for-customer'],
+        name,
+      );
+      return {
+        department: 'commercial',
+        conversationState: 'bot-active',
+        flowStep: 'quote-data-collection',
+        requestStatus: 'collecting-information',
+        resumeState: null,
+        resumeFlowStep: null,
+      };
+
     case 'new-quote-request':
       assertState(current, ['bot-active'], name);
-      if (
-        current.flowStep !== 'commercial-follow-up-menu' ||
-        ![
-          'waiting-for-customer',
-          'under-review',
-          'approved',
-          'rejected',
-        ].includes(current.requestStatus)
-      ) {
-        throw validationError(
-          'Uma nova solicitação exige o menu comercial de acompanhamento de um orçamento confirmado.',
-        );
-      }
       return {
         department: 'commercial',
         conversationState: 'bot-active',
@@ -277,11 +280,11 @@ export function resolveConversationTransition(
       }
       return {
         ...current,
-        conversationState: 'bot-active',
-        flowStep: 'commercial-follow-up-menu',
+        conversationState: 'sent-to-human',
+        flowStep: 'human-service',
         requestStatus: 'under-review',
         resumeState: null,
-        resumeFlowStep: null,
+        resumeFlowStep: 'commercial-follow-up-menu',
       };
 
     case 'proposal-delivery-confirmed':

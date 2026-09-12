@@ -36,6 +36,10 @@ import {
   parseBusinessDateTime,
 } from '../src/domain/commercial/quote-schedule';
 import { PLATFORM_AGENT_CATALOG } from '../src/domain/agents/platform-agent-catalog';
+import {
+  deriveAiActions,
+  aiOutputResolvesConversation,
+} from '../src/domain/whatsapp/whatsapp-automation-flow';
 import { UNSUPPORTED_MESSAGE_KIND_REPLY_TEXT } from '../src/domain/whatsapp/whatsapp.constants';
 import {
   DeliveryStatus,
@@ -584,7 +588,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       companyId: tenantId,
       tokenVersion: commercialAttendant.tokenVersion,
     });
-  }, 60_000);
+  }, 180_000);
 
   afterAll(async () => {
     await app?.close();
@@ -2523,8 +2527,8 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     await transition('present-quote-summary', 6);
     const confirmed = await transition('confirm-quote', 7);
     expect(confirmed).toMatchObject({
-      conversationState: 'bot-active',
-      flowStep: 'commercial-follow-up-menu',
+      conversationState: 'sent-to-human',
+      flowStep: 'human-service',
       requestStatus: 'under-review',
       closedAt: null,
     });
@@ -2554,8 +2558,8 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
           }),
           conversation: expect.objectContaining({
             id: conversationId,
-            conversationState: 'bot-active',
-            flowStep: 'commercial-follow-up-menu',
+            conversationState: 'sent-to-human',
+            flowStep: 'human-service',
           }),
         }),
       ]),
@@ -3878,10 +3882,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     });
   });
 
-  it('cancela e audita o ciclo under-review substituído sem deixá-lo na fila ou notificação', async () => {
-    const actor = await prisma.user.findFirstOrThrow({
-      where: { companyId: tenantId, usernameNormalized: 'admin.e2e' },
-    });
+  it('preserva orçamento anterior em análise, PDF e fila ao criar outro com comando idempotente', async () => {
     const baselineNotifications = await request(app.getHttpServer())
       .get('/api/v1/notifications')
       .set('authorization', `Bearer ${accessToken}`)
@@ -3986,133 +3987,131 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       orderBy: { sequence: 'asc' },
     });
     expect(quotes).toHaveLength(2);
-    expect(
-      quotes.map(({ sequence, status, version }) => [
-        sequence,
-        status,
-        version,
-      ]),
-    ).toEqual([
-      [1, 'CANCELLED', 2],
-      [2, 'COLLECTING_INFORMATION', 1],
-    ]);
     expect(quotes[0]).toMatchObject({
-      decisionReason: 'Substituído por uma nova solicitação de orçamento.',
-      decidedAt: expect.any(Date),
+      id: supersededQuote.id,
+      status: 'UNDER_REVIEW',
+      version: 1,
+      contactName: supersededQuote.contactName,
+      origin: supersededQuote.origin,
+      destination: supersededQuote.destination,
+      passengerCount: 12,
+      confirmedSummary: supersededQuote.confirmedSummary,
+      decisionReason: null,
+      decidedAt: null,
+      closureClassification: null,
     });
-    const currentQuote = quotes[1];
+    expect(quotes[1]).toMatchObject({
+      sequence: 2,
+      status: 'COLLECTING_INFORMATION',
+      version: 1,
+      origin: null,
+      destination: null,
+      passengerCount: null,
+      confirmedSummary: null,
+    });
     const transition =
       await prisma.whatsAppConversationTransition.findUniqueOrThrow({
-        where: {
-          companyId_commandId: {
-            companyId: tenantId,
-            commandId,
-          },
-        },
+        where: { companyId_commandId: { companyId: tenantId, commandId } },
       });
     expect(transition.metadata).toMatchObject({
-      quoteRequestId: currentQuote.id,
-      supersededQuoteRequest: {
-        id: supersededQuote.id,
-        fromStatus: 'under-review',
-        toStatus: 'cancelled',
-        previousVersion: 1,
-        resultingVersion: 2,
-      },
+      quoteRequestId: quotes[1].id,
+      preservedQuoteRequestId: supersededQuote.id,
     });
     expect(
-      await prisma.tenantAuditLog.findMany({
+      await prisma.tenantAuditLog.count({
         where: {
           companyId: tenantId,
           action: 'whatsapp.quote-request.superseded',
           targetId: supersededQuote.id,
         },
       }),
-    ).toEqual([
-      expect.objectContaining({
-        actorUserId: null,
-        metadata: expect.objectContaining({
-          conversationId: conversation.id,
-          newQuoteRequestId: currentQuote.id,
-          transitionId: transition.id,
-          commandId,
-          fromStatus: 'under-review',
-          toStatus: 'cancelled',
-          previousVersion: 1,
-          resultingVersion: 2,
-        }),
-      }),
-    ]);
-
+    ).toBe(0);
     await request(app.getHttpServer())
       .get('/api/v1/whatsapp/quote-proposals?page=1&pageSize=100')
-      .set('authorization', `Bearer ${accessToken}`)
+      .set('authorization', 'Bearer ' + accessToken)
       .expect(200)
       .expect(({ body }) => {
         const ids = (body.items as Array<{ id: string }>).map(({ id }) => id);
-        expect(ids).not.toContain(supersededQuote.id);
-        expect(ids).not.toContain(currentQuote.id);
+        expect(ids).toContain(supersededQuote.id);
+        expect(ids).not.toContain(quotes[1].id);
       });
-    await request(app.getHttpServer())
-      .get(
-        `/api/v1/whatsapp/quote-proposals?stage=cancelled&search=${encodeURIComponent(
-          'Cliente ciclo substituído',
-        )}&page=1&pageSize=100`,
-      )
-      .set('authorization', `Bearer ${accessToken}`)
-      .expect(200)
-      .expect(({ body }) =>
-        expect(body.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              id: supersededQuote.id,
-              quoteRequest: expect.objectContaining({
-                status: 'cancelled',
-                decision: expect.objectContaining({
-                  status: 'cancelled',
-                  classification: 'superseded',
-                  reason: 'Substituído por uma nova solicitação de orçamento.',
-                  decidedAt: expect.any(String),
-                  decidedBy: null,
-                }),
-              }),
-            }),
-          ]),
-        ),
-      );
-    await request(app.getHttpServer())
-      .get('/api/v1/notifications')
-      .set('authorization', `Bearer ${accessToken}`)
-      .expect(200)
-      .expect(({ body }) => {
-        expect(body.total).toBe(baselineNotifications.body.total);
-        expect(body.unreadTotal).toBe(baselineNotifications.body.unreadTotal);
-      });
-    await request(app.getHttpServer())
-      .post(`/api/v1/whatsapp/quote-proposals/${supersededQuote.id}/send`)
-      .set('authorization', `Bearer ${accessToken}`)
-      .send({
-        commandId: randomUUID(),
-        expectedVersion: 2,
-        proposalDocumentId: uploadedDocumentId,
-        batchId: randomUUID(),
-        batchDocumentIds: [uploadedDocumentId],
-      })
-      .expect(400);
     expect(
       await prisma.quoteProposalDocument.findUniqueOrThrow({
         where: {
-          id_companyId: {
-            id: uploadedDocumentId,
-            companyId: tenantId,
-          },
+          id_companyId: { id: uploadedDocumentId, companyId: tenantId },
         },
       }),
-    ).toMatchObject({
-      status: 'UPLOADED',
-      uploadedByUserId: actor.id,
-    });
+    ).toMatchObject({ quoteRequestId: supersededQuote.id, status: 'UPLOADED' });
   });
+
+  it.each([
+    'COLLECTING_INFORMATION',
+    'WAITING_FOR_CUSTOMER',
+    'UNDER_REVIEW',
+    'APPROVED',
+    'REJECTED',
+    'CANCELLED',
+  ] as const)(
+    'cria novo orçamento sem alterar o anterior em %s',
+    async (status) => {
+      const contact = await prisma.whatsAppContact.create({
+        data: {
+          companyId: tenantId,
+          phoneNormalized: '55119' + String(Date.now()).slice(-8),
+          phoneDisplay: 'Contato de teste',
+        },
+      });
+      const conversation = await prisma.whatsAppConversation.create({
+        data: {
+          companyId: tenantId,
+          channelId,
+          contactId: contact.id,
+          department: 'COMMERCIAL',
+          conversationState: 'BOT_ACTIVE',
+          flowStep: 'QUOTE_DATA_COLLECTION',
+          requestStatus: status,
+        },
+      });
+      const previous = await prisma.quoteRequest.create({
+        data: {
+          companyId: tenantId,
+          conversationId: conversation.id,
+          sequence: 1,
+          status,
+          origin: 'Origem preservada',
+          destination: 'Destino preservado',
+          passengerCount: 20,
+          structuredData: { tripType: 'one_way' },
+        },
+      });
+      const commandId = randomUUID();
+      const command = {
+        conversationId: conversation.id,
+        commandId,
+        expectedVersion: 1,
+        name: 'new-quote-request' as const,
+      };
+      await transitionSystem(command);
+      await transitionSystem(command);
+      expect(
+        await prisma.quoteRequest.count({
+          where: { companyId: tenantId, conversationId: conversation.id },
+        }),
+      ).toBe(2);
+      expect(
+        await prisma.quoteRequest.findUniqueOrThrow({
+          where: { id: previous.id },
+        }),
+      ).toMatchObject({
+        status,
+        version: 1,
+        origin: previous.origin,
+        destination: previous.destination,
+        passengerCount: 20,
+        structuredData: { tripType: 'one_way' },
+      });
+    },
+  );
 
   it('envia a proposta do ciclo confirmado mesmo após encaminhamento para atendimento', async () => {
     const actor = await prisma.user.findFirstOrThrow({
@@ -6234,8 +6233,8 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         name: 'confirm-quote',
       }),
     ).resolves.toMatchObject({
-      conversationState: 'bot-active',
-      flowStep: 'commercial-follow-up-menu',
+      conversationState: 'sent-to-human',
+      flowStep: 'human-service',
       requestStatus: 'under-review',
       version: newCycle.body.version + 2,
     });
@@ -8849,5 +8848,871 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     await expect(
       whatsappRepository.assertAutomaticReplyAllowed(tenantId, conversationId),
     ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('routes a financial promise with completed status into a human queue without changing the pending quote', async () => {
+    const inbound = await signedWebhook(
+      app,
+      webhookPayload(
+        'financial-completion-regression',
+        '5511988877091',
+        'Quantas parcelas faltam da última viagem?',
+      ),
+    ).expect(202);
+    const id = inbound.body.conversationId as string;
+    const current = await prisma.whatsAppConversation.findUniqueOrThrow({
+      where: { id },
+    });
+    const session = await prisma.serviceSession.findFirstOrThrow({
+      where: {
+        companyId: tenantId,
+        threadId: current.threadId!,
+        isForeground: true,
+      },
+    });
+    const oldQuote = await prisma.quoteRequest.create({
+      data: {
+        companyId: tenantId,
+        conversationId: id,
+        threadId: session.threadId,
+        serviceSessionId: session.id,
+        sequence: 1,
+        status: 'UNDER_REVIEW',
+        origin: 'Uberlândia',
+        destination: 'Jataí',
+        structuredData: { preserved: 'commercial-pending' },
+      },
+    });
+    await prisma.whatsAppConversation.update({
+      where: { id },
+      data: { requestStatus: 'UNDER_REVIEW' },
+    });
+    await prisma.serviceSession.update({
+      where: { id: session.id },
+      data: { conversationResolved: true, resolutionConfirmedByCustomer: true },
+    });
+    const output = {
+      message:
+        'Não consigo consultar as parcelas pendentes por aqui. Vou encaminhar sua solicitação ao time responsável para verificarem o pagamento da sua última viagem.',
+      collectionStatus: 'completed' as const,
+      customerDecision: 'undecided' as const,
+      missingFields: [],
+      extractedDataPatch: {},
+      summaryPresented: false,
+    };
+    expect(aiOutputResolvesConversation(output, 'natural-service')).toBe(false);
+    const action = deriveAiActions(output, 'natural-service');
+    expect(action.transitionAfterSend).toBe('forward');
+    const command = {
+      conversationId: id,
+      commandId: randomUUID(),
+      expectedVersion: current.version,
+      actorUserId: null,
+      name: action.transitionAfterSend!,
+      targetDepartment: 'financial' as const,
+      metadata: {
+        targetDepartment: 'financial',
+        reason: 'payment-installment-inquiry',
+      },
+      automaticHumanHandoff: {
+        customerMessage: output.message,
+        occurredAt: new Date(),
+      },
+    };
+    await transitionSystem(command);
+    await transitionSystem(command);
+    const financial = await prisma.tenantDepartment.findFirstOrThrow({
+      where: { companyId: tenantId, code: 'FINANCIAL' },
+    });
+    expect(
+      await prisma.serviceSession.findUniqueOrThrow({
+        where: { id: session.id },
+        include: { queue: true },
+      }),
+    ).toMatchObject({
+      currentDepartmentId: financial.id,
+      controlMode: 'HUMAN',
+      status: 'WAITING_HUMAN',
+      conversationResolved: false,
+      resolutionConfirmedByCustomer: false,
+      queue: { departmentId: financial.id },
+    });
+    expect(
+      await prisma.quoteRequest.findUniqueOrThrow({
+        where: { id: oldQuote.id },
+      }),
+    ).toEqual(oldQuote);
+    const notices = await prisma.whatsAppMessage.findMany({
+      where: {
+        companyId: tenantId,
+        conversationId: id,
+        direction: 'OUTBOUND',
+        text: output.message,
+      },
+    });
+    expect(notices).toHaveLength(1);
+    expect(notices[0].deliveryStatus).toBe('PENDING');
+    expect(
+      await prisma.serviceSessionEvent.count({
+        where: {
+          companyId: tenantId,
+          serviceSessionId: session.id,
+          name: 'ai-conversation-resolved',
+        },
+      }),
+    ).toBe(0);
+    await expect(
+      whatsappRepository.assertAutomaticReplyAllowed(tenantId, id),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    const panel = await request(app.getHttpServer())
+      .get('/api/v1/whatsapp/conversations/' + id)
+      .set('authorization', 'Bearer ' + accessToken)
+      .expect(200);
+    expect(panel.body).toMatchObject({
+      department: 'financial',
+      currentServiceSession: { controlMode: 'human', status: 'waiting-human' },
+    });
+  });
+  it('keeps internal suggestions private and starts a separate quote only after a human accepts, idempotently', async () => {
+    const inbound = await signedWebhook(
+      app,
+      webhookPayload(
+        'assistant-new-quote',
+        '5511988877071',
+        'Quero um novo orçamento',
+      ),
+    ).expect(202);
+    const id = inbound.body.conversationId as string;
+    let detail = await request(app.getHttpServer())
+      .get(`/api/v1/whatsapp/conversations/${id}`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/service/sessions/${detail.body.currentServiceSession.id}/actions/assume`,
+      )
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: detail.body.currentServiceSession.version,
+      })
+      .expect(201);
+    detail = await request(app.getHttpServer())
+      .get(`/api/v1/whatsapp/conversations/${id}`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    const session = detail.body.currentServiceSession;
+    const oldQuote = await prisma.quoteRequest.create({
+      data: {
+        companyId: tenantId,
+        conversationId: id,
+        threadId: session.threadId,
+        serviceSessionId: session.id,
+        sequence: 1,
+        status: 'UNDER_REVIEW',
+        contactName: 'Responsável conhecido',
+        origin: 'Uberlândia',
+        destination: 'Jataí',
+        passengerCount: 46,
+        structuredData: { preserved: 'prior-quote', tripType: 'one_way' },
+      },
+    });
+    const suggestion = await prisma.serviceSessionEvent.create({
+      data: {
+        companyId: tenantId,
+        serviceSessionId: session.id,
+        commandId: randomUUID(),
+        commandFingerprint: 'a'.repeat(64),
+        name: 'human-conversation-observed',
+        expectedVersion: session.version - 1,
+        resultingVersion: session.version,
+        actorType: 'SYSTEM',
+        beforeSnapshot: {},
+        afterSnapshot: {},
+        metadata: {
+          conversationId: id,
+          messageId: inbound.body.messageId,
+          sourceEventId: 'assistant-new-quote',
+          suggestion: {
+            kind: 'new-quote',
+            question: 'Deseja que a Milena assuma a coleta?',
+            targetDepartment: 'commercial',
+          },
+        },
+      },
+    });
+    const beforeCount = await prisma.whatsAppMessage.count({
+      where: { companyId: tenantId, conversationId: id, direction: 'OUTBOUND' },
+    });
+    detail = await request(app.getHttpServer())
+      .get(`/api/v1/whatsapp/conversations/${id}`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    expect(detail.body.assistantSuggestions).toEqual([
+      expect.objectContaining({ id: suggestion.id, kind: 'new-quote' }),
+    ]);
+    const url = `/api/v1/whatsapp/conversations/${id}/assistant-suggestions/${suggestion.id}/resolve`;
+    const command = {
+      commandId: randomUUID(),
+      expectedVersion: detail.body.version,
+      expectedSessionVersion: session.version,
+      decision: 'accept',
+    };
+    await request(app.getHttpServer()).post(url).send(command).expect(401);
+    await request(app.getHttpServer())
+      .post(url)
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({ ...command, expectedSessionVersion: session.version + 1 })
+      .expect(409);
+    const approved = await request(app.getHttpServer())
+      .post(url)
+      .set('authorization', `Bearer ${accessToken}`)
+      .send(command)
+      .expect(201);
+    expect(approved.body).toMatchObject({
+      conversationState: 'bot-active',
+      flowStep: 'quote-data-collection',
+      currentServiceSession: {
+        controlMode: 'ai',
+        queueId: null,
+        responsibleUserId: null,
+      },
+      assistantSuggestions: [],
+    });
+    expect(approved.body.currentQuoteRequest.id).not.toBe(oldQuote.id);
+    expect(approved.body.currentQuoteRequest).toMatchObject({
+      contactName: 'Responsável conhecido',
+      origin: null,
+      destination: null,
+      passengerCount: null,
+    });
+    expect(
+      approved.body.currentQuoteRequest.structuredData.tripType,
+    ).toBeUndefined();
+    expect(
+      approved.body.currentQuoteRequest.structuredData.intakeStartedAt,
+    ).toBeTruthy();
+    await request(app.getHttpServer())
+      .post(url)
+      .set('authorization', `Bearer ${accessToken}`)
+      .send(command)
+      .expect(201);
+    await request(app.getHttpServer())
+      .post(url)
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({ ...command, commandId: randomUUID(), decision: 'dismiss' })
+      .expect(409);
+    expect(
+      await prisma.quoteRequest.count({
+        where: { companyId: tenantId, conversationId: id },
+      }),
+    ).toBe(2);
+    expect(
+      await prisma.quoteRequest.findUnique({ where: { id: oldQuote.id } }),
+    ).toMatchObject({
+      status: 'UNDER_REVIEW',
+      contactName: 'Responsável conhecido',
+      origin: 'Uberlândia',
+      destination: 'Jataí',
+      passengerCount: 46,
+      structuredData: { preserved: 'prior-quote', tripType: 'one_way' },
+    });
+    expect(
+      await prisma.integrationOutbox.count({
+        where: {
+          companyId: tenantId,
+          aggregateId: id,
+          topic: 'whatsapp.assistant-collection.requested',
+        },
+      }),
+    ).toBe(1);
+    expect(
+      await prisma.whatsAppMessage.count({
+        where: {
+          companyId: tenantId,
+          conversationId: id,
+          direction: 'OUTBOUND',
+        },
+      }),
+    ).toBe(beforeCount);
+    expect(
+      await whatsappRepository.getAuthorizedAssistantCollection(
+        tenantId,
+        id,
+        command.commandId,
+      ),
+    ).not.toBeNull();
+  });
+
+  it('dismisses the internal suggestion without changing human ownership, queue, quote, or sending a message', async () => {
+    const inbound = await signedWebhook(
+      app,
+      webhookPayload(
+        'assistant-dismiss',
+        '5511988877072',
+        'Quero um novo orçamento',
+      ),
+    ).expect(202);
+    const id = inbound.body.conversationId as string;
+    let detail = await request(app.getHttpServer())
+      .get(`/api/v1/whatsapp/conversations/${id}`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/service/sessions/${detail.body.currentServiceSession.id}/actions/assume`,
+      )
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: detail.body.currentServiceSession.version,
+      })
+      .expect(201);
+    detail = await request(app.getHttpServer())
+      .get(`/api/v1/whatsapp/conversations/${id}`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    const session = detail.body.currentServiceSession;
+    const suggestion = await prisma.serviceSessionEvent.create({
+      data: {
+        companyId: tenantId,
+        serviceSessionId: session.id,
+        commandId: randomUUID(),
+        commandFingerprint: 'b'.repeat(64),
+        name: 'human-conversation-observed',
+        expectedVersion: session.version - 1,
+        resultingVersion: session.version,
+        actorType: 'SYSTEM',
+        beforeSnapshot: {},
+        afterSnapshot: {},
+        metadata: {
+          conversationId: id,
+          messageId: inbound.body.messageId,
+          suggestion: {
+            kind: 'new-quote',
+            question: 'Deseja iniciar coleta?',
+            targetDepartment: 'commercial',
+          },
+        },
+      },
+    });
+    const response = await request(app.getHttpServer())
+      .post(
+        `/api/v1/whatsapp/conversations/${id}/assistant-suggestions/${suggestion.id}/resolve`,
+      )
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: detail.body.version,
+        expectedSessionVersion: session.version,
+        decision: 'dismiss',
+      })
+      .expect(201);
+    expect(response.body).toMatchObject({
+      conversationState: 'human-active',
+      assignedTo: detail.body.assignedTo,
+      assistantSuggestions: [],
+      currentServiceSession: {
+        controlMode: 'human',
+        responsibleUserId: session.responsibleUserId,
+        queueId: session.queueId,
+      },
+    });
+    expect(
+      await prisma.quoteRequest.count({
+        where: { companyId: tenantId, conversationId: id },
+      }),
+    ).toBe(0);
+    expect(
+      await prisma.whatsAppMessage.count({
+        where: {
+          companyId: tenantId,
+          conversationId: id,
+          direction: 'OUTBOUND',
+        },
+      }),
+    ).toBe(0);
+  });
+
+  it('sends one contextual reminder after three hours and closes one hour after its actual delivery', async () => {
+    const inbound = await signedWebhook(
+      app,
+      webhookPayload(
+        'customer-timeout',
+        '5511988877073',
+        'Preciso de um orçamento',
+      ),
+    ).expect(202);
+    const id = inbound.body.conversationId as string;
+    const conversation = await prisma.whatsAppConversation.findUniqueOrThrow({
+      where: { id },
+    });
+    const session = await prisma.serviceSession.findFirstOrThrow({
+      where: {
+        companyId: tenantId,
+        threadId: conversation.threadId!,
+        isForeground: true,
+      },
+    });
+    const requestedAt = new Date(Date.now() + 1000);
+    await prisma.whatsAppMessage.create({
+      data: {
+        companyId: tenantId,
+        conversationId: id,
+        channelId,
+        contactId: conversation.contactId,
+        threadId: session.threadId,
+        serviceSessionId: session.id,
+        direction: 'OUTBOUND',
+        actorType: 'AI_AGENT',
+        source: 'AUTOMATION',
+        deliveryStatus: 'SENT',
+        kind: 'TEXT',
+        text: 'Qual é a data de saída?',
+        automationPurpose: 'customer-information-request',
+        correlationId: randomUUID(),
+        occurredAt: requestedAt,
+        createdAt: requestedAt,
+      },
+    });
+    const beforeReminder = new Date(requestedAt.getTime() + 10_800_000 - 1);
+    await whatsappRepository.processServiceSessionLifecycle({
+      now: beforeReminder,
+      limit: 50,
+    });
+    expect(
+      await prisma.whatsAppMessage.count({
+        where: {
+          serviceSessionId: session.id,
+          automationPurpose: 'customer-information-reminder',
+        },
+      }),
+    ).toBe(0);
+    const reminderAt = new Date(requestedAt.getTime() + 10_800_000);
+    await Promise.all(
+      [1, 2].map(() =>
+        whatsappRepository.processServiceSessionLifecycle({
+          now: reminderAt,
+          limit: 50,
+        }),
+      ),
+    );
+    expect(
+      await prisma.whatsAppMessage.count({
+        where: {
+          serviceSessionId: session.id,
+          automationPurpose: 'customer-information-reminder',
+        },
+      }),
+    ).toBe(1);
+    const reminder = await prisma.whatsAppMessage.findFirstOrThrow({
+      where: {
+        serviceSessionId: session.id,
+        automationPurpose: 'customer-information-reminder',
+      },
+    });
+    expect(reminder.text).toContain('Qual é a data de saída?');
+    await whatsappRepository.processServiceSessionLifecycle({
+      now: new Date(reminderAt.getTime() + 3_600_000),
+      limit: 50,
+    });
+    expect(
+      await prisma.serviceSession.findUnique({ where: { id: session.id } }),
+    ).toMatchObject({ status: 'CLOSING' });
+    const sentAt = new Date(reminderAt.getTime() + 600_000);
+    await prisma.whatsAppMessage.update({
+      where: { id: reminder.id },
+      data: { deliveryStatus: 'SENT', createdAt: reminderAt },
+    });
+    await prisma.whatsAppMessageAttempt.updateMany({
+      where: { messageId: reminder.id },
+      data: { status: 'SUCCEEDED', completedAt: sentAt },
+    });
+    await whatsappRepository.processServiceSessionLifecycle({
+      now: new Date(sentAt.getTime() + 3_600_000 - 1),
+      limit: 50,
+    });
+    expect(
+      await prisma.serviceSession.findUnique({ where: { id: session.id } }),
+    ).toMatchObject({ status: 'CLOSING' });
+    await whatsappRepository.processServiceSessionLifecycle({
+      now: new Date(sentAt.getTime() + 3_600_000),
+      limit: 50,
+    });
+    expect(
+      await prisma.serviceSession.findUnique({ where: { id: session.id } }),
+    ).toMatchObject({
+      status: 'CLOSED',
+      publicContinuationCode: expect.stringMatching(/^\d{3}$/),
+    });
+    expect(
+      await prisma.whatsAppMessage.count({
+        where: {
+          serviceSessionId: session.id,
+          automationPurpose: 'service-session-closing-question',
+        },
+      }),
+    ).toBe(0);
+  });
+
+  it('closes an explicitly resolved service without repeating the anything-else question', async () => {
+    const inbound = await signedWebhook(
+      app,
+      webhookPayload(
+        'resolved-goodbye',
+        '5511988877074',
+        'Não preciso de mais nada',
+      ),
+    ).expect(202);
+    const id = inbound.body.conversationId as string;
+    const conversation = await prisma.whatsAppConversation.findUniqueOrThrow({
+      where: { id },
+    });
+    const session = await prisma.serviceSession.findFirstOrThrow({
+      where: {
+        companyId: tenantId,
+        threadId: conversation.threadId!,
+        isForeground: true,
+      },
+    });
+    const at = new Date(Date.now() + 1000);
+    await prisma.serviceSession.update({
+      where: { id: session.id },
+      data: { conversationResolved: true, resolutionConfirmedByCustomer: true },
+    });
+    await prisma.whatsAppMessage.create({
+      data: {
+        companyId: tenantId,
+        conversationId: id,
+        channelId,
+        contactId: conversation.contactId,
+        serviceSessionId: session.id,
+        threadId: session.threadId,
+        direction: 'OUTBOUND',
+        deliveryStatus: 'SENT',
+        kind: 'TEXT',
+        text: 'Obrigada pelo contato!',
+        automationPurpose: 'service-session-resolution',
+        correlationId: randomUUID(),
+        occurredAt: at,
+        createdAt: at,
+      },
+    });
+    await whatsappRepository.processServiceSessionLifecycle({
+      now: at,
+      limit: 50,
+    });
+    await whatsappRepository.processServiceSessionLifecycle({
+      now: new Date(at.getTime() + 1),
+      limit: 50,
+    });
+    expect(
+      await prisma.serviceSession.findUnique({ where: { id: session.id } }),
+    ).toMatchObject({ status: 'CLOSED' });
+    expect(
+      await prisma.whatsAppMessage.count({
+        where: {
+          serviceSessionId: session.id,
+          automationPurpose: {
+            in: [
+              'service-session-closing-question',
+              'customer-information-reminder',
+            ],
+          },
+        },
+      }),
+    ).toBe(0);
+    expect(
+      await prisma.whatsAppMessage.count({
+        where: {
+          serviceSessionId: session.id,
+          automationPurpose: 'service-session-closure',
+        },
+      }),
+    ).toBe(1);
+  });
+
+  it('never times out customer-looking questions while commercial work or human control is pending', async () => {
+    for (const [suffix, human] of [
+      ['5', false],
+      ['6', true],
+    ] as const) {
+      const inbound = await signedWebhook(
+        app,
+        webhookPayload(
+          `platform-pending-${suffix}`,
+          `551198887707${suffix}`,
+          'Preciso de um orçamento',
+        ),
+      ).expect(202);
+      const id = inbound.body.conversationId as string;
+      const conversation = await prisma.whatsAppConversation.findUniqueOrThrow({
+        where: { id },
+      });
+      const session = await prisma.serviceSession.findFirstOrThrow({
+        where: {
+          companyId: tenantId,
+          threadId: conversation.threadId!,
+          isForeground: true,
+        },
+      });
+      if (human) {
+        await request(app.getHttpServer())
+          .post(`/api/v1/service/sessions/${session.id}/actions/assume`)
+          .set('authorization', `Bearer ${accessToken}`)
+          .send({ commandId: randomUUID(), expectedVersion: session.version })
+          .expect(201);
+      } else {
+        await prisma.quoteRequest.create({
+          data: {
+            companyId: tenantId,
+            conversationId: id,
+            threadId: session.threadId,
+            serviceSessionId: session.id,
+            sequence: 1,
+            status: 'UNDER_REVIEW',
+          },
+        });
+      }
+      const at = new Date(Date.now() + 1000);
+      await prisma.whatsAppMessage.create({
+        data: {
+          companyId: tenantId,
+          conversationId: id,
+          channelId,
+          contactId: conversation.contactId,
+          serviceSessionId: session.id,
+          threadId: session.threadId,
+          direction: 'OUTBOUND',
+          deliveryStatus: 'SENT',
+          kind: 'TEXT',
+          text: 'Qual é a data?',
+          automationPurpose: 'customer-information-request',
+          correlationId: randomUUID(),
+          occurredAt: at,
+          createdAt: at,
+        },
+      });
+      await whatsappRepository.processServiceSessionLifecycle({
+        now: new Date(at.getTime() + 18_000_000),
+        limit: 50,
+      });
+      expect(
+        await prisma.serviceSession.findUnique({ where: { id: session.id } }),
+      ).toMatchObject({ status: 'OPEN' });
+      expect(
+        await prisma.whatsAppMessage.count({
+          where: {
+            serviceSessionId: session.id,
+            automationPurpose: 'customer-information-reminder',
+          },
+        }),
+      ).toBe(0);
+    }
+  });
+
+  it('moves a financial suggestion to a human queue only after approval without sending a customer message', async () => {
+    const inbound = await signedWebhook(
+      app,
+      webhookPayload(
+        'assistant-financial',
+        '5511988877077',
+        'Quero falar do pagamento',
+      ),
+    ).expect(202);
+    const id = inbound.body.conversationId as string;
+    let detail = await request(app.getHttpServer())
+      .get(`/api/v1/whatsapp/conversations/${id}`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/service/sessions/${detail.body.currentServiceSession.id}/actions/assume`,
+      )
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: detail.body.currentServiceSession.version,
+      })
+      .expect(201);
+    detail = await request(app.getHttpServer())
+      .get(`/api/v1/whatsapp/conversations/${id}`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    const session = detail.body.currentServiceSession;
+    const suggestion = await prisma.serviceSessionEvent.create({
+      data: {
+        companyId: tenantId,
+        serviceSessionId: session.id,
+        commandId: randomUUID(),
+        commandFingerprint: 'c'.repeat(64),
+        name: 'human-conversation-observed',
+        expectedVersion: session.version - 1,
+        resultingVersion: session.version,
+        actorType: 'SYSTEM',
+        beforeSnapshot: {},
+        afterSnapshot: {},
+        metadata: {
+          conversationId: id,
+          messageId: inbound.body.messageId,
+          suggestion: {
+            kind: 'department',
+            question: 'Direcionar ao Financeiro?',
+            targetDepartment: 'financial',
+          },
+        },
+      },
+    });
+    const result = await request(app.getHttpServer())
+      .post(
+        `/api/v1/whatsapp/conversations/${id}/assistant-suggestions/${suggestion.id}/resolve`,
+      )
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: detail.body.version,
+        expectedSessionVersion: session.version,
+        decision: 'accept',
+      })
+      .expect(201);
+    expect(result.body).toMatchObject({
+      department: 'financial',
+      conversationState: 'sent-to-human',
+      currentServiceSession: {
+        controlMode: 'human',
+        status: 'waiting-human',
+        queueId: expect.any(String),
+      },
+    });
+    expect(
+      await prisma.whatsAppMessage.count({
+        where: {
+          companyId: tenantId,
+          conversationId: id,
+          direction: 'OUTBOUND',
+        },
+      }),
+    ).toBe(0);
+  });
+  it('records a silent observation once, preserves human control, and exposes only an internal suggestion', async () => {
+    const first = await signedWebhook(
+      app,
+      webhookPayload('observer-start', '5511988877078', 'Olá'),
+    ).expect(202);
+    const id = first.body.conversationId as string;
+    const detail = await request(app.getHttpServer())
+      .get(`/api/v1/whatsapp/conversations/${id}`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/service/sessions/${detail.body.currentServiceSession.id}/actions/assume`,
+      )
+      .set('authorization', `Bearer ${accessToken}`)
+      .send({
+        commandId: randomUUID(),
+        expectedVersion: detail.body.currentServiceSession.version,
+      })
+      .expect(201);
+    const inbound = await signedWebhook(
+      app,
+      webhookPayload(
+        'observer-new-quote',
+        '5511988877078',
+        'Quero um novo orçamento',
+      ),
+    ).expect(202);
+    const anchor = await prisma.whatsAppMessage.findUniqueOrThrow({
+      where: { id: inbound.body.messageId },
+    });
+    const context = await whatsappRepository.getHumanObservationContext(
+      tenantId,
+      id,
+      anchor.correlationId,
+    );
+    expect(context?.userMessage).toBe('Quero um novo orçamento');
+    const decisions = [];
+    for (const type of ['SILENT_CLASSIFIER', 'ORCHESTRATOR'] as const) {
+      const agent = await prisma.lumeAgent.findFirstOrThrow({
+        where: { companyId: tenantId, type, customerFacing: false },
+      });
+      const config = await prisma.agentRuntimeConfigVersion.create({
+        data: {
+          companyId: tenantId,
+          agentId: agent.id,
+          version: 9999,
+          model: 'isolated-test',
+          credentialRef: 'env://ISOLATED_TEST_KEY',
+          status: 'DRAFT',
+        },
+      });
+      const execution = await prisma.agentExecution.create({
+        data: {
+          companyId: tenantId,
+          agentId: agent.id,
+          agentType: type,
+          serviceSessionId: context!.sourceServiceSessionId,
+          inputMessageId: anchor.id,
+          runtimeConfigVersionId: config.id,
+          source: 'WHATSAPP',
+          model: 'isolated-test',
+          status: 'SUCCEEDED',
+          completedAt: new Date(),
+        },
+      });
+      decisions.push({ agentId: agent.id, agentExecutionId: execution.id });
+    }
+    const command = {
+      companyId: tenantId,
+      conversationId: id,
+      sourceEventId: anchor.correlationId,
+      serviceSessionId: context!.sourceServiceSessionId,
+      expectedVersion: context!.expectedVersion,
+      result: {
+        continuity: {
+          ...decisions[0],
+          classification: 'new-subject' as const,
+          confidence: 0.99,
+          reason: 'Novo pedido',
+          targetDepartmentId: null,
+        },
+        orchestration: {
+          ...decisions[1],
+          intent: 'new-quote',
+          priority: 'normal' as const,
+          targetDepartmentId: null,
+          reason: 'Pedir autorização no painel',
+        },
+      },
+    };
+    await whatsappRepository.recordHumanObservation(command);
+    await whatsappRepository.recordHumanObservation(command);
+    const after = await request(app.getHttpServer())
+      .get(`/api/v1/whatsapp/conversations/${id}`)
+      .set('authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    expect(after.body.currentServiceSession).toMatchObject({
+      controlMode: 'human',
+      version: context!.expectedVersion + 1,
+    });
+    expect(after.body.assistantSuggestions).toEqual([
+      expect.objectContaining({ kind: 'new-quote' }),
+    ]);
+    expect(
+      await prisma.whatsAppMessage.count({
+        where: {
+          companyId: tenantId,
+          conversationId: id,
+          direction: 'OUTBOUND',
+        },
+      }),
+    ).toBe(0);
+    expect(
+      await whatsappRepository.getHumanObservationContext(
+        tenantId,
+        id,
+        anchor.correlationId,
+      ),
+    ).toBeNull();
   });
 });

@@ -17,6 +17,7 @@ import { RouteLocationSearchController } from './route-location-search.controlle
 import { RoutePlannerController } from './route-planner.controller';
 
 @Module({
+  exports: [RouteLocationSearchProvider],
   controllers: [RoutePlannerController, RouteLocationSearchController],
   providers: [
     {

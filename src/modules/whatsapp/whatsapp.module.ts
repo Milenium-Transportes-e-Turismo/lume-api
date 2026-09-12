@@ -1,3 +1,5 @@
+import { RoutePlannerModule } from '../route-planner/route-planner.module';
+import { TourismIntakeReviewService } from '../../infra/integrations/whatsapp-ai/tourism-intake-review.service';
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
@@ -59,7 +61,7 @@ import { AgentsRuntimeModule } from '../agents/agents-runtime.module';
 import { CommercialModule } from '../commercial/commercial.module';
 
 @Module({
-  imports: [AgentsRuntimeModule, CommercialModule],
+  imports: [AgentsRuntimeModule, CommercialModule, RoutePlannerModule],
   controllers: [
     EvolutionWebhookController,
     WhatsAppPanelController,
@@ -133,6 +135,7 @@ import { CommercialModule } from '../commercial/commercial.module';
         new ManageServiceSessionUseCase(repository),
       inject: [ServiceSessionManagementRepository],
     },
+    TourismIntakeReviewService,
     PlatformWhatsAppConversationAgent,
     ApiWhatsAppAutomationProvider,
     ServiceSessionLifecycleWorker,

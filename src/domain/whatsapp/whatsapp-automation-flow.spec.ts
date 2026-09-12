@@ -5,11 +5,13 @@ import {
   QUOTE_CONFIRMATION_MESSAGE,
   appendBufferedMessage,
   aiOutputResolvesConversation,
+  announcesHumanHandoff,
   buildBufferedText,
   decideAutomationPlan,
   deriveAiActions,
   deterministicCommandId,
   isExplicitPositiveConfirmation,
+  isExplicitNewQuoteRequest,
   mediaInterpretationsUsedInBufferedText,
   validateAiProviderOutput,
   type AutomationConversation,
@@ -635,4 +637,116 @@ describe('fluxo de automação do WhatsApp', () => {
       reason: 'natural-language-first-contact',
     });
   });
+});
+
+describe('pedido explícito de novo orçamento', () => {
+  it.each([
+    'collecting-information',
+    'waiting-for-customer',
+    'under-review',
+    'approved',
+    'rejected',
+    'cancelled',
+  ] as const)('inicia outra coleta com orçamento anterior em %s', (status) => {
+    const current = conversation({
+      requestStatus: status,
+      flowStep: 'quote-data-collection',
+      currentQuoteRequest: { id: 'old', sequence: 1, status, version: 1 },
+    });
+    expect(
+      decideAutomationPlan({
+        envelope: envelope('Gostaria de um novo orçamento', current),
+      }),
+    ).toMatchObject({
+      kind: 'ai',
+      transitionBeforeAi: 'new-quote-request',
+      aiMode: 'eventual-quote',
+    });
+  });
+  it.each([
+    'Quero corrigir o orçamento',
+    'Não quero um novo orçamento',
+    'Quero saber do orçamento',
+    'E o valor?',
+  ])('não cria outro registro ao receber %s', (text) => {
+    const current = conversation({
+      requestStatus: 'collecting-information',
+      flowStep: 'quote-data-collection',
+      currentQuoteRequest: {
+        id: 'old',
+        sequence: 1,
+        status: 'collecting-information',
+        version: 1,
+      },
+    });
+    expect(
+      decideAutomationPlan({ envelope: envelope(text, current) })
+        .transitionBeforeAi,
+    ).not.toBe('new-quote-request');
+  });
+  it('não toma a conversa de um atendente para criar orçamento', () => {
+    const current = conversation({
+      conversationState: 'human-active',
+      flowStep: 'human-service',
+    });
+    expect(
+      decideAutomationPlan({
+        envelope: envelope('Quero outro orçamento', current),
+      }).kind,
+    ).toBe('human-notification');
+  });
+});
+
+it.each([
+  'Queria outro orçamento',
+  'Faz outra cotação pra mim',
+  'Gostaria de orçamento para nova viagem',
+])('reconhece um pedido novo em linguagem natural: %s', (message) => {
+  expect(isExplicitNewQuoteRequest(message)).toBe(true);
+});
+
+describe('handoff commitment consistency', () => {
+  const output = {
+    message: '',
+    collectionStatus: 'completed' as const,
+    extractedDataPatch: {},
+    missingFields: [],
+    summaryPresented: false,
+    customerDecision: 'undecided' as const,
+  };
+  it.each([
+    'Não consigo consultar as parcelas pendentes por aqui. Vou encaminhar sua solicitação ao time responsável para verificarem o pagamento da sua última viagem.',
+    'Estou transferindo seu atendimento ao Financeiro.',
+    'Sua solicitação foi encaminhada à equipe responsável.',
+    'Vou conectar você com nossa equipe.',
+    'Vou direcionar seu pedido para o setor responsável.',
+  ])('does not resolve or send a standalone promise: %s', (message) => {
+    expect(announcesHumanHandoff(message)).toBe(true);
+    expect(
+      aiOutputResolvesConversation({ ...output, message }, 'natural-service'),
+    ).toBe(false);
+    expect(
+      deriveAiActions({ ...output, message }, 'natural-service')
+        .transitionAfterSend,
+    ).toBe('forward');
+  });
+  it.each([
+    'Posso encaminhar você para o Financeiro?',
+    'Se quiser, vou encaminhar sua solicitação ao Financeiro.',
+    'Vou encaminhar sua solicitação quando você confirmar.',
+    'Não vou encaminhar seu atendimento.',
+    'Não foi possível encaminhar sua solicitação.',
+    'Vou encaminhar o comprovante de pagamento.',
+    'O pagamento pode ser parcelado.',
+    'Você pediu: "vou encaminhar seu atendimento".',
+  ])(
+    'does not treat an offer, negation, quote or document as an executed handoff: %s',
+    (message) => {
+      expect(announcesHumanHandoff(message)).toBe(false);
+      expect(
+        deriveAiActions({ ...output, message }, 'natural-service')
+          .transitionAfterSend,
+      ).toBeNull();
+    },
+  );
 });

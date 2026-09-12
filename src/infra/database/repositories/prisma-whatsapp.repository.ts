@@ -1,4 +1,8 @@
 import {
+  QUOTE_CONFIRMATION_MESSAGE,
+  isExplicitNewQuoteRequest,
+} from '../../../domain/whatsapp/whatsapp-automation-flow';
+import {
   sessionInclude,
   toManaged,
 } from './prisma-service-session-management.repository';
@@ -81,8 +85,6 @@ import {
 } from '../../../domain/whatsapp/conversation-transition.matrix';
 import { validateQuoteProposalPdf } from '../../../domain/commercial/quote-proposal-pdf';
 import {
-  AI_CLOSING_WAIT_MS,
-  LUME_AI_CLOSING_QUESTION,
   createPublicContinuationCode,
   decideServiceContinuity,
   formatAiClosureMessage,
@@ -146,7 +148,7 @@ import {
   WhatsAppGroupAiMode,
   WhatsAppMessageActorType,
   WhatsAppMessageSource,
-  type Prisma,
+  Prisma,
 } from '../prisma/generated/client';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -1445,6 +1447,8 @@ export class PrismaWhatsAppRepository
 {
   private readonly dispatchLeaseMs: number;
   private readonly followUpInactivityMs: number;
+  private readonly customerReminderDelayMs: number;
+  private readonly customerClosureDelayMs: number;
   private readonly automationRetryBaseDelayMs: number;
   private readonly automationRetryMaximumDelayMs: number;
   private readonly preventCloseWithApprovedQuote: boolean;
@@ -1454,6 +1458,10 @@ export class PrismaWhatsAppRepository
     config: ConfigService,
   ) {
     super();
+    this.customerReminderDelayMs =
+      config.get<number>('WHATSAPP_CUSTOMER_REMINDER_DELAY_MS') ?? 10_800_000;
+    this.customerClosureDelayMs =
+      config.get<number>('WHATSAPP_CUSTOMER_CLOSURE_DELAY_MS') ?? 3_600_000;
     this.dispatchLeaseMs =
       config.get<number>('EVOLUTION_DISPATCH_LEASE_MS') ?? 90_000;
     this.followUpInactivityMs =
@@ -1985,6 +1993,7 @@ export class PrismaWhatsAppRepository
       offHoursHandoffNotifiedAt?: Date | null;
       conversationResolved?: boolean;
       resolutionConfirmedByCustomer?: boolean;
+      forceEvent?: boolean;
       occurredAt: Date;
       metadata?: Readonly<Record<string, unknown>>;
     },
@@ -2023,6 +2032,7 @@ export class PrismaWhatsAppRepository
         ? input.session.resolutionConfirmedByCustomer
         : input.resolutionConfirmedByCustomer;
     if (
+      !input.forceEvent &&
       input.session.status === input.status &&
       input.session.controlMode === input.controlMode &&
       input.session.isForeground === input.isForeground &&
@@ -2212,6 +2222,569 @@ export class PrismaWhatsAppRepository
         serviceSessionVersion: session.version,
       };
     });
+  }
+
+  async getHumanObservationContext(
+    companyId: string,
+    conversationId: string,
+    sourceEventId: string,
+  ): Promise<Omit<ContinuityClassificationCandidate, 'decisionId'> | null> {
+    const anchor = await this.prisma.whatsAppMessage.findUnique({
+      where: {
+        companyId_correlationId: { companyId, correlationId: sourceEventId },
+      },
+      select: {
+        id: true,
+        conversationId: true,
+        serviceSessionId: true,
+        direction: true,
+        text: true,
+        kind: true,
+        createdAt: true,
+        occurredAt: true,
+      },
+    });
+    if (
+      !anchor?.serviceSessionId ||
+      anchor.conversationId !== conversationId ||
+      anchor.direction !== MessageDirection.INBOUND
+    )
+      return null;
+    const session = await this.prisma.serviceSession.findFirst({
+      where: {
+        id: anchor.serviceSessionId,
+        companyId,
+        controlMode: ServiceSessionControlMode.HUMAN,
+        status: { not: ServiceSessionStatus.CLOSED },
+        isForeground: true,
+        sourceChannel: { agentsEnabled: true },
+      },
+      select: serviceSessionAuthorizationSelect,
+    });
+    if (!session) return null;
+    const existing = await this.prisma.serviceSessionEvent.findUnique({
+      where: {
+        companyId_commandId: {
+          companyId,
+          commandId: correlation('human-observation', sourceEventId),
+        },
+      },
+      select: { id: true },
+    });
+    if (existing) return null;
+    const [messages, departments] = await Promise.all([
+      this.prisma.whatsAppMessage.findMany({
+        where: {
+          companyId,
+          conversationId,
+          serviceSessionId: session.id,
+          createdAt: { lt: anchor.createdAt },
+          text: { not: null },
+          OR: [
+            { direction: MessageDirection.INBOUND },
+            {
+              deliveryStatus: {
+                in: [
+                  DeliveryStatus.SENT,
+                  DeliveryStatus.DELIVERED,
+                  DeliveryStatus.READ,
+                ],
+              },
+            },
+          ],
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: 30,
+        select: { text: true, direction: true, occurredAt: true },
+      }),
+      this.prisma.tenantDepartment.findMany({
+        where: {
+          companyId,
+          code: { not: DepartmentCode.CLIENT_COMPANY },
+          OR: [
+            ...(session.currentDepartmentId
+              ? [{ id: session.currentDepartmentId }]
+              : []),
+            {
+              automaticTargetChannels: {
+                some: { companyId, channelId: session.sourceChannelId },
+              },
+            },
+          ],
+        },
+        select: { id: true, code: true, name: true },
+      }),
+    ]);
+    return {
+      sourceServiceSessionId: session.id,
+      expectedVersion: session.version,
+      currentDepartmentId: session.currentDepartmentId,
+      previousMessages: messages.reverse().map((m) => ({
+        text: m.text ?? '',
+        direction:
+          m.direction === MessageDirection.INBOUND ? 'inbound' : 'outbound',
+        occurredAt: m.occurredAt.toISOString(),
+      })),
+      userMessage:
+        anchor.text?.trim() ||
+        `[Mensagem ${anchor.kind.toLowerCase()} sem texto disponível; não inferir um novo assunto.]`,
+      allowedTargetDepartments: departments.map((d) => ({
+        ...d,
+        code: departmentFromPrisma[d.code],
+      })),
+    };
+  }
+
+  async recordHumanObservation(
+    input: Parameters<WhatsAppRepository['recordHumanObservation']>[0],
+  ): Promise<void> {
+    await this.prisma.$transaction(async (transaction) => {
+      const commandId = correlation('human-observation', input.sourceEventId);
+      await this.lockCommand(
+        transaction,
+        input.companyId,
+        'whatsapp-conversation',
+        input.conversationId,
+      );
+      const existing = await transaction.serviceSessionEvent.findUnique({
+        where: {
+          companyId_commandId: { companyId: input.companyId, commandId },
+        },
+      });
+      if (existing) return;
+      const session = await transaction.serviceSession.findFirst({
+        where: {
+          id: input.serviceSessionId,
+          companyId: input.companyId,
+          controlMode: ServiceSessionControlMode.HUMAN,
+          isForeground: true,
+          status: { not: ServiceSessionStatus.CLOSED },
+        },
+        select: serviceSessionAuthorizationSelect,
+      });
+      if (!session || session.version !== input.expectedVersion) return;
+      const anchor = await transaction.whatsAppMessage.findUnique({
+        where: {
+          companyId_correlationId: {
+            companyId: input.companyId,
+            correlationId: input.sourceEventId,
+          },
+        },
+      });
+      if (
+        !anchor ||
+        anchor.conversationId !== input.conversationId ||
+        anchor.serviceSessionId !== session.id ||
+        anchor.direction !== MessageDirection.INBOUND
+      )
+        return;
+      for (const decision of [
+        input.result.continuity,
+        input.result.orchestration,
+      ]) {
+        const execution = await transaction.agentExecution.findFirst({
+          where: {
+            id: decision.agentExecutionId,
+            agentId: decision.agentId,
+            companyId: input.companyId,
+            serviceSessionId: session.id,
+            status: AgentExecutionStatus.SUCCEEDED,
+            agent: { customerFacing: false },
+          },
+          select: { id: true },
+        });
+        if (!execution)
+          throw forbidden(
+            'Observação sem execução silenciosa válida nesta sessão.',
+          );
+      }
+      const newQuote = isExplicitNewQuoteRequest(anchor.text ?? '');
+      const newSubject =
+        input.result.continuity.classification === 'new-subject' &&
+        input.result.continuity.confidence >= 0.8;
+      const targetId = input.result.orchestration.targetDepartmentId;
+      const target = targetId
+        ? await transaction.tenantDepartment.findFirst({
+            where: {
+              id: targetId,
+              companyId: input.companyId,
+              code: { not: DepartmentCode.CLIENT_COMPANY },
+            },
+            select: { id: true, code: true, name: true },
+          })
+        : null;
+      const offer = newQuote
+        ? {
+            kind: 'new-quote',
+            question:
+              'O cliente pediu um novo orçamento. Deseja que a Milena assuma a coleta dos dados?',
+            targetDepartment: 'commercial',
+          }
+        : newSubject && target && target.id !== session.currentDepartmentId
+          ? {
+              kind: 'department',
+              question: `O cliente trouxe um assunto de ${target.name}. Deseja direcionar o atendimento para esse departamento?`,
+              targetDepartment: departmentFromPrisma[target.code],
+            }
+          : null;
+      await this.updateFoundationSession(transaction, {
+        companyId: input.companyId,
+        session,
+        commandId,
+        name: 'human-conversation-observed',
+        forceEvent: true,
+        actorType: MutationActorType.AI_AGENT,
+        actorAgentId: input.result.orchestration.agentId,
+        status: session.status,
+        controlMode: session.controlMode,
+        isForeground: session.isForeground,
+        occurredAt: new Date(),
+        metadata: {
+          conversationId: input.conversationId,
+          sourceEventId: input.sourceEventId,
+          messageId: anchor.id,
+          observation: input.result,
+          suggestion: offer,
+        },
+      });
+    });
+  }
+
+  async resolveAssistantSuggestion(
+    input: Parameters<WhatsAppRepository['resolveAssistantSuggestion']>[0],
+  ): Promise<unknown> {
+    await this.prisma.$transaction(async (transaction) => {
+      await this.lockCommand(
+        transaction,
+        input.companyId,
+        'whatsapp-conversation',
+        input.conversationId,
+      );
+      const actor = await this.assertCurrentWhatsAppAttendant(
+        transaction,
+        input.companyId,
+        input.actorUserId,
+      );
+      if (
+        !actor.hasTenantWideAuthority &&
+        !actor.permissions.includes(
+          input.decision === 'accept' ? 'service:transfer' : 'service:respond',
+        )
+      )
+        throw forbidden('Sem permissão para decidir esta sugestão.');
+      const conversation = await this.findConversationOrThrow(
+        transaction,
+        input.companyId,
+        input.conversationId,
+      );
+      if (
+        !actor.hasTenantWideAuthority &&
+        !userBelongsToDepartment(
+          actor.departments,
+          departmentFromPrisma[conversation.department],
+        )
+      )
+        throw forbidden('O atendimento pertence a outro departamento.');
+      const receiptId = correlation(
+        'assistant-suggestion-resolution',
+        input.suggestionId,
+      );
+      const previous = await transaction.serviceSessionEvent.findUnique({
+        where: {
+          companyId_commandId: {
+            companyId: input.companyId,
+            commandId: receiptId,
+          },
+        },
+      });
+      if (previous) {
+        const metadata = previous.metadata as Record<string, unknown>;
+        if (
+          metadata.requestCommandId !== input.commandId ||
+          metadata.decision !== input.decision ||
+          previous.actorUserId !== input.actorUserId
+        )
+          throw new AppError('CONFLICT', 'Esta sugestão já foi decidida.');
+        return;
+      }
+      if (conversation.version !== input.expectedVersion)
+        throw currentVersionConflict(conversation.version);
+      const suggestion = await transaction.serviceSessionEvent.findFirst({
+        where: {
+          id: input.suggestionId,
+          companyId: input.companyId,
+          name: 'human-conversation-observed',
+        },
+      });
+      const metadata = suggestion?.metadata as
+        Record<string, unknown> | undefined;
+      const offer = metadata?.suggestion as Record<string, unknown> | undefined;
+      if (
+        !suggestion ||
+        metadata?.conversationId !== conversation.id ||
+        !offer ||
+        !['new-quote', 'department'].includes(String(offer.kind))
+      )
+        throw notFound('Sugestão interna');
+      await this.lockCommand(
+        transaction,
+        input.companyId,
+        'service-session-lifecycle',
+        conversation.threadId!,
+      );
+      const session = await transaction.serviceSession.findFirst({
+        where: {
+          id: suggestion.serviceSessionId,
+          companyId: input.companyId,
+          threadId: conversation.threadId!,
+          controlMode: ServiceSessionControlMode.HUMAN,
+          isForeground: true,
+          status: { not: ServiceSessionStatus.CLOSED },
+        },
+        select: serviceSessionAuthorizationSelect,
+      });
+      if (!session || session.version !== input.expectedSessionVersion)
+        throw new AppError(
+          'CONFLICT',
+          'O atendimento mudou. Recarregue a sugestão.',
+        );
+      const anchor = await transaction.whatsAppMessage.findFirst({
+        where: {
+          id: String(metadata.messageId),
+          companyId: input.companyId,
+          conversationId: conversation.id,
+          serviceSessionId: session.id,
+          direction: MessageDirection.INBOUND,
+        },
+      });
+      if (!anchor) throw notFound('Mensagem de origem da sugestão');
+      let currentSession = session;
+      if (input.decision === 'accept') {
+        const targetCode =
+          offer.kind === 'new-quote'
+            ? 'commercial'
+            : (String(offer.targetDepartment) as Department);
+        const departmentCode = departmentToPrisma[targetCode];
+        if (!departmentCode || departmentCode === DepartmentCode.CLIENT_COMPANY)
+          throw forbidden('Departamento indisponível.');
+        const target = await transaction.tenantDepartment.findFirst({
+          where: { companyId: input.companyId, code: departmentCode },
+          select: { id: true },
+        });
+        if (!target) throw notFound('Departamento');
+        await this.transition(
+          {
+            companyId: input.companyId,
+            conversationId: conversation.id,
+            commandId: input.commandId,
+            expectedVersion: conversation.version,
+            actorType: 'user',
+            actorUserId: input.actorUserId,
+            name:
+              offer.kind === 'new-quote' ? 'start-assisted-quote' : 'forward',
+            targetDepartment: targetCode,
+            metadata: {
+              assistantSuggestionId: suggestion.id,
+              expectedServiceSessionVersion: input.expectedSessionVersion,
+              quoteContextStartedAt: anchor.occurredAt.toISOString(),
+              reason: 'Sugestão silenciosa aprovada pelo atendente',
+            },
+          },
+          transaction,
+        );
+        currentSession = await transaction.serviceSession.findUniqueOrThrow({
+          where: {
+            id_companyId: { id: session.id, companyId: input.companyId },
+          },
+          select: serviceSessionAuthorizationSelect,
+        });
+        if (offer.kind === 'department') {
+          const queue = await transaction.serviceQueue.upsert({
+            where: {
+              companyId_departmentId_name: {
+                companyId: input.companyId,
+                departmentId: target.id,
+                name: 'Atendimento',
+              },
+            },
+            create: {
+              companyId: input.companyId,
+              departmentId: target.id,
+              name: 'Atendimento',
+            },
+            update: { enabled: true },
+            select: { id: true },
+          });
+          currentSession = await this.updateFoundationSession(transaction, {
+            companyId: input.companyId,
+            session: currentSession,
+            commandId: correlation('assistant-transfer-queue', input.commandId),
+            name: 'assistant-transfer-queue',
+            actorType: MutationActorType.HUMAN_USER,
+            actorUserId: input.actorUserId,
+            status: ServiceSessionStatus.WAITING_HUMAN,
+            controlMode: ServiceSessionControlMode.HUMAN,
+            isForeground: true,
+            currentDepartmentId: target.id,
+            queueId: queue.id,
+            responsibleUserId: null,
+            occurredAt: new Date(),
+          });
+        }
+      }
+      const updated = await this.updateFoundationSession(transaction, {
+        companyId: input.companyId,
+        session: currentSession,
+        commandId: receiptId,
+        name: 'assistant-suggestion-resolved',
+        forceEvent: true,
+        actorType: MutationActorType.HUMAN_USER,
+        actorUserId: input.actorUserId,
+        status: currentSession.status,
+        controlMode: currentSession.controlMode,
+        isForeground: currentSession.isForeground,
+        occurredAt: new Date(),
+        metadata: {
+          suggestionId: suggestion.id,
+          conversationId: conversation.id,
+          requestCommandId: input.commandId,
+          decision: input.decision,
+          kind: offer.kind,
+          sourceEventId: metadata.sourceEventId,
+          messageId: anchor.id,
+        },
+      });
+      if (input.decision === 'accept' && offer.kind === 'new-quote') {
+        await this.createOrderedOutbox(transaction, {
+          companyId: input.companyId,
+          topic: 'whatsapp.assistant-collection.requested',
+          aggregateType: 'whatsapp-conversation',
+          aggregateId: conversation.id,
+          correlationId: correlation('assistant-collection', input.commandId),
+          payload: {
+            commandId: input.commandId,
+            conversationId: conversation.id,
+            companyId: input.companyId,
+            serviceSessionId: updated.id,
+            suggestionId: suggestion.id,
+          },
+        });
+      }
+    });
+    return this.getConversation(input.companyId, input.conversationId, {
+      departments: null,
+    });
+  }
+
+  async getAuthorizedAssistantCollection(
+    companyId: string,
+    conversationId: string,
+    commandId: string,
+  ): Promise<unknown> {
+    const approval =
+      await this.prisma.whatsAppConversationTransition.findUnique({
+        where: { companyId_commandId: { companyId, commandId } },
+      });
+    if (
+      !approval ||
+      approval.conversationId !== conversationId ||
+      approval.name !== 'start-assisted-quote'
+    )
+      return null;
+    const conversation =
+      await this.prisma.whatsAppConversation.findUniqueOrThrow({
+        where: { id_companyId: { id: conversationId, companyId } },
+        include: conversationDetailInclude,
+      });
+    const metadata = approval.metadata as Record<string, unknown>;
+    if (conversation.quoteRequests[0]?.id !== metadata.quoteRequestId)
+      return null;
+    const session = await this.prisma.serviceSession.findFirst({
+      where: {
+        id: approval.serviceSessionId!,
+        companyId,
+        controlMode: ServiceSessionControlMode.AI,
+        status: ServiceSessionStatus.OPEN,
+        isForeground: true,
+        sourceChannel: { agentsEnabled: true },
+      },
+      select: { id: true },
+    });
+    if (
+      !session ||
+      conversation.conversationState !== ConversationState.BOT_ACTIVE
+    )
+      return null;
+    const suggestion = await this.prisma.serviceSessionEvent.findFirst({
+      where: {
+        id: String(metadata.assistantSuggestionId),
+        companyId,
+        serviceSessionId: session.id,
+      },
+    });
+    const origin = suggestion?.metadata as Record<string, unknown> | undefined;
+    const anchor = origin
+      ? await this.prisma.whatsAppMessage.findFirst({
+          where: {
+            id: String(origin.messageId),
+            companyId,
+            conversationId,
+            serviceSessionId: session.id,
+          },
+        })
+      : null;
+    if (!anchor) return null;
+    const messages = await this.prisma.whatsAppMessage.findMany({
+      where: {
+        companyId,
+        conversationId,
+        serviceSessionId: session.id,
+        direction: MessageDirection.INBOUND,
+        createdAt: { gte: anchor.createdAt },
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: 50,
+    });
+    messages.reverse();
+    const eventId = correlation('assistant-collection', commandId);
+    return {
+      conversation: presentConversationDetail(conversation),
+      messages: messages.map((m) => ({
+        messageId: m.id,
+        sourceEventId: m.correlationId,
+        occurredAt: m.occurredAt.toISOString(),
+        persistedAt: m.createdAt.toISOString(),
+        kind: kindFromPrisma[m.kind],
+        text: m.text,
+      })),
+      payload: {
+        eventId,
+        companyId,
+        conversationId,
+        messageId: anchor.id,
+        channelId: conversation.channelId,
+        contact: {
+          id: conversation.contactId,
+          phone: conversation.contact.phoneNormalized,
+          displayName: conversation.contact.displayName,
+        },
+        message: {
+          providerMessageId: anchor.providerMessageId,
+          direction: 'inbound',
+          deliveryStatus: 'received',
+          kind: kindFromPrisma[anchor.kind],
+          text: anchor.text,
+          media: null,
+          occurredAt: anchor.occurredAt.toISOString(),
+        },
+        conversation: presentConversationDetail(conversation),
+        automationAllowed: true,
+        canGenerateReply: true,
+        canSendReply: true,
+        contextualTransition: false,
+        isFirstContact: false,
+      },
+    };
   }
 
   async getPendingContinuityClassification(
@@ -2959,6 +3532,31 @@ export class PrismaWhatsAppRepository
         isForeground: true,
         sourceChannel: { agentsEnabled: true },
         closingDeadlineAt: { lte: input.now },
+        quoteRequests: {
+          none: {
+            status: {
+              in: [RequestStatus.UNDER_REVIEW, RequestStatus.APPROVED],
+            },
+          },
+        },
+        messages: {
+          some: {
+            automationPurpose: {
+              in: [
+                'customer-information-reminder',
+                'service-session-resolution',
+              ],
+            },
+            direction: MessageDirection.OUTBOUND,
+            deliveryStatus: {
+              in: [
+                DeliveryStatus.SENT,
+                DeliveryStatus.DELIVERED,
+                DeliveryStatus.READ,
+              ],
+            },
+          },
+        },
       },
       orderBy: [{ closingDeadlineAt: 'asc' }, { id: 'asc' }],
       take: limit,
@@ -2983,20 +3581,35 @@ export class PrismaWhatsAppRepository
     const remaining = limit - due.length;
     let closingStarted = 0;
     if (remaining > 0) {
-      const eligible = await this.prisma.serviceSession.findMany({
-        where: {
-          status: ServiceSessionStatus.OPEN,
-          controlMode: ServiceSessionControlMode.AI,
-          isForeground: true,
-          sourceChannel: { agentsEnabled: true },
-          conversationResolved: true,
-          closingStartedAt: null,
-          closingDeadlineAt: null,
-        },
-        orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
-        take: remaining,
-        select: { id: true, companyId: true, threadId: true },
-      });
+      // Only the latest persisted message can establish a customer wait. This
+      // excludes stale questions, human replies and every inbound received since.
+      const eligible = await this.prisma.$queryRaw<
+        { id: string; companyId: string; threadId: string }[]
+      >(Prisma.sql`
+        SELECT s.id, s.company_id AS "companyId", s.thread_id AS "threadId"
+        FROM service_sessions s
+        JOIN whatsapp_channels c ON c.id = s.source_channel_id AND c.company_id = s.company_id
+        JOIN LATERAL (
+          SELECT m.automation_purpose, m.delivery_status, m.created_at
+          FROM whatsapp_messages m
+          WHERE m.service_session_id = s.id AND m.company_id = s.company_id
+          ORDER BY m.created_at DESC, m.occurred_at DESC, m.id DESC LIMIT 1
+        ) last_message ON true
+        WHERE s.status IN ('open', 'waiting-customer') AND s.control_mode = 'ai'
+          AND s.is_foreground AND c.agents_enabled
+          AND NOT EXISTS (
+            SELECT 1 FROM quote_requests q WHERE q.company_id = s.company_id
+              AND q.service_session_id = s.id AND q.status IN ('under-review', 'approved')
+          )
+          AND last_message.delivery_status IN ('sent', 'delivered', 'read')
+          AND (
+            (last_message.automation_purpose = 'customer-information-request'
+              AND last_message.created_at <= ${new Date(input.now.getTime() - this.customerReminderDelayMs)})
+            OR (last_message.automation_purpose = 'service-session-resolution'
+              AND s.conversation_resolved AND s.resolution_confirmed_by_customer)
+          )
+        ORDER BY last_message.created_at, s.id LIMIT ${remaining}
+      `);
       for (const candidate of eligible) {
         try {
           if (await this.beginAiServiceSessionClosing(candidate, input.now)) {
@@ -3012,6 +3625,58 @@ export class PrismaWhatsAppRepository
     }
 
     return { closingStarted, closed, skipped };
+  }
+
+  private async hasPlatformPendingWork(
+    transaction: Prisma.TransactionClient,
+    companyId: string,
+    serviceSessionId: string,
+  ): Promise<boolean> {
+    return (
+      (await transaction.quoteRequest.count({
+        where: {
+          companyId,
+          serviceSessionId,
+          status: { in: [RequestStatus.UNDER_REVIEW, RequestStatus.APPROVED] },
+        },
+      })) > 0
+    );
+  }
+
+  private async latestLifecycleMessage(
+    transaction: Prisma.TransactionClient,
+    companyId: string,
+    serviceSessionId: string,
+  ) {
+    const message = await transaction.whatsAppMessage.findFirst({
+      where: { companyId, serviceSessionId },
+      orderBy: [{ createdAt: 'desc' }, { occurredAt: 'desc' }, { id: 'desc' }],
+      select: {
+        id: true,
+        text: true,
+        direction: true,
+        deliveryStatus: true,
+        automationPurpose: true,
+        createdAt: true,
+        attempts: {
+          where: { status: MessageAttemptStatus.SUCCEEDED },
+          orderBy: { completedAt: 'asc' },
+          take: 1,
+          select: { completedAt: true },
+        },
+      },
+    });
+    if (!message) return null;
+    const sentAt =
+      message.direction === MessageDirection.OUTBOUND &&
+      [
+        DeliveryStatus.SENT,
+        DeliveryStatus.DELIVERED,
+        DeliveryStatus.READ,
+      ].includes(message.deliveryStatus as never)
+        ? (message.attempts[0]?.completedAt ?? message.createdAt)
+        : null;
+    return { ...message, sentAt };
   }
 
   private async beginAiServiceSessionClosing(
@@ -3054,13 +3719,18 @@ export class PrismaWhatsAppRepository
       if (
         !session ||
         session.threadId !== candidate.threadId ||
-        session.status !== ServiceSessionStatus.OPEN ||
+        ![
+          ServiceSessionStatus.OPEN,
+          ServiceSessionStatus.WAITING_CUSTOMER,
+        ].includes(session.status as never) ||
         session.controlMode !== ServiceSessionControlMode.AI ||
         !session.isForeground ||
-        !session.conversationResolved ||
         !pendingActionsAreEmpty(session.pendingActions) ||
         conversation.channel?.agentsEnabled === false ||
-        conversation.conversationState !== ConversationState.BOT_ACTIVE ||
+        ![
+          ConversationState.BOT_ACTIVE,
+          ConversationState.WAITING_FOR_CUSTOMER,
+        ].includes(conversation.conversationState as never) ||
         conversation.flowStep === FlowStep.HUMAN_SERVICE ||
         conversation.assignedToUserId !== null
       ) {
@@ -3088,17 +3758,41 @@ export class PrismaWhatsAppRepository
         return false;
       }
 
+      if (
+        await this.hasPlatformPendingWork(
+          transaction,
+          candidate.companyId,
+          session.id,
+        )
+      )
+        return false;
+      const latest = await this.latestLifecycleMessage(
+        transaction,
+        candidate.companyId,
+        session.id,
+      );
+      if (!latest || !latest.sentAt) return false;
+      const resolved =
+        latest.automationPurpose === 'service-session-resolution' &&
+        session.conversationResolved &&
+        session.resolutionConfirmedByCustomer;
+      const waiting =
+        latest.automationPurpose === 'customer-information-request' &&
+        latest.sentAt.getTime() + this.customerReminderDelayMs <= now.getTime();
+      if (!resolved && !waiting) return false;
+
       const before = serviceSessionSnapshot(session);
-      const deadline = new Date(now.getTime() + AI_CLOSING_WAIT_MS);
+      const deadline = new Date(
+        now.getTime() + (resolved ? 0 : this.customerClosureDelayMs),
+      );
       const updated = await transaction.serviceSession.updateMany({
         where: {
           id: session.id,
           companyId: candidate.companyId,
           version: session.version,
-          status: ServiceSessionStatus.OPEN,
+          status: session.status,
           controlMode: ServiceSessionControlMode.AI,
           isForeground: true,
-          conversationResolved: true,
         },
         data: {
           status: ServiceSessionStatus.CLOSING,
@@ -3137,18 +3831,24 @@ export class PrismaWhatsAppRepository
           afterSnapshot: payload(after),
           metadata: payload({
             initiatedBy: 'ai-policy',
-            waitMilliseconds: AI_CLOSING_WAIT_MS,
+            reason: resolved ? 'customer-resolution' : 'waiting-on-customer',
+            questionMessageId: latest.id,
+            waitMilliseconds: resolved ? 0 : this.customerClosureDelayMs,
           }),
           createdAt: now,
         },
       });
-      await this.createServiceSessionLifecycleOutbound(transaction, {
-        conversation,
-        session: closing,
-        text: LUME_AI_CLOSING_QUESTION,
-        purpose: 'service-session-closing-question',
-        occurredAt: now,
-      });
+      if (!resolved)
+        await this.createServiceSessionLifecycleOutbound(transaction, {
+          conversation,
+          session: closing,
+          text: `Quando puder, me responda para continuarmos:\n\n${latest.text ?? ''}`.slice(
+            0,
+            4096,
+          ),
+          purpose: 'customer-information-reminder',
+          occurredAt: now,
+        });
       return true;
     });
   }
@@ -3207,35 +3907,45 @@ export class PrismaWhatsAppRepository
             session.status !== ServiceSessionStatus.CLOSING ||
             session.controlMode !== ServiceSessionControlMode.AI ||
             !session.isForeground ||
-            !session.conversationResolved ||
             !pendingActionsAreEmpty(session.pendingActions) ||
             session.closingStartedAt === null ||
             session.closingDeadlineAt === null ||
             session.closingDeadlineAt > now ||
             conversation.channel?.agentsEnabled === false ||
-            conversation.conversationState !== ConversationState.BOT_ACTIVE ||
+            ![
+              ConversationState.BOT_ACTIVE,
+              ConversationState.WAITING_FOR_CUSTOMER,
+            ].includes(conversation.conversationState as never) ||
             conversation.flowStep === FlowStep.HUMAN_SERVICE ||
             conversation.assignedToUserId !== null
           ) {
             return false;
           }
-          const closingQuestion = await transaction.whatsAppMessage.findFirst({
-            where: {
-              companyId: candidate.companyId,
-              serviceSessionId: session.id,
-              automationPurpose: 'service-session-closing-question',
-              direction: MessageDirection.OUTBOUND,
-            },
-            orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
-            select: { deliveryStatus: true },
-          });
           if (
-            !closingQuestion ||
-            closingQuestion.deliveryStatus === DeliveryStatus.PENDING ||
-            closingQuestion.deliveryStatus === DeliveryStatus.FAILED
-          ) {
+            await this.hasPlatformPendingWork(
+              transaction,
+              candidate.companyId,
+              session.id,
+            )
+          )
             return false;
-          }
+          const latest = await this.latestLifecycleMessage(
+            transaction,
+            candidate.companyId,
+            session.id,
+          );
+          if (!latest?.sentAt) return false;
+          const resolved =
+            latest.automationPurpose === 'service-session-resolution' &&
+            session.conversationResolved &&
+            session.resolutionConfirmedByCustomer;
+          const timedOut =
+            latest.automationPurpose === 'customer-information-reminder' &&
+            latest.createdAt >= session.closingStartedAt &&
+            latest.sentAt.getTime() + this.customerClosureDelayMs <=
+              now.getTime();
+          // Legacy closing questions are intentionally not a new inactivity policy.
+          if (!resolved && !timedOut) return false;
           const incompleteProposalDocuments =
             await transaction.quoteProposalDocument.count({
               where: {
@@ -3585,7 +4295,9 @@ export class PrismaWhatsAppRepository
               fromRequestStatus: conversation.requestStatus,
               toRequestStatus: closedConversation.requestStatus,
               metadata: payload({
-                reason: 'ai-closing-timeout',
+                reason: resolved
+                  ? 'customer-resolution'
+                  : 'customer-information-timeout',
                 serviceSessionId: closedSession.id,
               }),
               resultSnapshot: payload({
@@ -3599,7 +4311,9 @@ export class PrismaWhatsAppRepository
           await this.createServiceSessionLifecycleOutbound(transaction, {
             conversation: closedConversation,
             session: closedSession,
-            text: formatAiClosureMessage(code),
+            text: resolved
+              ? formatAiClosureMessage(code)
+              : `Como não tivemos retorno, este atendimento foi encerrado por enquanto. Para retomar o assunto nos próximos 7 dias, envie CONTINUAR ${code}.`,
             purpose: 'service-session-closure',
             occurredAt: now,
           });
@@ -3811,7 +4525,7 @@ export class PrismaWhatsAppRepository
       conversation: ConversationWithRelations;
       session: ServiceSessionAuthorization;
       text: string;
-      purpose: 'service-session-closing-question' | 'service-session-closure';
+      purpose: 'customer-information-reminder' | 'service-session-closure';
       occurredAt: Date;
     },
   ): Promise<void> {
@@ -3836,6 +4550,7 @@ export class PrismaWhatsAppRepository
           `${input.session.id}:${input.session.version}`,
         ),
         occurredAt: input.occurredAt,
+        createdAt: input.occurredAt,
       },
     });
     const attempt = await transaction.whatsAppMessageAttempt.create({
@@ -5329,6 +6044,16 @@ export class PrismaWhatsAppRepository
         };
       }
 
+      if (input.name === 'confirm-quote' && !input.automaticHumanHandoff) {
+        input = {
+          ...input,
+          targetDepartment: 'commercial',
+          automaticHumanHandoff: {
+            customerMessage: QUOTE_CONFIRMATION_MESSAGE,
+            occurredAt: new Date(),
+          },
+        };
+      }
       await this.lockCommand(
         transaction,
         input.companyId,
@@ -5342,6 +6067,79 @@ export class PrismaWhatsAppRepository
       );
       if (conversation.version !== input.expectedVersion) {
         throw currentVersionConflict(conversation.version);
+      }
+      if (input.name === 'start-assisted-quote') {
+        if (
+          !currentActor ||
+          (!currentActor.hasTenantWideAuthority &&
+            !currentActor.permissions.includes('service:transfer'))
+        )
+          throw forbidden(
+            'A coleta exige aprovação de um atendente autorizado.',
+          );
+        const suggestionId = input.metadata?.assistantSuggestionId;
+        if (typeof suggestionId !== 'string')
+          throw validationError(
+            'A coleta assistida exige uma sugestão interna.',
+          );
+        const suggestion = await transaction.serviceSessionEvent.findFirst({
+          where: {
+            id: suggestionId,
+            companyId: input.companyId,
+            name: 'human-conversation-observed',
+          },
+        });
+        const metadata = suggestion?.metadata as
+          Record<string, unknown> | undefined;
+        const offer = metadata?.suggestion as
+          Record<string, unknown> | undefined;
+        if (
+          !suggestion ||
+          metadata?.conversationId !== input.conversationId ||
+          offer?.kind !== 'new-quote'
+        )
+          throw forbidden('Sugestão de coleta inválida.');
+      }
+      if (input.name === 'start-assisted-quote') {
+        const suggestion = await transaction.serviceSessionEvent.findFirst({
+          where: {
+            id: String(input.metadata?.assistantSuggestionId),
+            companyId: input.companyId,
+          },
+        });
+        const resolved = await transaction.serviceSessionEvent.findUnique({
+          where: {
+            companyId_commandId: {
+              companyId: input.companyId,
+              commandId: correlation(
+                'assistant-suggestion-resolution',
+                String(input.metadata?.assistantSuggestionId),
+              ),
+            },
+          },
+        });
+        const session = suggestion
+          ? await transaction.serviceSession.findFirst({
+              where: {
+                id: suggestion.serviceSessionId,
+                companyId: input.companyId,
+                threadId: conversation.threadId!,
+                controlMode: ServiceSessionControlMode.HUMAN,
+                isForeground: true,
+                status: { not: ServiceSessionStatus.CLOSED },
+              },
+              select: { version: true },
+            })
+          : null;
+        if (
+          resolved ||
+          !session ||
+          session.version !== input.metadata?.expectedServiceSessionVersion
+        )
+          throw new AppError(
+            'CONFLICT',
+            'A sugestão ou o atendimento já foi alterado.',
+          );
       }
       const transferReason =
         typeof input.metadata?.reason === 'string'
@@ -5431,6 +6229,7 @@ export class PrismaWhatsAppRepository
           'return-to-bot',
           'forward',
           'new-quote-request',
+          'start-assisted-quote',
         ].includes(input.name)
       ) {
         const queuedProposal =
@@ -5505,6 +6304,7 @@ export class PrismaWhatsAppRepository
             'forward',
             'request-transfer',
             'return-to-bot',
+            'start-assisted-quote',
             'change-department',
             'mark-read',
             'archive',
@@ -5533,10 +6333,11 @@ export class PrismaWhatsAppRepository
 
       if (
         input.automaticHumanHandoff &&
-        (input.name !== 'forward' || input.actorType !== 'system')
+        (!['forward', 'confirm-quote'].includes(input.name) ||
+          input.actorType !== 'system')
       ) {
         throw validationError(
-          'Handoff automático é permitido somente em forward executado pelo sistema.',
+          'Handoff automático exige forward ou confirm-quote executado pelo sistema.',
         );
       }
       const automaticHandoffMessage =
@@ -5895,56 +6696,11 @@ export class PrismaWhatsAppRepository
         : null;
 
       let quote = conversation.quoteRequests[0];
-      let supersededQuote: {
-        id: string;
-        previousVersion: number;
-        resultingVersion: number;
-      } | null = null;
       if (
-        input.name === 'new-quote-request' &&
-        quote?.status === RequestStatus.UNDER_REVIEW
+        input.name === 'new-quote-request' ||
+        input.name === 'start-quote' ||
+        input.name === 'start-assisted-quote'
       ) {
-        const previousVersion = quote.version;
-        const cancelled = await transaction.quoteRequest.updateMany({
-          where: {
-            id: quote.id,
-            companyId: input.companyId,
-            conversationId: input.conversationId,
-            status: RequestStatus.UNDER_REVIEW,
-            version: previousVersion,
-          },
-          data: {
-            status: RequestStatus.CANCELLED,
-            closureClassification: CommercialClosureClassification.SUPERSEDED,
-            decisionReason:
-              'Substituído por uma nova solicitação de orçamento.',
-            decidedAt: new Date(),
-            version: { increment: 1 },
-          },
-        });
-        if (cancelled.count !== 1) {
-          const latest = await transaction.quoteRequest.findUniqueOrThrow({
-            where: {
-              id_companyId: {
-                id: quote.id,
-                companyId: input.companyId,
-              },
-            },
-            select: { version: true },
-          });
-          throw new AppError(
-            'CONFLICT',
-            'A solicitação anterior foi alterada durante a abertura do novo ciclo.',
-            { currentVersion: latest.version },
-          );
-        }
-        supersededQuote = {
-          id: quote.id,
-          previousVersion,
-          resultingVersion: previousVersion + 1,
-        };
-      }
-      if (input.name === 'new-quote-request' || input.name === 'start-quote') {
         const latest = await transaction.quoteRequest.aggregate({
           where: {
             companyId: input.companyId,
@@ -5959,6 +6715,15 @@ export class PrismaWhatsAppRepository
             threadId: foundation.threadId,
             serviceSessionId: foundation.session.id,
             sequence: (latest._max.sequence ?? 0) + 1,
+            // Identity can continue across quotes; trip data and confirmations cannot.
+            contactName: quote?.contactName?.trim() || null,
+            structuredData: payload({
+              ...(typeof input.metadata?.quoteContextStartedAt === 'string'
+                ? {
+                    intakeStartedAt: input.metadata.quoteContextStartedAt,
+                  }
+                : {}),
+            }),
             status: RequestStatus.COLLECTING_INFORMATION,
           },
         });
@@ -6093,6 +6858,7 @@ export class PrismaWhatsAppRepository
               }
             : input.name === 'accept-transfer' ||
                 input.name === 'return-to-bot' ||
+                input.name === 'start-assisted-quote' ||
                 closing
               ? {
                   pendingTransferDepartment: null,
@@ -6198,9 +6964,18 @@ export class PrismaWhatsAppRepository
               ? updated.assignedToUserId
               : null,
           currentDepartmentId: targetDepartment?.id ?? null,
+          ...(input.name === 'start-assisted-quote'
+            ? {
+                queueId: null,
+                conversationResolved: false,
+                resolutionConfirmedByCustomer: false,
+              }
+            : {}),
           ...(automaticHandoff
             ? {
                 queueId: automaticHandoff.queueId,
+                conversationResolved: false,
+                resolutionConfirmedByCustomer: false,
                 offHoursHandoffNotifiedAt: offHoursNotificationClaimed
                   ? transitionedAt
                   : undefined,
@@ -6457,15 +7232,10 @@ export class PrismaWhatsAppRepository
         ...(assignmentLifecycle ? { assignment: assignmentLifecycle } : {}),
         quoteRequestId: quote?.id ?? null,
         ...(humanHandoff ? { humanHandoff } : {}),
-        ...(supersededQuote
+        ...(['new-quote-request', 'start-assisted-quote'].includes(input.name)
           ? {
-              supersededQuoteRequest: {
-                id: supersededQuote.id,
-                fromStatus: 'under-review',
-                toStatus: 'cancelled',
-                previousVersion: supersededQuote.previousVersion,
-                resultingVersion: supersededQuote.resultingVersion,
-              },
+              preservedQuoteRequestId:
+                conversation.quoteRequests[0]?.id ?? null,
             }
           : {}),
       };
@@ -6582,29 +7352,6 @@ export class PrismaWhatsAppRepository
               resultingVersion: nextVersion,
               occurredAt: transitionedAt.toISOString(),
             }),
-          },
-        });
-      }
-      if (supersededQuote && quote) {
-        await transaction.tenantAuditLog.create({
-          data: {
-            companyId: input.companyId,
-            actorUserId: input.actorUserId,
-            action: 'whatsapp.quote-request.superseded',
-            targetType: 'quote-request',
-            targetId: supersededQuote.id,
-            metadata: payload({
-              conversationId: input.conversationId,
-              newQuoteRequestId: quote.id,
-              transitionId,
-              commandId: input.commandId,
-              fromStatus: 'under-review',
-              toStatus: 'cancelled',
-              previousVersion: supersededQuote.previousVersion,
-              resultingVersion: supersededQuote.resultingVersion,
-              occurredAt: transitionedAt.toISOString(),
-            }),
-            createdAt: transitionedAt,
           },
         });
       }
@@ -7100,7 +7847,8 @@ export class PrismaWhatsAppRepository
               controlMode: foundation.session.controlMode,
               isForeground: foundation.session.isForeground,
               conversationResolved: true,
-              resolutionConfirmedByCustomer: false,
+              resolutionConfirmedByCustomer:
+                input.purpose === 'service-session-resolution',
               occurredAt: outboundOccurredAt,
               metadata: {
                 conversationId: input.conversationId,
@@ -7563,6 +8311,7 @@ export class PrismaWhatsAppRepository
             actorType: true,
             source: true,
             automationPurpose: true,
+            occurredAt: true,
             direction: true,
             deliveryStatus: true,
             channel: { select: { instanceName: true, agentsEnabled: true } },
@@ -7595,8 +8344,12 @@ export class PrismaWhatsAppRepository
           'quote-proposal',
         ].includes(message.automationPurpose ?? '');
         const lifecyclePurpose = message.automationPurpose as
-          'service-session-closing-question' | 'service-session-closure' | null;
+          | 'customer-information-reminder'
+          | 'service-session-closing-question'
+          | 'service-session-closure'
+          | null;
         if (
+          lifecyclePurpose === 'customer-information-reminder' ||
           lifecyclePurpose === 'service-session-closing-question' ||
           lifecyclePurpose === 'service-session-closure'
         ) {
@@ -7642,10 +8395,13 @@ export class PrismaWhatsAppRepository
             select: serviceSessionAuthorizationSelect,
           });
           const lifecycleAllowed =
-            lifecyclePurpose === 'service-session-closing-question'
+            lifecyclePurpose !== 'service-session-closure'
               ? lifecycleSession?.status === ServiceSessionStatus.CLOSING &&
                 lifecycleSession.controlMode === ServiceSessionControlMode.AI &&
-                lifecycleSession.isForeground
+                lifecycleSession.isForeground &&
+                lifecyclePurpose === 'customer-information-reminder' &&
+                lifecycleSession.closingStartedAt !== null &&
+                message.occurredAt >= lifecycleSession.closingStartedAt
               : lifecycleSession?.status === ServiceSessionStatus.CLOSED &&
                 !lifecycleSession.isForeground &&
                 lifecycleSession.publicContinuationCode !== null &&
@@ -7689,7 +8445,7 @@ export class PrismaWhatsAppRepository
               where: {
                 companyId: input.companyId,
                 conversationId: message.conversationId,
-                name: 'forward',
+                name: { in: ['forward', 'confirm-quote'] },
                 metadata: {
                   path: ['humanHandoff', 'messageId'],
                   equals: message.id,
@@ -7708,6 +8464,7 @@ export class PrismaWhatsAppRepository
         const automaticReply =
           !handoffPurpose &&
           !bypassSessionGate &&
+          lifecyclePurpose !== 'customer-information-reminder' &&
           lifecyclePurpose !== 'service-session-closing-question' &&
           lifecyclePurpose !== 'service-session-closure' &&
           message.actorUserId === null &&
@@ -11598,7 +12355,60 @@ export class PrismaWhatsAppRepository
       include: conversationDetailInclude,
     });
     if (!conversation) throw notFound('Conversa');
-    return presentConversationDetail(conversation);
+    const activeSession = conversation.thread?.sessions?.[0];
+    const observations =
+      activeSession?.isForeground &&
+      activeSession.controlMode === ServiceSessionControlMode.HUMAN &&
+      activeSession.status !== ServiceSessionStatus.CLOSED
+        ? await this.prisma.serviceSessionEvent.findMany({
+            where: {
+              companyId,
+              serviceSessionId: activeSession.id,
+              name: 'human-conversation-observed',
+              metadata: { path: ['conversationId'], equals: conversationId },
+            },
+            orderBy: { createdAt: 'desc' },
+            take: 20,
+          })
+        : [];
+    const resolutions = observations.length
+      ? await this.prisma.serviceSessionEvent.findMany({
+          where: {
+            companyId,
+            serviceSessionId: activeSession!.id,
+            name: 'assistant-suggestion-resolved',
+          },
+          select: { metadata: true },
+        })
+      : [];
+    const resolvedIds = new Set(
+      resolutions.map(
+        (r) => (r.metadata as Record<string, unknown>).suggestionId,
+      ),
+    );
+    const assistantSuggestions =
+      activeSession?.controlMode === ServiceSessionControlMode.HUMAN
+        ? observations.flatMap((event) => {
+            const metadata = event.metadata as Record<string, unknown>;
+            const suggestion = metadata.suggestion as Record<
+              string,
+              unknown
+            > | null;
+            return suggestion && !resolvedIds.has(event.id)
+              ? [
+                  {
+                    id: event.id,
+                    serviceSessionId: event.serviceSessionId,
+                    kind: suggestion.kind,
+                    question: suggestion.question,
+                    targetDepartment: suggestion.targetDepartment,
+                    createdAt: event.createdAt.toISOString(),
+                  },
+                ]
+              : [];
+          })
+        : [];
+    return { ...presentConversationDetail(conversation), assistantSuggestions };
   }
 
   async getAutomationBatch(

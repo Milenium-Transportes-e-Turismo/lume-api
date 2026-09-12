@@ -160,6 +160,7 @@ describe('Google Contacts export from approved registrations', () => {
           companyId: 'tenant',
           status: 'ACTIVE',
           isTemporary: false,
+          transportSupplier: { is: null },
           id: 'restricted-registration',
         },
         skip: 3000,
@@ -171,6 +172,7 @@ describe('Google Contacts export from approved registrations', () => {
         companyId: 'tenant',
         status: 'ACTIVE',
         isTemporary: false,
+        transportSupplier: { is: null },
         id: 'restricted-registration',
       },
     });
@@ -191,7 +193,12 @@ describe('Google Contacts export from approved registrations', () => {
       expect.objectContaining({
         skip: 3000,
         take: 3000,
-        where: { companyId: 'tenant', status: 'ACTIVE', isTemporary: false },
+        where: {
+          companyId: 'tenant',
+          status: 'ACTIVE',
+          isTemporary: false,
+          transportSupplier: { is: null },
+        },
       }),
     );
     expect(exchange.exportCsv).toHaveBeenCalledWith(

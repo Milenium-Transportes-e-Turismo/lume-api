@@ -1,3 +1,4 @@
+import type { WhatsAppHumanObservationResult } from './whatsapp-conversation-agent';
 import type { Department } from '../../domain/access/access.constants';
 import type { QuoteRequestStatus } from '../../domain/commercial/quote-status';
 import type {
@@ -206,7 +207,9 @@ export interface CreateOutboundInput {
     | 'main-menu'
     | 'commercial-follow-up-menu'
     | 'department-notification'
-    | 'unsupported-message-kind';
+    | 'unsupported-message-kind'
+    | 'customer-information-request'
+    | 'service-session-resolution';
   inReplyToMessageId?: string;
   recipientPhone?: string;
   kind: MessageKind;
@@ -339,7 +342,41 @@ export interface TransitionListQuery {
   pageSize: number;
 }
 
+export interface ResolveAssistantSuggestionInput {
+  readonly companyId: string;
+  readonly conversationId: string;
+  readonly suggestionId: string;
+  readonly actorUserId: string;
+  readonly commandId: string;
+  readonly expectedVersion: number;
+  readonly expectedSessionVersion: number;
+  readonly decision: 'accept' | 'dismiss';
+}
+
 export abstract class WhatsAppRepository {
+  abstract resolveAssistantSuggestion(
+    input: ResolveAssistantSuggestionInput,
+  ): Promise<unknown>;
+  abstract getAuthorizedAssistantCollection(
+    companyId: string,
+    conversationId: string,
+    commandId: string,
+  ): Promise<unknown>;
+
+  abstract getHumanObservationContext(
+    companyId: string,
+    conversationId: string,
+    sourceEventId: string,
+  ): Promise<Omit<ContinuityClassificationCandidate, 'decisionId'> | null>;
+  abstract recordHumanObservation(input: {
+    companyId: string;
+    conversationId: string;
+    sourceEventId: string;
+    serviceSessionId: string;
+    expectedVersion: number;
+    result: WhatsAppHumanObservationResult;
+  }): Promise<void>;
+
   abstract findWebhookChannel(
     channelId: string,
   ): Promise<WebhookChannelConfiguration | null>;

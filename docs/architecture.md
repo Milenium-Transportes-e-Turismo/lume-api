@@ -358,3 +358,20 @@ independente do estado organizacional e da conexão do dispositivo. Os consumido
 de automação, a carga de agentes por sessão, a análise de mídia e o envio automático
 consultam a configuração autoritativa. O recebimento e o atendimento humano
 permanecem disponíveis com agentes desabilitados.
+
+## Transportes e atendimento contextual
+
+`TransportCatalogModule` e o módulo de importação separam cadastros/contratos da
+leitura Avic e da conferência de odômetros. Os CNPJs próprios não são cadastros de
+clientes. Regras, migrações e limites estão em [catálogos](transport-catalogs.md)
+e [importações](transport-imports.md).
+
+No WhatsApp, o estado e as transições pertencem à API. A confirmação de resumo
+cria o orçamento correspondente e transfere efetivamente à fila humana. Durante
+controle humano, sugestões ficam privadas até decisão do operador. A espera
+por dados do cliente tem lembrete de três horas e encerramento após mais uma
+hora; pendências internas não usam esse temporizador. A coleta valida capacidade
+pela frota (fallback de 46 passageiros), localização e contexto do orçamento atual.
+O resumo usa formatação determinística a partir dos dados revisados. Consulte
+[assistência humana](whatsapp-human-assistance.md) e
+[validação da coleta](tourism-intake-validation.md).

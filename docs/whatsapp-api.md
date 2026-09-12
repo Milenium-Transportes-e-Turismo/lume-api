@@ -136,13 +136,15 @@ um atendimento em qualquer departamento do tenant. Essa autoridade não o
 coloca na distribuição automática de filas; essa distribuição continua
 exigindo vínculo operacional e concessão individual para usuários comuns.
 
-O lifecycle automático é conduzido por estado persistido, nunca por heurística
-do menu legado. Quando a IA já marcou a sessão resolvida e não há ação ou
-entrega pendente, a API pergunta “Precisa de mais alguma coisa?” e entra em
-`CLOSING` por 30 minutos. Qualquer inbound cancela o prazo de forma versionada e
-bloqueia o claim da pergunta que tenha ficado obsoleta. Sem resposta, a sessão
-e a conversa são fechadas atomicamente e a mensagem final publica um código
-`CONTINUAR NNN`, válido por sete dias.
+O lifecycle automático usa estado persistido e distingue pendência do cliente de
+pendência interna. Quando a IA aguarda uma informação, a API envia um único lembrete
+após três horas e pode encerrar após mais uma hora sem resposta, contada a partir
+do envio confirmado do lembrete. Atendimento humano e análise Comercial pendente
+não entram nesse encerramento por inatividade do cliente. Inbound invalida lembretes
+e prazos obsoletos sob controle de versão. Uma despedida não provoca repetição de
+“Precisa de mais alguma coisa?”. O encerramento preserva histórico e o código de
+continuidade. Regras, configuração e assistência privada estão no
+[guia de atendimento humano](whatsapp-human-assistance.md).
 
 O código só reabre uma sessão encerrada da mesma empresa, canal e contato; uma
 tentativa de outro número ou um código inválido/expirado segue o fluxo normal
@@ -180,9 +182,9 @@ fila pertence ao usuário, salvo autoridade ampla de Administrador ou Diretoria.
 
 Encerrar atendimento finaliza somente a sessão humana atual: remove o atendente
 e preserva mensagens, anexos e orçamentos. A conversa permanece encerrada até o
-próximo contato. A primeira mensagem seguinte, textual ou não, reabre a mesma
-conversa, registra `reopen-after-customer-message` e apresenta o menu inicial
-antes de qualquer interpretação do conteúdo.
+próximo contato. O próximo contato é avaliado pelo fluxo de
+continuidade e pode retomar ou iniciar uma sessão relacionada, preservando a
+Thread. A conversa é contextual, sem apresentar menus numerados obrigatórios.
 
 Devolver ao bot remove o atendente, mas preserva o contexto comercial para que o
 fluxo retome do ponto adequado. `assignedTo` identifica o Responsável Atual,
@@ -281,17 +283,18 @@ não geram repetição infinita.
 
 ## Entrada não textual
 
-Imagem, áudio, vídeo, figurinha, documento, localização, contato ou conteúdo
-desconhecido são bloqueados antes dos menus e da IA. A conversa não muda de
-etapa, o conteúdo não é interpretado como resposta e o cliente recebe:
+Áudio, imagem, documento, planilha, localização e contato têm interpretação conforme
+a configuração e os providers disponíveis. Somente o contexto efetivamente
+interpretado pode alimentar o agente; correções humanas prevalecem. Vídeo,
+figurinha e formatos não suportados permanecem disponíveis no histórico e podem
+exigir esclarecimento textual. `HUMAN_REQUIRED` na interpretação representa revisão
+do conteúdo, não transferência automática de atendimento.
 
-> Ainda não consigo interpretar esse tipo de arquivo. Por favor, envie sua resposta em texto.
-
-Durante a coleta de orçamento, a pergunta textual pendente é repetida antes da
-orientação. A mesma regra vale no menu inicial e no menu comercial. Durante
-atendimento humano, a entrada continua persistida e visível, mas o bot permanece
-em silêncio absoluto. Na reabertura de uma conversa encerrada, o menu inicial
-aparece primeiro.
+Sob controle humano, não há resposta automática ao cliente. A assistência silenciosa
+pode produzir sugestões privadas, sujeitas à decisão do operador; a interpretação
+de mídia nesse estado também depende de `processDuringHumanControl`, desativado
+por padrão. Consulte [multimodalidade](whatsapp-multimodal.md) e
+[assistência humana](whatsapp-human-assistance.md).
 
 ## Configuração mínima
 

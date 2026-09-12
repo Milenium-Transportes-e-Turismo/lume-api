@@ -182,17 +182,17 @@ vazia, o início do processo é usado como barreira conservadora.
 - mensagem enviada no WhatsApp App/Web aparece como saída no painel e não gera
   resposta automática;
 - o eco de uma mensagem enviada pelo painel não cria uma segunda mensagem;
-- menu inicial, IA, coleta e encaminhamento funcionam;
+- conversa natural, coleta, resumo formatado e transferência efetiva para a fila humana funcionam;
 - assumir atendimento define responsável e libera o campo de resposta;
 - devolver ao bot preserva contexto; encerrar aguarda o próximo contato;
 - retorno textual ou por mídia reutiliza a conversa, preserva histórico e
-  orçamentos e começa pelo menu inicial;
+  orçamentos e avalia continuidade sem reapresentação ou menu obrigatório;
 - envio de texto e PDF muda a fila e os contadores sem recarregar a página;
 - imagem, áudio, vídeo, figurinha, documento e PDF abrem no painel antes e
   depois de reiniciar a API;
 - desligar temporariamente o acesso à Evolution não afeta mídias já armazenadas;
-- conteúdo não textual não avança menus nem coleta da IA e recebe orientação
-  somente quando o bot está ativo;
+- mídia elegível alimenta a coleta somente após interpretação; conteúdo não
+  suportado permanece no histórico sem inventar dados;
 - durante atendimento humano, texto e qualquer mídia são persistidos sem nenhuma
   resposta automática;
 - logs e interface não exibem segredos nem detalhes internos ao usuário.
@@ -296,3 +296,30 @@ interrompe o processamento antes da mensagem e da transferência; não se usa
 automaticamente o departamento de origem. O inbox/outbox existente controla
 retentativas. Orçamento e negociação pertencem ao Comercial; pagamento de viagem
 realizada pertence ao Financeiro.
+
+## Dependências das atualizações de Transportes e WhatsApp
+
+Antes da versão correspondente da Web, aplique na API as migrações pendentes com
+`npm run prisma:deploy`, no ambiente autorizado e com recuperação disponível:
+
+- `20260909000100_transport_catalogs_avic`;
+- `20260910000100_tenant_legal_entities`;
+- `20260910000200_numeric_catalog_codes`;
+- `20260911000100_whatsapp_customer_wait_window`.
+
+Confira `prisma migrate status` e a imagem efetivamente executada. Publicar `develop`
+no GitHub não atualiza automaticamente os serviços. Não use `migrate reset` em
+bancos compartilhados. Testes E2E exigem banco descartável com PostGIS; a migração
+de roteirização usa `CREATE EXTENSION postgis`.
+
+Os defaults do acompanhamento são `WHATSAPP_CUSTOMER_REMINDER_DELAY_MS=10800000`
+e `WHATSAPP_CUSTOMER_CLOSURE_DELAY_MS=3600000`: três horas até o lembrete e mais
+uma hora após seu envio confirmado. Valide ausência de fechamento quando a
+pendência é interna e ausência de resposta automática durante controle humano.
+A confirmação do resumo deve produzir orçamento e transferência efetiva,
+conservando orçamentos anteriores. Veja [assistência](whatsapp-human-assistance.md)
+e [validação da coleta](tourism-intake-validation.md).
+
+A ativação Avic continua independente: confira credenciais, vínculo dos veículos,
+identificador da viagem, fuso e proteção do transporte antes de ativar o worker.
+Consulte [importação](transport-imports.md).

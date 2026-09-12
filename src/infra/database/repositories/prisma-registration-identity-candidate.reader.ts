@@ -32,6 +32,7 @@ export class PrismaRegistrationIdentityCandidateReader implements RegistrationId
     const candidates = await this.prisma.routingCompany.findMany({
       where: {
         companyId: evidence.companyId,
+        transportSupplier: { is: null },
         OR: filters,
       },
       select: {

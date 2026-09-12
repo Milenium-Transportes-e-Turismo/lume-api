@@ -275,6 +275,14 @@ export class HeigitPeliasGeocodingProvider
         operation,
         durationMs: Date.now() - startedAt,
         reason: error instanceof Error ? error.message : 'unknown',
+        causeCode:
+          error instanceof Error &&
+          error.cause &&
+          typeof error.cause === 'object' &&
+          'code' in error.cause &&
+          typeof error.cause.code === 'string'
+            ? error.cause.code
+            : undefined,
       });
       throw new AppError(
         'ROUTING_UNAVAILABLE',

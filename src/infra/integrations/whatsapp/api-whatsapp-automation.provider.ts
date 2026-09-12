@@ -172,6 +172,58 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
   }
 
   async execute(event: ClaimedWhatsAppAutomationEvent): Promise<void> {
+    if (event.topic === 'whatsapp.assistant-collection.requested') {
+      const commandId = stringValue(asRecord(event.payload).commandId);
+      if (!commandId) throw contractInvalid('commandId');
+      const authorized = await this.repository.getAuthorizedAssistantCollection(
+        event.companyId,
+        event.aggregateId,
+        commandId,
+      );
+      if (!authorized) {
+        await this.complete(event, 'succeeded');
+        return;
+      }
+      const data = asRecord(authorized);
+      const payload = parseAutomationPayload(data.payload);
+      const checkpoint = await this.checkpointStore.getOrCreate(event, () => {
+        const messages = Array.isArray(data.messages)
+          ? data.messages.map(asBufferedMessage)
+          : [];
+        return Promise.resolve({
+          conversation: asAutomationConversation(data.conversation),
+          messages,
+          bufferedText: buildBufferedText(messages),
+          plan: {
+            kind: 'ai' as const,
+            aiMode: 'eventual-quote' as const,
+            reason: 'human-authorized-new-quote',
+            responseMessage: null,
+            transitionBeforeAi: null,
+            transitionAfterSend: null,
+            transitionMetadata: null,
+          },
+        });
+      });
+      try {
+        await this.processInteractivePlan(
+          event,
+          payload,
+          {
+            conversation: checkpoint.conversation,
+            messages: [...checkpoint.messages],
+            pendingQuestion: null,
+          },
+          checkpoint.plan,
+          checkpoint.bufferedText,
+        );
+      } catch (error) {
+        if (!(await this.wasSupersededByHumanAction(error, event, payload)))
+          throw error;
+      }
+      await this.complete(event, 'succeeded');
+      return;
+    }
     if (event.topic === 'whatsapp.outbound.requested') {
       await this.processRequestedOutbound(event);
       await this.complete(event, 'succeeded');
@@ -239,6 +291,38 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
       pendingQuestion: null,
     };
     const { bufferedText, plan } = checkpoint;
+
+    if (plan.kind === 'human-notification') {
+      try {
+        const context = await this.repository.getHumanObservationContext(
+          event.companyId,
+          payload.conversationId,
+          payload.eventId,
+        );
+        if (context) {
+          const result = await this.conversationAgent.observeHumanConversation({
+            ...context,
+            companyId: event.companyId,
+            conversationId: payload.conversationId,
+            sourceEventId: payload.eventId,
+            serviceSessionId: context.sourceServiceSessionId,
+            observationOnly: true,
+          });
+          await this.repository.recordHumanObservation({
+            companyId: event.companyId,
+            conversationId: payload.conversationId,
+            sourceEventId: payload.eventId,
+            serviceSessionId: context.sourceServiceSessionId,
+            expectedVersion: context.expectedVersion,
+            result,
+          });
+        }
+      } catch {
+        this.logger.warn(
+          `Observação silenciosa indisponível; atendimento humano preservado conversationId=${payload.conversationId}`,
+        );
+      }
+    }
 
     if (
       plan.kind === 'suppressed' ||
@@ -370,7 +454,19 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
         event,
         conversation,
         plan.transitionBeforeAi,
-        plan,
+        {
+          ...plan,
+          transitionMetadata: {
+            ...plan.transitionMetadata,
+            ...(plan.transitionBeforeAi === 'new-quote-request'
+              ? {
+                  quoteContextStartedAt: batch.messages
+                    .map((message) => message.occurredAt)
+                    .sort()[0],
+                }
+              : {}),
+          },
+        },
       );
     }
 
@@ -387,6 +483,7 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
       CreateOutboundInput['sessionPriority']
     > | null = null;
     let conversationResolved = false;
+    let waitingOnCustomer = false;
 
     if (plan.kind === 'ai') {
       if (!plan.aiMode) {
@@ -471,6 +568,14 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
         aiResult.output,
         effectiveMode,
       );
+      waitingOnCustomer =
+        aiResult.output.message.includes('?') &&
+        !conversationResolved &&
+        actions.transitionAfterSend !== 'forward' &&
+        actions.transitionAfterSend !== 'confirm-quote' &&
+        (aiResult.output.collectionStatus === 'collecting' ||
+          aiResult.output.missingFields.length > 0 ||
+          actions.transitionAfterSend === 'present-quote-summary');
       transitionBeforeSend = actions.transitionBeforeSend;
       transitionAfterSend = actions.transitionAfterSend;
       transitionReason = actions.humanReason ?? plan.reason;
@@ -524,7 +629,16 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
       );
     }
 
-    if (transitionAfterSend === 'forward') {
+    if (
+      transitionAfterSend === 'forward' ||
+      transitionAfterSend === 'confirm-quote'
+    ) {
+      if (transitionAfterSend === 'confirm-quote') {
+        transitionMetadata = {
+          ...transitionMetadata,
+          targetDepartment: 'commercial',
+        };
+      }
       await this.transition(
         event,
         conversation,
@@ -569,7 +683,13 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
         ...(conversationResolved
           ? { conversationResolved: true as const }
           : {}),
-        ...(plan.outboundPurpose ? { purpose: plan.outboundPurpose } : {}),
+        ...(plan.outboundPurpose
+          ? { purpose: plan.outboundPurpose }
+          : agentAttribution && waitingOnCustomer
+            ? { purpose: 'customer-information-request' as const }
+            : agentAttribution && conversationResolved
+              ? { purpose: 'service-session-resolution' as const }
+              : {}),
         ...(plan.outboundPurpose === 'unsupported-message-kind'
           ? { inReplyToMessageId: payload.messageId }
           : {}),
@@ -676,6 +796,7 @@ export class ApiWhatsAppAutomationProvider extends WhatsAppAutomationProvider {
       ...(plan.transitionMetadata ?? {}),
       sourceEventId: event.correlationId,
       correlationId: event.correlationId,
+
       reason:
         stringValue(plan.transitionMetadata?.reason) ?? plan.reason ?? name,
     };

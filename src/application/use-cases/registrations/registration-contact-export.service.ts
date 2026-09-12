@@ -170,6 +170,7 @@ export class RegistrationContactExportService {
       companyId: current.companyId,
       status: 'ACTIVE',
       isTemporary: false,
+      transportSupplier: { is: null },
       ...(current.routingCompanyId ? { id: current.routingCompanyId } : {}),
     };
   }
