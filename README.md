@@ -566,3 +566,5 @@ contagem e paginação, inclusive na seleção de contratos existentes.
 ### Assistência durante o atendimento humano
 
 A confirmação do resumo encaminha à fila humana do Comercial. Durante o atendimento, os agentes silenciosos podem sugerir uma nova coleta ou um departamento no painel, sujeitos à decisão do atendente. A política de inatividade aguarda 3 horas para um lembrete contextual e mais 1 hora após o envio para encerrar, somente quando a pendência é do cliente. Veja [o fluxo e o contrato de sugestões internas](docs/whatsapp-human-assistance.md).
+
+Preparação da promoção atual: [develop para main](docs/release-develop-main.md).

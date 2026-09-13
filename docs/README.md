@@ -80,3 +80,5 @@ não comprovam o estado atual. Confirme revisão, migrações e imagem do ambien
 
 O arquivo `milena-tenant-prompt.md` é um modelo de instruções para configuração;
 editá-lo não altera automaticamente o prompt ativo de nenhum tenant.
+
+Preparação da promoção atual: [develop para main](release-develop-main.md).

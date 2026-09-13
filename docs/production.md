@@ -2,6 +2,11 @@
 
 ## Preparação
 
+Para promover o conjunto atual de `develop` para `main`, siga primeiro o
+[runbook da promoção](release-develop-main.md). Ele inclui uma migração antiga
+que remove tabelas de roteirização e exige verificação dos dados existentes;
+validar apenas as quatro migrações mais recentes não cobre essa atualização.
+
 1. Use `.env.production.example` como inventário e cadastre cada chave em um
    gerenciador de segredos. Injete-as diretamente no ambiente do processo; não é
    necessário montar um arquivo `.env` em texto puro no container.
@@ -34,6 +39,14 @@ agente usa `docker-secret://nome-do-arquivo` ou um subdiretório relativo seguro
 Para injeção direta no processo, use `env://NOME_EXATO_DA_VARIAVEL`. O resolver
 não lista chaves, não procura alternativas e não usa a credencial de outro
 agente quando a referência solicitada estiver ausente ou inválida.
+
+O Compose versionado encaminha `TENANT_API_PUBLIC_URL`, as sete variáveis de
+credenciais abaixo, `AGENT_OPENAI_RESPONSES_TIMEOUT_MS` e
+`AGENT_DOCKER_SECRETS_ROOT`. A existência de uma chave no arquivo passado com
+`--env-file` não a injeta automaticamente em um serviço: confira o Compose
+mesclado com os overrides da instalação, sem publicar seus valores. Referências
+`docker-secret://` ainda exigem os arquivos e mounts privados no override;
+nenhum segredo é criado ou copiado pelo Compose versionado.
 
 O catálogo inicial usa estas referências independentes:
 
@@ -314,7 +327,8 @@ de roteirização usa `CREATE EXTENSION postgis`.
 
 Os defaults do acompanhamento são `WHATSAPP_CUSTOMER_REMINDER_DELAY_MS=10800000`
 e `WHATSAPP_CUSTOMER_CLOSURE_DELAY_MS=3600000`: três horas até o lembrete e mais
-uma hora após seu envio confirmado. Valide ausência de fechamento quando a
+uma hora após seu envio confirmado. O Compose encaminha ambas as variáveis,
+inclusive quando a instalação configura outros prazos. Valide ausência de fechamento quando a
 pendência é interna e ausência de resposta automática durante controle humano.
 A confirmação do resumo deve produzir orçamento e transferência efetiva,
 conservando orçamentos anteriores. Veja [assistência](whatsapp-human-assistance.md)
