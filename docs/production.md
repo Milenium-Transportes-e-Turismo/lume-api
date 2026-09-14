@@ -337,3 +337,10 @@ e [validação da coleta](tourism-intake-validation.md).
 A ativação Avic continua independente: confira credenciais, vínculo dos veículos,
 identificador da viagem, fuso e proteção do transporte antes de ativar o worker.
 Consulte [importação](transport-imports.md).
+
+### Correção de mídia (14/09/2026)
+
+Áudios com assinatura OggS são enviados à transcrição como `.ogg`, inclusive
+quando importados com nome `.opus`; bytes e nome do arquivo armazenado são
+preservados. Reações, produtos e eventos criptografados sem conteúdo legível
+não são apresentados como anexos baixáveis.

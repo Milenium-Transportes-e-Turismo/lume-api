@@ -481,3 +481,28 @@ describe('EvolutionWebhookService group synchronization', () => {
     expect(repository.persistWebhookMessage).not.toHaveBeenCalled();
   });
 });
+
+describe('conteúdos sem arquivo', () => {
+  it.each([
+    [{ reactionMessage: { text: '👍' } }, 'Reação: 👍'],
+    [{ reactionMessage: { text: '' } }, 'Reação removida.'],
+    [
+      { productMessage: { product: { title: 'Passeio' } } },
+      'Produto compartilhado: Passeio',
+    ],
+    [
+      { secretEncryptedMessage: {} },
+      'Evento criptografado do WhatsApp sem conteúdo disponível para exibição.',
+    ],
+  ])('não inventa anexo para %j', async (message, text) => {
+    const { subject, repository } = createSubject();
+    const base = videoWebhook(10);
+    await handle(subject, { ...base, data: { ...base.data, message } });
+    expect(repository.persistWebhookMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'unknown', text }),
+    );
+    expect(repository.persistWebhookMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ media: undefined }),
+    );
+  });
+});

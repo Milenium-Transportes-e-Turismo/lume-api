@@ -611,7 +611,42 @@ export class EvolutionWebhookService {
           message.contactsArrayMessage) as JsonObject,
       };
     }
-    return { kind: 'unknown' };
+    const reaction = optionalObject(message.reactionMessage);
+    if (reaction) {
+      const emoji =
+        typeof reaction.text === 'string'
+          ? reaction.text.trim().slice(0, 32)
+          : '';
+      return {
+        kind: 'unknown',
+        text: emoji ? `Reação: ${emoji}` : 'Reação removida.',
+      };
+    }
+    const product = optionalObject(
+      optionalObject(message.productMessage)?.product,
+    );
+    if (product) {
+      const title =
+        typeof product.title === 'string'
+          ? product.title.trim().slice(0, 200)
+          : '';
+      return {
+        kind: 'unknown',
+        text: title
+          ? `Produto compartilhado: ${title}`
+          : 'Produto compartilhado no WhatsApp.',
+      };
+    }
+    if (optionalObject(message.secretEncryptedMessage)) {
+      return {
+        kind: 'unknown',
+        text: 'Evento criptografado do WhatsApp sem conteúdo disponível para exibição.',
+      };
+    }
+    return {
+      kind: 'unknown',
+      text: 'Conteúdo do WhatsApp ainda não suportado pelo painel.',
+    };
   }
 
   private validateText(value: string): string {

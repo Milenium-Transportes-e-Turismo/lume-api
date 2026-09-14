@@ -130,43 +130,52 @@ describe('HttpOpenAiMediaInterpretationGateway', () => {
     });
   });
 
-  it('transcreve áudio server-side antes da interpretação com a mesma credencial individual', async () => {
-    const fetcher = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ text: 'áudio transcrito' }), {
-          status: 200,
-        }),
-      )
-      .mockResolvedValueOnce(interpretationResponse());
+  it.each(['audio.ogg', 'audio.opus'])(
+    'transcreve %s como Ogg sem alterar os bytes originais',
+    async (fileName) => {
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ text: 'áudio transcrito' }), {
+            status: 200,
+          }),
+        )
+        .mockResolvedValueOnce(interpretationResponse());
 
-    await expect(
-      subject(fetcher).interpret(
-        request({
-          mediaType: 'audio',
-          binary: {
-            content: Buffer.from('audio-content'),
-            fileName: 'audio.ogg',
-            mimeType: 'audio/ogg',
-          },
-        }),
-      ),
-    ).resolves.toMatchObject({ transcription: 'áudio transcrito' });
+      await expect(
+        subject(fetcher).interpret(
+          request({
+            mediaType: 'audio',
+            binary: {
+              content: Buffer.from('OggS-audio-content'),
+              fileName,
+              mimeType: 'audio/ogg',
+            },
+          }),
+        ),
+      ).resolves.toMatchObject({ transcription: 'áudio transcrito' });
 
-    expect(fetcher).toHaveBeenCalledTimes(2);
-    expect(fetcher.mock.calls[0]?.[0]).toBe(
-      'https://api.openai.com/v1/audio/transcriptions',
-    );
-    expect((fetcher.mock.calls[0]?.[1] as RequestInit).body).toBeInstanceOf(
-      FormData,
-    );
-    expect(authorization(fetcher.mock.calls[0] ?? [])).toBe(
-      `Bearer ${MEDIA_KEY}`,
-    );
-    expect(authorization(fetcher.mock.calls[1] ?? [])).toBe(
-      `Bearer ${MEDIA_KEY}`,
-    );
-  });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(fetcher.mock.calls[0]?.[0]).toBe(
+        'https://api.openai.com/v1/audio/transcriptions',
+      );
+      expect((fetcher.mock.calls[0]?.[1] as RequestInit).body).toBeInstanceOf(
+        FormData,
+      );
+      expect(authorization(fetcher.mock.calls[0] ?? [])).toBe(
+        `Bearer ${MEDIA_KEY}`,
+      );
+      const form = (fetcher.mock.calls[0]?.[1] as RequestInit).body as FormData;
+      const file = form.get('file') as File;
+      expect(file.name).toBe('audio.ogg');
+      expect(Buffer.from(await file.arrayBuffer())).toEqual(
+        Buffer.from('OggS-audio-content'),
+      );
+      expect(authorization(fetcher.mock.calls[1] ?? [])).toBe(
+        `Bearer ${MEDIA_KEY}`,
+      );
+    },
+  );
 
   it('rejeita vídeo antes de resolver credencial ou chamar o provider', async () => {
     const fetcher = vi.fn<typeof fetch>();

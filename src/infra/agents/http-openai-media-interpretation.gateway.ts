@@ -400,7 +400,9 @@ export class HttpOpenAiMediaInterpretationGateway extends MediaInterpretationPro
     form.set(
       'file',
       new Blob([new Uint8Array(binary.content)], { type: binary.mimeType }),
-      binary.fileName,
+      binary.content.subarray(0, 4).toString('ascii') === 'OggS'
+        ? binary.fileName.replace(/(?:\.[^.]+)?$/u, '.ogg')
+        : binary.fileName,
     );
     const response = await this.fetcher(OPENAI_TRANSCRIPTIONS_URL, {
       method: 'POST',
