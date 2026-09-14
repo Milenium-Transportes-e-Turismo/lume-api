@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConfigService } from '@nestjs/config';
 import { TransportWorkerService } from './transport-worker.service';
 import { transportHash } from './transport-import.service';
@@ -7,6 +7,7 @@ import { PrismaService } from '../../../infra/database/prisma/prisma.service';
 import type {
   Prisma,
   TransportImport,
+  TransportIntegration,
 } from '../../../infra/database/prisma/generated/client';
 import { settingsSchema } from '../../../modules/transport-import/transport-import.schemas';
 
@@ -51,7 +52,12 @@ function storedIssue() {
 function harness() {
   const tx = {
     $executeRaw: vi.fn().mockResolvedValue(0),
-    transportIntegration: { findMany: vi.fn().mockResolvedValue([]) },
+    transportIntegration: {
+      findMany: vi.fn().mockResolvedValue([]),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      update: vi.fn().mockResolvedValue({}),
+    },
+    transportFleet: { findMany: vi.fn().mockResolvedValue([]) },
     transportAnalysis: {
       findFirst: vi.fn().mockResolvedValue({
         id: 'analysis-a',
@@ -85,6 +91,7 @@ function harness() {
     },
     transportImportRejection: { upsert: vi.fn().mockResolvedValue({}) },
     transportImport: {
+      upsert: vi.fn().mockResolvedValue({}),
       findFirst: vi.fn().mockResolvedValue(importJob()),
       count: vi.fn().mockResolvedValue(0),
       update: vi.fn().mockResolvedValue({}),
@@ -543,5 +550,190 @@ describe('transport persistence and safe verification', () => {
     expect(tx.transportIssue.findFirst).toHaveBeenCalledWith({
       where: { companyId: 'tenant-a', id: 'issue-a' },
     });
+  });
+});
+
+describe('transport scheduler leases and durable daily imports', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+  const integration = {
+    id: 'integration-a',
+    companyId: 'tenant-a',
+    enabled: true,
+    lastScheduledDay: null,
+    settings,
+  } as unknown as TransportIntegration;
+  const daily = {
+    ...settings,
+    timezone: 'America/Sao_Paulo',
+    scheduleTime: '16:00',
+    lookbackDays: 7,
+  };
+  it('waits for the configured local hour instead of scheduling at the UTC hour', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-02T18:59:00Z'));
+    const { tx, worker } = harness();
+    await worker.schedule(integration, daily);
+    expect(tx.transportFleet.findMany).not.toHaveBeenCalled();
+    expect(tx.transportIssue.findMany).not.toHaveBeenCalled();
+    expect(tx.transportIntegration.update).not.toHaveBeenCalled();
+  });
+  it('paginates the complete active linked fleet using idempotent daily batches', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-02T19:00:00Z'));
+    const { tx, worker } = harness();
+    tx.transportFleet.findMany
+      .mockResolvedValueOnce(
+        Array.from({ length: 500 }, (_, n) => ({
+          id: `fleet-${n}`,
+          externalVehicleId: String(n),
+        })),
+      )
+      .mockResolvedValueOnce([{ id: 'fleet-500', externalVehicleId: '500' }]);
+    await worker.schedule(integration, daily);
+    expect(tx.transportFleet.findMany).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        where: {
+          companyId: 'tenant-a',
+          provider: 'avic',
+          externalVehicleId: { not: null },
+          active: true,
+        },
+        take: 500,
+      }),
+    );
+    expect(tx.transportFleet.findMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ cursor: { id: 'fleet-499' }, skip: 1 }),
+    );
+    expect(tx.transportImport.upsert).toHaveBeenCalledTimes(2);
+    expect(tx.transportImport.upsert).toHaveBeenNthCalledWith(2, {
+      where: {
+        companyId_provider_scheduleKey: {
+          companyId: 'tenant-a',
+          provider: 'avic',
+          scheduleKey: 'daily:2026-07-02:1',
+        },
+      },
+      create: {
+        companyId: 'tenant-a',
+        vehicleIds: ['500'],
+        from: new Date('2026-06-25'),
+        to: new Date('2026-07-02'),
+        scheduleKey: 'daily:2026-07-02:1',
+      },
+      update: {},
+    });
+    expect(tx.transportIntegration.update).toHaveBeenCalledWith({
+      where: { id: 'integration-a' },
+      data: { lastScheduledDay: '2026-07-02' },
+    });
+  });
+  it('revisits existing issues without importing the daily fleet twice', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-02T19:00:00Z'));
+    const { tx, worker } = harness();
+    tx.transportIssue.findMany.mockResolvedValue([
+      { ...storedIssue(), record: sourceRecord() },
+    ]);
+    await worker.schedule(
+      { ...integration, lastScheduledDay: '2026-07-02' },
+      daily,
+    );
+    expect(tx.transportFleet.findMany).not.toHaveBeenCalled();
+    expect(tx.transportImport.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          companyId: 'tenant-a',
+          vehicleIds: ['8'],
+          verificationIssueId: 'issue-a',
+          scheduleKey: 'verify:issue-a:2026-07-02',
+        }),
+        update: {},
+      }),
+    );
+    expect(tx.transportIssue.update).toHaveBeenCalledWith({
+      where: { id: 'issue-a' },
+      data: { nextVerificationAt: new Date('2026-07-03T19:00:00Z') },
+    });
+  });
+  it('marks missing source dates unavailable instead of inventing a verification range', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-02T19:00:00Z'));
+    const { tx, worker } = harness();
+    tx.transportIssue.findMany.mockResolvedValue([
+      { ...storedIssue(), record: { startedAt: null, sourceUpdatedAt: null } },
+    ]);
+    const unavailable = vi
+      .spyOn(worker, 'unavailable')
+      .mockResolvedValue(undefined);
+    await worker.schedule(
+      { ...integration, lastScheduledDay: '2026-07-02' },
+      daily,
+    );
+    expect(unavailable).toHaveBeenCalledWith('tenant-a', 'issue-a');
+    expect(tx.transportImport.upsert).not.toHaveBeenCalled();
+  });
+  it('skips leased integrations and keeps disabled providers from making imports', async () => {
+    const { tx, worker } = harness();
+    tx.transportIntegration.findMany.mockResolvedValue([
+      integration,
+      {
+        ...integration,
+        id: 'integration-b',
+        companyId: 'tenant-b',
+        enabled: false,
+      },
+    ]);
+    tx.transportIntegration.updateMany.mockResolvedValueOnce({ count: 0 });
+    const schedule = vi.spyOn(worker, 'schedule').mockResolvedValue(undefined);
+    const analyze = vi
+      .spyOn(worker, 'analyzePage')
+      .mockResolvedValue(undefined);
+    const importPage = vi
+      .spyOn(worker, 'importPage')
+      .mockResolvedValue(undefined);
+    await worker.tick();
+    expect(schedule).not.toHaveBeenCalled();
+    expect(importPage).not.toHaveBeenCalled();
+    expect(analyze).toHaveBeenCalledExactlyOnceWith('tenant-b', settings);
+    expect(tx.transportIntegration.updateMany).toHaveBeenLastCalledWith({
+      where: { id: 'integration-b', leaseUntil: expect.any(Date) },
+      data: { leaseUntil: null },
+    });
+  });
+  it('releases the matching lease after a failure and permits the next cycle to recover', async () => {
+    const { tx, worker } = harness();
+    tx.transportIntegration.findMany.mockResolvedValue([integration]);
+    const schedule = vi
+      .spyOn(worker, 'schedule')
+      .mockRejectedValueOnce(new Error('temporary failure'))
+      .mockResolvedValue(undefined);
+    const importPage = vi
+      .spyOn(worker, 'importPage')
+      .mockResolvedValue(undefined);
+    const analyze = vi
+      .spyOn(worker, 'analyzePage')
+      .mockResolvedValue(undefined);
+    await expect(worker.tick()).rejects.toThrow('temporary failure');
+    expect(tx.transportIntegration.updateMany).toHaveBeenLastCalledWith({
+      where: { id: 'integration-a', leaseUntil: expect.any(Date) },
+      data: { leaseUntil: null },
+    });
+    await worker.tick();
+    expect(schedule).toHaveBeenCalledTimes(2);
+    expect(importPage).toHaveBeenCalledExactlyOnceWith(importJob(), settings);
+    expect(analyze).toHaveBeenCalledExactlyOnceWith('tenant-a', settings);
+    expect(tx.transportImport.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          companyId: 'tenant-a',
+          status: { in: ['QUEUED', 'RUNNING'] },
+        }),
+      }),
+    );
   });
 });

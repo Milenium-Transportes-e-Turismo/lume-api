@@ -5360,7 +5360,7 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
     expect(actor.isActive).toBe(true);
   });
 
-  it('permite encerramento com proposta ativa pela flag padrão e encerra conversa geral', async () => {
+  it('permite encerramento com proposta ativa pela flag padrão', async () => {
     const activeInbound = await signedWebhook(
       app,
       webhookPayload(
@@ -5425,7 +5425,9 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
       closedAt: expect.any(Date),
       version: activeConversation.version + 1,
     });
+  });
 
+  it('permite encerrar com orçamento atual recusado e histórico aprovado', async () => {
     const approvedHistoryInbound = await signedWebhook(
       app,
       webhookPayload(
@@ -5498,7 +5500,9 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
           requestStatus: 'rejected',
         }),
       );
+  });
 
+  it('encerra conversa geral com controle de versão e outbox', async () => {
     const generalInbound = await signedWebhook(
       app,
       webhookPayload(
@@ -5606,7 +5610,9 @@ describe('WhatsApp MVP HTTP E2E com PostgreSQL', () => {
         canSendReply: true,
       }),
     });
+  });
 
+  it('exige motivo para encerrar proposta recusada e registra auditoria', async () => {
     const rejectedInbound = await signedWebhook(
       app,
       webhookPayload(

@@ -186,7 +186,7 @@ instalável pelo catálogo de extensões dessa imagem. A adequação de PostGIS 
 é uma condição pendente de implantação. Nenhum dado, serviço ou ambiente foi
 alterado durante essa conferência.
 
-## Resultado da cobertura em 13/09/2026
+## Resultado histórico da cobertura em 13/09/2026
 
 A CI do candidato funcional falha em `npm run test:cov`, antes de build e E2E,
 embora os 1.538 testes unitários passem. A repetição na VPS confirmou 76,92% de
@@ -201,3 +201,37 @@ sintéticos: sete credenciais independentes de agentes, URL pública e prazos
 customizados chegam ao serviço API; a dependência de migração foi preservada.
 Nenhum serviço foi iniciado por essa verificação. Logs e resultados privados:
 `diagnostics/release-main-20260913`, fora do Git.
+
+
+## Validação para a janela autorizada de 14/09/2026
+
+A pendência de cobertura foi corrigida com testes de isolamento e concorrência
+na importação, agendamento, resumo por contrato e cadastro de clientes da
+roteirização. Os limites de cobertura foram mantidos: os 1.594 testes unitários
+passaram, com 80,49% de instruções, 82,14% de linhas, 85,56% de funções e
+70,56% de branches. O caso HTTP que reunia quatro cenários de encerramento foi
+separado em quatro testes independentes, preservando todas as verificações e o
+timeout de 30 segundos. A suíte WhatsApp completa passou com 83 testes; a suíte
+de Transportes passou com 16 testes, em PostgreSQL/PostGIS descartável.
+
+O ensaio com uma cópia protegida do banco de destino aplicou as 36 migrações em
+323 segundos. As dezenove tabelas de roteirização atingidas pela limpeza estavam
+vazias. Foram preservadas as contagens das tabelas anteriores, incluindo 701.938
+mensagens, 11.059 conversas e 30 solicitações de orçamento; as alterações de
+contagem em departamentos e no controle de migrações foram as esperadas. As
+verificações de relacionamentos de mensagens e orçamentos não encontraram
+referências ausentes ou entre tenants. A API candidata iniciou sobre essa cópia,
+com readiness aprovado e licença ativa, em rede isolada de provedores externos.
+
+As sete credenciais de agentes configuradas foram verificadas sem registrar
+segredos. A URL pública da API e os prazos de três horas para lembrete e mais uma
+hora para encerramento foram conferidos no Compose efetivo. A configuração
+personalizada da Milena é dado versionado do tenant: deve ser promovida pelo
+fluxo de instruções do agente, com auditoria, pois Git e migrations não copiam
+as instruções salvas no painel. Não copiar cadastros ou conversas de teste.
+
+Esses resultados são evidências de preparação, não confirmação da implantação.
+A validação final deve conferir o SHA efetivamente iniciado, o banco de produção,
+o backup com escritas suspensas e as verificações posteriores descritas acima.
+Os logs e backups permanecem em diretório operacional privado da instalação,
+fora dos repositórios. Nenhuma mensagem real de teste foi enviada.
