@@ -35,6 +35,27 @@ export function locationSearchText(value: string): string {
     .replace(/(?:,\s*|\s+)(?:brasil|brazil)\s*$/iu, '')
     .trim();
   const parts = text.split(',').map((part) => part.trim());
+  if (parts.length === 1) {
+    const normalized = text
+      .normalize('NFD')
+      .replace(/\p{M}/gu, '')
+      .toLowerCase();
+    const uf = text.match(/^(.*\S)[\s/]+([a-z]{2})$/iu);
+    if (uf && Object.values(states).includes(uf[2].toUpperCase())) {
+      return uf[1] + ', ' + uf[2].toUpperCase();
+    }
+    for (const state of Object.keys(states).sort(
+      (a, b) => b.length - a.length,
+    )) {
+      if (normalized.endsWith(' ' + state)) {
+        return (
+          text.slice(0, text.length - state.length).trim() +
+          ', ' +
+          states[state]
+        );
+      }
+    }
+  }
   if (parts.length > 1) {
     const state = parts
       .at(-1)!
@@ -88,4 +109,45 @@ export function hasLocationState(value: string): boolean {
   const text = locationSearchText(value);
   const state = text.match(/(?:,|\s|-)\s*([A-Z]{2})$/iu)?.[1]?.toUpperCase();
   return !!state && Object.values(states).includes(state);
+}
+
+// A locality is a city; venues and streets are not competing municipalities.
+export function matchingCities<
+  T extends {
+    id: string;
+    label: string;
+    layer?: string;
+    name?: string;
+    region?: string;
+    regionCode?: string;
+    localityId?: string;
+  },
+>(suggestions: readonly T[], value: string): T[] {
+  const query = locationIdentity(value);
+  const matches = suggestions.flatMap((item) => {
+    if (item.layer !== 'locality' || !item.name) return [];
+    const stateName = item.region
+      ?.normalize('NFD')
+      .replace(/\p{M}/gu, '')
+      .toLowerCase();
+    const uf =
+      (stateName && states[stateName]) || item.regionCode?.toUpperCase();
+    if (!uf || !Object.values(states).includes(uf)) return [];
+    const city = locationIdentity(item.name);
+    const fullName = stateName
+      ? locationIdentity(item.name + ' ' + stateName)
+      : '';
+    if (
+      query !== city &&
+      query !== city + ' ' + uf.toLowerCase() &&
+      query !== fullName
+    )
+      return [];
+    return [{ ...item, label: item.name + ', ' + uf + ', Brasil' }];
+  });
+  return [
+    ...new Map(
+      matches.map((item) => [locationIdentity(item.label), item]),
+    ).values(),
+  ];
 }

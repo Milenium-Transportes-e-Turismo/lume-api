@@ -1,4 +1,9 @@
 export interface RouteLocationSuggestion {
+  readonly layer?: string;
+  readonly name?: string;
+  readonly region?: string;
+  readonly regionCode?: string;
+  readonly localityId?: string;
   readonly id: string;
   readonly label: string;
   readonly lat: number;

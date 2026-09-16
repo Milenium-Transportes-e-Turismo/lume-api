@@ -9,6 +9,7 @@ import { PrismaService } from '../../database/prisma/prisma.service';
 
 import {
   hasLocationState,
+  matchingCities,
   locationIdentity,
   locationSearchText,
   sameLocation,
@@ -503,18 +504,23 @@ export class TourismIntakeReviewService {
         locationCandidates[field] = undefined;
       }
       if (
-        !candidate &&
         answered &&
         pending?.kind === 'location' &&
         pending.field === field &&
-        pending.phase === 'offline-details'
+        ['offline-details', 'details'].includes(pending.phase ?? '')
       ) {
         const stateAnswer = locationSearchText('Cidade, ' + input.userMessage);
         if (
           /^Cidade, [A-Z]{2}$/u.test(stateAnswer) &&
           hasLocationState(stateAnswer)
         ) {
-          candidate = String(pending.value) + ', ' + stateAnswer.split(', ')[1];
+          candidate =
+            locationSearchText(String(pending.value)).replace(
+              /[,\s]+[A-Z]{2}$/iu,
+              '',
+            ) +
+            ', ' +
+            stateAnswer.split(', ')[1];
           locationCandidates[field] = candidate;
         } else if (hasLocationState(input.userMessage)) {
           candidate = input.userMessage.trim();
@@ -733,9 +739,10 @@ export class TourismIntakeReviewService {
             .map((item) => [locationIdentity(item.label), item]),
         ).values(),
       ];
-      const exact = uniqueLabels.filter((item) =>
-        sameLocation(item.label, value),
-      );
+      const cities = matchingCities(uniqueLabels, value);
+      const exact = cities.length
+        ? cities
+        : uniqueLabels.filter((item) => sameLocation(item.label, value));
       if (exact.length === 1) {
         patch[field] = exact[0].label;
         state.locations = {
@@ -775,6 +782,15 @@ export class TourismIntakeReviewService {
         );
       }
       if (uniqueLabels.length > 1) {
+        // A complete clarification must not restart the same question forever.
+        // Confirmation preserves the city as customer-provided, not map-verified.
+        if (
+          fieldPending?.phase === 'details' &&
+          cities.length === 0 &&
+          hasLocationState(value)
+        ) {
+          return askWithoutRouting();
+        }
         return ask(
           { kind: 'location', field, value, phase: 'details' },
           'Encontrei mais de um local com esse nome. Qual é a cidade e o estado ' +

@@ -27,3 +27,9 @@ Palavras geradas que misturam letras latinas e outro alfabeto são conferidas an
 A proteção da resposta em português cobre também palavras inteiras em alfabetos não fornecidos pelo cliente. Mantém nomes presentes no contexto, acentos e emojis. A regra contra repetição de ida/volta só atua em coleta, nunca sobre um resumo apresentado. Isso impede que uma confirmação do resumo seja confundida com uma pergunta repetida de modalidade e substituída por observações.
 
 Resumos de turismo são formatados pela API a partir do orçamento corrente e do patch revisado, com uma informação por linha, rótulos em negrito do WhatsApp e confirmação separada. Datas civis são preservadas; horários informados usam America/Sao_Paulo. Tipo de viagem, vários veículos, respostas negativas e detalhes de trajeto permanecem explícitos. Não usa os dados de uma solicitação anterior nem transforma apresentação em confirmação. Testes reproduzem a resposta negativa à pergunta de observações, apresentação imediata do resumo e confirmação seguinte.
+
+## Identidade de municípios (16/09/2026)
+
+A busca preserva tipo, nome e estado estruturados do provedor. Na coleta de cidade, resultados do tipo locality com nome exato têm precedência sobre ruas e estabelecimentos. A UF é normalizada pelo nome completo do estado (inclusive quando o provedor abrevia Rondônia como R.). Municípios diferentes continuam exigindo esclarecimento. Após esclarecimento completo ainda inconclusivo, pede-se confirmação da cidade uma vez e mantém-se a validação técnica pendente, sem repetir a mesma pergunta nem afirmar que o mapa foi validado.
+
+A consulta normaliza cidade e UF antes de chamar o provedor: Porto Velho RO, Porto Velho/RO e Porto Velho Rondônia viram Porto Velho, RO. Nomes de cidades que também são estados, como São Paulo, permanecem intactos.

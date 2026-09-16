@@ -22,6 +22,10 @@ interface PeliasFeature {
     readonly coordinates?: readonly [number, number];
   };
   readonly properties?: {
+    readonly layer?: string;
+    readonly region?: string;
+    readonly region_a?: string;
+    readonly locality_gid?: string;
     readonly gid?: string;
     readonly label?: string;
     readonly name?: string;
@@ -126,6 +130,11 @@ export class HeigitPeliasGeocodingProvider
       if (seen.has(key)) continue;
       seen.add(key);
       items.push({
+        layer: feature.properties?.layer,
+        name: feature.properties?.name,
+        region: feature.properties?.region,
+        regionCode: feature.properties?.region_a,
+        localityId: feature.properties?.locality_gid,
         id:
           typeof feature.properties?.gid === 'string'
             ? feature.properties.gid

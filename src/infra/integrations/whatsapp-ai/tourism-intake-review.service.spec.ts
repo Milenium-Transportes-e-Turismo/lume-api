@@ -743,7 +743,15 @@ describe('location regression across persisted conversation turns', () => {
     );
     expect(second.message).not.toContain('Rua ');
     expect(second.extractedDataPatch.origin).toBeUndefined();
-    expect(second.message).toContain('mais de um local');
+    expect(second.message).toBe('A saída será de Uberlandia, MG?');
+    const confirmed = await service.review(
+      reply(second, 'sim'),
+      draft(),
+      fleet,
+      second.message,
+    );
+    expect(confirmed.extractedDataPatch.origin).toBe('Uberlandia, MG');
+    expect(confirmed.message).not.toContain('mais de um local');
   });
 
   it('accepts a corrected candidate in the same message as a rejection', async () => {
@@ -1223,4 +1231,78 @@ describe('September 12 attendance regression', () => {
     expect(result.summaryPresented).toBe(false);
     expect(result.customerDecision).toBe('undecided');
   });
+});
+
+describe('structured municipality identity', () => {
+  it.each([
+    ['Uberlândia', 'Minas Gerais', 'MG'],
+    ['Porto Velho', 'Rondônia', 'R.'],
+  ])(
+    'accepts %s without confusing venues with cities',
+    async (name, region, regionCode) => {
+      const { service, searchLocations } = setup();
+      searchLocations.mockResolvedValue([
+        {
+          id: 'city',
+          label: name + ', ' + regionCode + ', Brasil',
+          name,
+          region,
+          regionCode,
+          layer: 'locality',
+          lat: -10,
+          lng: -50,
+        },
+        {
+          id: 'shop',
+          label: name + ' Shopping, Brasil',
+          name: name + ' Shopping',
+          layer: 'venue',
+          lat: -10,
+          lng: -50,
+        },
+      ]);
+      const value = name === 'Porto Velho' ? name + ' RO' : name;
+      const result = await service.review(
+        { ...initial, userMessage: value },
+        draft({ origin: value }),
+        fleet,
+      );
+      expect(result.extractedDataPatch.origin).toBe(
+        name + ', ' + (region === 'Rondônia' ? 'RO' : 'MG') + ', Brasil',
+      );
+      expect(result.message).not.toContain('mais de um local');
+    },
+  );
+});
+
+it('recovers RO from a state-only model patch and preserves the destination city', async () => {
+  const { service, searchLocations } = setup();
+  searchLocations.mockResolvedValue([
+    { id: 'a', label: 'venue one', lat: 0, lng: 0 },
+    { id: 'b', label: 'venue two', lat: 0, lng: 0 },
+  ]);
+  const first = await service.review(
+    initial,
+    collecting('', { destination: 'Porto Velho RO' }),
+    fleet,
+  );
+  searchLocations.mockResolvedValue([
+    {
+      id: 'city',
+      name: 'Porto Velho',
+      region: 'Rondônia',
+      regionCode: 'R.',
+      layer: 'locality',
+      label: 'Porto Velho, R., Brasil',
+      lat: 0,
+      lng: 0,
+    },
+  ]);
+  const second = await service.review(
+    reply(first, 'RO'),
+    collecting('', { destination: 'RO' }),
+    fleet,
+    first.message,
+  );
+  expect(second.extractedDataPatch.destination).toBe('Porto Velho, RO, Brasil');
 });
