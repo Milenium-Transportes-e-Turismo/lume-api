@@ -871,6 +871,7 @@ model Company {
   whatsappChannelEvents                    WhatsAppChannelEvent[]
   serviceSessionEvents                     ServiceSessionEvent[]
   customerProfileSuggestions               CustomerProfileSuggestion[]
+  navigationFavorites                      UserNavigationFavorite[]
 
   @@map("companies")
 }
@@ -989,6 +990,7 @@ model User {
   whatsappChannelEvents                    WhatsAppChannelEvent[]                    @relation("WhatsAppChannelEventActorUser")
   serviceSessionEvents                     ServiceSessionEvent[]                     @relation("ServiceSessionEventActorUser")
   reviewedCustomerProfileSuggestions       CustomerProfileSuggestion[]               @relation("CustomerProfileSuggestionReviewer")
+  navigationFavorites                      UserNavigationFavorite[]
 
   @@unique([id, companyId])
   @@index([companyId])
@@ -999,6 +1001,21 @@ model User {
   @@index([departments], type: Gin)
   @@index([permissionCodes], type: Gin)
   @@map("users")
+}
+
+model UserNavigationFavorite {
+  id            String   @id @default(uuid()) @db.Uuid
+  companyId     String   @map("company_id") @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  navigationKey String   @map("navigation_key") @db.VarChar(160)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId, companyId], references: [id, companyId], onDelete: Cascade)
+
+  @@unique([companyId, userId, navigationKey])
+  @@index([companyId, userId, createdAt, id])
+  @@map("user_navigation_favorites")
 }
 
 model RoutingCompany {

@@ -30,6 +30,7 @@ import { CommercialModule } from './modules/commercial/commercial.module';
 import { OperationalTripsModule } from './modules/trips/operational-trips.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { PreAdmissionModule } from './modules/pre-admission/pre-admission.module';
+import { NavigationModule } from './modules/navigation/navigation.module';
 
 @Module({
   imports: [
@@ -72,6 +73,7 @@ import { PreAdmissionModule } from './modules/pre-admission/pre-admission.module
     OperationalTripsModule,
     IdentityModule,
     PreAdmissionModule,
+    NavigationModule,
     TransportImportModule,
     TransportCatalogModule,
   ],
