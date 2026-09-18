@@ -4,14 +4,17 @@
 
 ### Alterado
 
-- API trata navegação e favoritos por empresa e usuário autenticado.
-- Catálogo de navegação centralizado no módulo de navegação.
+- A API passou a tratar navegação e favoritos dentro da empresa e do usuário autenticado.
+- O catálogo central (`navigation-favorites.catalog.ts`) define quais itens podem ser favoritados e aplica as regras de permissão.
 
 ### Adicionado
 
-- Migration, DTO, controller e service de favoritos.
-- Unicidade por `companyId`, `userId` e `navigationKey`.
-- Testes do service.
+- `UserNavigationFavorite` no Prisma e migration `user_navigation_favorites`: guarda o favorito, a empresa, o usuário e a data.
+- `NavigationFavoriteDto`: valida a chave recebida pela API.
+- `NavigationFavoritesController`: expõe listar, adicionar e remover em `navigation/favorites`.
+- `NavigationFavoritesService`: aplica autenticação, tenant, permissões e persistência via Prisma.
+- Chave única por `companyId`, `userId` e `navigationKey`, evitando duplicidade.
+- Testes unitários do service para listagem, inclusão, remoção e rejeição de itens inválidos.
 
 ## Evidência atual
 
