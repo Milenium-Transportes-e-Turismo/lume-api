@@ -567,4 +567,24 @@ contagem e paginação, inclusive na seleção de contratos existentes.
 
 A confirmação do resumo encaminha à fila humana do Comercial. Durante o atendimento, os agentes silenciosos podem sugerir uma nova coleta ou um departamento no painel, sujeitos à decisão do atendente. A política de inatividade aguarda 3 horas para um lembrete contextual e mais 1 hora após o envio para encerrar, somente quando a pendência é do cliente. Veja [o fluxo e o contrato de sugestões internas](docs/whatsapp-human-assistance.md).
 
+## PR atual: navegação e favoritos
+
+### Alterado
+
+- A API passa a tratar a navegação e os favoritos por empresa e usuário autenticado.
+- O catálogo de navegação fica centralizado no módulo de navegação.
+
+### Adicionado
+
+- Migration, DTO, controller, service e testes para favoritos de navegação.
+- Chave única por `companyId`, `userId` e `navigationKey`.
+
+### Fluxo de validação
+
+- Branch de trabalho: `feat/gestor-evolution`.
+- Destino da PR: `develop`.
+- Teste direcionado da API: 5/5.
+- O SBX usa banco restaurado da produção em volume separado e recebe as migrations da `develop` antes do teste.
+- A alteração de permissão no Dockerfile feita no SBX é operacional e não faz parte desta PR.
+
 Preparação da promoção atual: [develop para main](docs/release-develop-main.md).
